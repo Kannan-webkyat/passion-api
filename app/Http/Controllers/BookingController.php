@@ -58,18 +58,24 @@ class BookingController extends Controller
             'last_name'        => 'required|string|max:255',
             'email'            => 'nullable|email',
             'phone'            => 'nullable|string',
+            'identity_type'    => 'nullable|string|max:255',
+            'identity_image'   => 'nullable|string', // Can be base64 or path
+            'city'             => 'nullable|string|max:255',
+            'country'          => 'nullable|string|max:255',
             'adults_count'     => 'required|integer|min:1',
             'children_count'   => 'nullable|integer|min:0',
             'infants_count'    => 'nullable|integer|min:0',
             'extra_beds_count' => 'nullable|integer|min:0',
             'check_in'         => 'required|date',
             'check_out'        => 'required|date|after:check_in',
+            'estimated_arrival_time' => 'nullable|string',
             'total_price'      => 'required|numeric|min:0',
             'payment_status'   => 'nullable|in:pending,partial,paid,refunded',
             'payment_method'   => 'nullable|string',
             'deposit_amount'   => 'nullable|numeric|min:0',
             'status'           => 'nullable|in:pending,confirmed,checked_in,checked_out,cancelled',
             'booking_source'   => 'nullable|string',
+            'source_reference' => 'nullable|string|max:255',
             'notes'            => 'nullable|string',
             'group_name'       => 'nullable|string|max:255', // For group master
         ]);
@@ -121,6 +127,23 @@ class BookingController extends Controller
             $bookingGroupId = $group->id;
         }
 
+        // Handle Identity Image
+        $imagePath = null;
+        if ($request->has('identity_image')) {
+            $imageData = $request->input('identity_image');
+            if (str_starts_with($imageData, 'data:image')) {
+                // Base64 from Camera
+                $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
+                $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
+                $fileName = 'guest_id_' . time() . '.' . $format;
+                \Storage::disk('public')->put('identities/' . $fileName, $data);
+                $imagePath = 'identities/' . $fileName;
+            } else if ($request->hasFile('identity_image')) {
+                // Direct File Upload
+                $imagePath = $request->file('identity_image')->store('identities', 'public');
+            }
+        }
+
         $bookings = [];
         $roomOccupancy = $request->input('room_occupancy', []);
 
@@ -132,6 +155,7 @@ class BookingController extends Controller
             $bookingData['room_id'] = $roomId;
             $bookingData['created_by'] = $creatorId;
             $bookingData['booking_group_id'] = $bookingGroupId;
+            $bookingData['identity_image'] = $imagePath;
 
             // Apply individual room occupancy if provided
             if (isset($roomOccupancy[$roomId])) {
