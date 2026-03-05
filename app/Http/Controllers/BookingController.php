@@ -117,7 +117,7 @@ class BookingController extends Controller
         $bookingGroupId = null;
         if ($isGroup) {
             $group = BookingGroup::create([
-                'name'           => $request->input('group_name', "Group - " . $validated['last_name']),
+                'name'           => $request->input('group_name') ?: ("Group - " . $validated['first_name'] . ' ' . $validated['last_name']),
                 'contact_person' => $validated['first_name'] . ' ' . $validated['last_name'],
                 'phone'          => $validated['phone'],
                 'email'          => $validated['email'],
