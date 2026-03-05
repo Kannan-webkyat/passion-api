@@ -30,4 +30,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('bookings/chart',   [BookingController::class, 'chart']);
     Route::get('bookings/summary', [BookingController::class, 'summary']);
     Route::apiResource('bookings', BookingController::class);
+
+    // Inventory Module
+    Route::get('inventory/stats',  [\App\Http\Controllers\InventoryController::class, 'stats']);
+    Route::post('inventory/issue', [\App\Http\Controllers\InventoryController::class, 'issue']);
+    Route::apiResource('inventory/items',      \App\Http\Controllers\InventoryController::class);
+    Route::apiResource('inventory/categories', \App\Http\Controllers\InventoryCategoryController::class);
+    Route::apiResource('inventory/vendors',    \App\Http\Controllers\VendorController::class);
+    Route::apiResource('inventory/purchase-orders', \App\Http\Controllers\PurchaseOrderController::class);
+    Route::post('inventory/purchase-orders/{purchaseOrder}/receive', [\App\Http\Controllers\PurchaseOrderController::class, 'receive']);
+    Route::post('inventory/purchase-orders/{purchaseOrder}/pay', [\App\Http\Controllers\PurchaseOrderController::class, 'pay']);
+    Route::apiResource('payment-methods', \App\Http\Controllers\PaymentMethodController::class);
+    Route::get('inventory/movements', [\App\Http\Controllers\StockMovementController::class, 'index']);
 });
