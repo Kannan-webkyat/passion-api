@@ -6,7 +6,14 @@ use Illuminate\Database\Eloquent\Model;
 
 class Vendor extends Model
 {
-    protected $fillable = ['name', 'contact_person', 'phone', 'email', 'address'];
+    protected $fillable = [
+        'name', 'contact_person', 'phone', 'email', 'address',
+        'gstin', 'pan', 'state', 'is_registered_dealer'
+    ];
+
+    protected $casts = [
+        'is_registered_dealer' => 'boolean',
+    ];
 
     public function items()
     {

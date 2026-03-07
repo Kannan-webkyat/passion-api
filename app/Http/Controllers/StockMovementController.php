@@ -12,7 +12,7 @@ class StockMovementController extends Controller
         return response()->json(
             InventoryTransaction::with('item')
                 ->latest()
-                ->paginate(50)
+                ->get()
         );
     }
 }

@@ -9,7 +9,7 @@ class InventoryCategoryController extends Controller
 {
     public function index()
     {
-        return response()->json(InventoryCategory::orderBy('name')->get());
+        return response()->json(InventoryCategory::with('parent')->orderBy('name')->get());
     }
 
     public function store(Request $request)
@@ -17,29 +17,31 @@ class InventoryCategoryController extends Controller
         $validated = $request->validate([
             'name'        => 'required|string|max:255|unique:inventory_categories,name',
             'description' => 'nullable|string',
+            'parent_id'   => 'nullable|exists:inventory_categories,id',
         ]);
         $cat = InventoryCategory::create($validated);
         return response()->json($cat, 201);
     }
 
-    public function show(InventoryCategory $inventoryCategory)
+    public function show(InventoryCategory $category)
     {
-        return response()->json($inventoryCategory->load('items'));
+        return response()->json($category->load('items'));
     }
 
-    public function update(Request $request, InventoryCategory $inventoryCategory)
+    public function update(Request $request, InventoryCategory $category)
     {
         $validated = $request->validate([
-            'name'        => 'required|string|max:255|unique:inventory_categories,name,' . $inventoryCategory->id,
+            'name'        => 'required|string|max:255|unique:inventory_categories,name,' . $category->id,
             'description' => 'nullable|string',
+            'parent_id'   => 'nullable|exists:inventory_categories,id',
         ]);
-        $inventoryCategory->update($validated);
-        return response()->json($inventoryCategory);
+        $category->update($validated);
+        return response()->json($category);
     }
 
-    public function destroy(InventoryCategory $inventoryCategory)
+    public function destroy(InventoryCategory $category)
     {
-        $inventoryCategory->delete();
+        $category->delete();
         return response()->json(null, 204);
     }
 }

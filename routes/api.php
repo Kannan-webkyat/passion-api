@@ -36,7 +36,14 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('inventory/issue', [\App\Http\Controllers\InventoryController::class, 'issue']);
     Route::apiResource('inventory/items',      \App\Http\Controllers\InventoryController::class);
     Route::apiResource('inventory/categories', \App\Http\Controllers\InventoryCategoryController::class);
+    Route::apiResource('inventory/uoms',       \App\Http\Controllers\InventoryUomController::class);
+    Route::apiResource('inventory/taxes',      \App\Http\Controllers\InventoryTaxController::class);
     Route::apiResource('inventory/vendors',    \App\Http\Controllers\VendorController::class);
+    Route::apiResource('inventory/locations',  \App\Http\Controllers\InventoryLocationController::class);
+    Route::apiResource('inventory/store-requests', \App\Http\Controllers\StoreRequestController::class);
+    Route::post('inventory/store-requests/{storeRequest}/approve', [\App\Http\Controllers\StoreRequestController::class, 'approve']);
+    Route::post('inventory/store-requests/{storeRequest}/issue',   [\App\Http\Controllers\StoreRequestController::class, 'issue']);
+
     Route::apiResource('inventory/purchase-orders', \App\Http\Controllers\PurchaseOrderController::class);
     Route::post('inventory/purchase-orders/{purchaseOrder}/receive', [\App\Http\Controllers\PurchaseOrderController::class, 'receive']);
     Route::post('inventory/purchase-orders/{purchaseOrder}/pay', [\App\Http\Controllers\PurchaseOrderController::class, 'pay']);
