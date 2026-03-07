@@ -194,6 +194,7 @@ class BookingController extends Controller
             'phone'            => 'nullable|string',
             'adults_count'     => 'integer|min:1',
             'children_count'   => 'nullable|integer|min:0',
+            'infants_count'    => 'nullable|integer|min:0',
             'extra_beds_count' => 'nullable|integer|min:0',
             'check_in'         => 'date',
             'check_out'        => 'date|after:check_in',
