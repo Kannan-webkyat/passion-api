@@ -230,6 +230,139 @@ class BookingController extends Controller
         return response()->json($booking->load(['room.roomType', 'creator']));
     }
 
+    // ── Early Check-In ────────────────────────────────────────────────────────
+    public function earlyCheckin(Request $request, Booking $booking)
+    {
+        $request->validate([
+            'time' => 'required|date_format:H:i',
+        ]);
+
+        $time       = $request->input('time');
+        $roomId     = $booking->room_id;
+        $checkInDay = Carbon::parse($booking->check_in)->toDateString();
+
+        // Conflict: a prior booking for this room is still checked_in on the same day
+        // AND its late_checkout_time would overlap with the requested early check-in time.
+        // (A booking that is already checked_out is NOT a conflict.)
+        $conflict = Booking::where('room_id', $roomId)
+            ->where('id', '!=', $booking->id)
+            ->where('status', 'checked_in')           // Only block if guest is still in the room
+            ->whereDate('check_out', $checkInDay)
+            ->where(function ($q) use ($time) {
+                // Blocked if: no explicit late_checkout (assume standard noon) OR late_checkout >= requested early CI
+                $q->whereNull('late_checkout_time')
+                  ->orWhereTime('late_checkout_time', '>=', $time);
+            })
+            ->exists();
+
+        if ($conflict) {
+            return response()->json([
+                'message' => 'Early check-in conflicts with a previous guest still occupying the room.',
+            ], 422);
+        }
+
+        $userId   = $request->user()?->id;
+        $auditMsg = "[Early CI: {$time} by User #{$userId} on " . now()->format('Y-m-d H:i') . "]";
+        $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+        $booking->update([
+            'early_checkin_time' => $time,
+            'notes'              => $notes,
+        ]);
+
+        return response()->json($booking->load(['room.roomType', 'creator', 'bookingGroup']));
+    }
+
+    // ── Late Checkout ─────────────────────────────────────────────────────────
+    public function lateCheckout(Request $request, Booking $booking)
+    {
+        $request->validate([
+            'time' => 'required|date_format:H:i',
+        ]);
+
+        $time         = $request->input('time');
+        $roomId       = $booking->room_id;
+        $checkOutDay  = Carbon::parse($booking->check_out)->toDateString();
+
+        // Conflict: another booking starts on this room the same checkout day
+        // and its early_checkin_time (or standard noon) is <= the requested late time
+        $conflict = Booking::where('room_id', $roomId)
+            ->where('id', '!=', $booking->id)
+            ->where('status', '!=', 'cancelled')
+            ->whereDate('check_in', $checkOutDay)
+            ->where(function ($q) use ($time) {
+                $q->whereNull('early_checkin_time')
+                  ->orWhereTime('early_checkin_time', '<=', $time);
+            })
+            ->exists();
+
+        if ($conflict) {
+            return response()->json([
+                'message' => 'Late checkout conflicts with the next guest\'s check-in on the same day.',
+            ], 422);
+        }
+
+        $userId   = $request->user()?->id;
+        $auditMsg = "[Late CO: {$time} by User #{$userId} on " . now()->format('Y-m-d H:i') . "]";
+        $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+        $booking->update([
+            'late_checkout_time' => $time,
+            'notes'              => $notes,
+        ]);
+
+        return response()->json($booking->load(['room.roomType', 'creator', 'bookingGroup']));
+    }
+
+    // ── Reservation Extension ─────────────────────────────────────────────────
+    public function extendReservation(Request $request, Booking $booking)
+    {
+        $request->validate([
+            'new_check_out' => 'required|date|after:' . $booking->check_out,
+        ]);
+
+        $oldCheckOut = $booking->check_out;
+        $newCheckOut = $request->input('new_check_out');
+        $roomId      = $booking->room_id;
+
+        // Overlap check for the extension gap [current check_out → new check_out]
+        $overlap = Booking::where('room_id', $roomId)
+            ->where('id', '!=', $booking->id)
+            ->where('status', '!=', 'cancelled')
+            ->where('check_in', '<', $newCheckOut)
+            ->where('check_out', '>', $oldCheckOut)
+            ->exists();
+
+        if ($overlap) {
+            return response()->json([
+                'message' => 'Room is already reserved for the selected extension period.',
+            ], 422);
+        }
+
+        // Recalculate total price: add nightly rate × additional nights
+        $room = $booking->room()->with('roomType')->first();
+        $extraNights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
+        $extraCost   = 0;
+        if ($room?->roomType) {
+            $rt        = $room->roomType;
+            $extraBeds = $booking->extra_beds_count ?? 0;
+            $extraCost = ($rt->base_price * $extraNights) + ($rt->extra_bed_cost * $extraBeds * $extraNights);
+        }
+        $newTotalPrice = (float) $booking->total_price + $extraCost;
+
+        $userId   = $request->user()?->id;
+        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut} by User #{$userId} on " . now()->format('Y-m-d H:i') . "]";
+        $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+        $booking->update([
+            'check_out'   => $newCheckOut,
+            'total_price' => $newTotalPrice,
+            'notes'       => $notes,
+        ]);
+
+        return response()->json($booking->load(['room.roomType', 'creator', 'bookingGroup']));
+    }
+
     public function destroy(Booking $booking)
     {
         $booking->room->update(['status' => 'available']);

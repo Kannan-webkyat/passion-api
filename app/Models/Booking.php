@@ -22,6 +22,8 @@ class Booking extends Model
         'extra_beds_count',
         'check_in',
         'check_out',
+        'early_checkin_time',
+        'late_checkout_time',
         'estimated_arrival_time',
         'total_price',
         'payment_status',
