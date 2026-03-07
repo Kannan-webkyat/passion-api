@@ -29,6 +29,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Bookings & Room Chart
     Route::get('bookings/chart',   [BookingController::class, 'chart']);
     Route::get('bookings/summary', [BookingController::class, 'summary']);
+    Route::post('bookings/{booking}/early-checkin',  [BookingController::class, 'earlyCheckin']);
+    Route::post('bookings/{booking}/late-checkout',  [BookingController::class, 'lateCheckout']);
+    Route::post('bookings/{booking}/extend',         [BookingController::class, 'extendReservation']);
     Route::apiResource('bookings', BookingController::class);
 
     // Inventory Module
