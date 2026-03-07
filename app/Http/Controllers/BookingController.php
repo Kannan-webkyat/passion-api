@@ -59,8 +59,10 @@ class BookingController extends Controller
             'last_name'        => 'required|string|max:255',
             'email'            => 'nullable|email',
             'phone'            => 'nullable|string',
-            'identity_type'    => 'nullable|string|max:255',
-            'identity_image'   => 'nullable|string', // Can be base64 or path
+            'guest_identity_types' => 'nullable|array',
+            'guest_identity_types.*' => 'nullable|string|max:255',
+            'guest_identities' => 'nullable|array',
+            'guest_identities.*' => 'nullable|string', // Base64 or paths
             'city'             => 'nullable|string|max:255',
             'country'          => 'nullable|string|max:255',
             'adults_count'     => 'required|integer|min:1',
@@ -128,20 +130,27 @@ class BookingController extends Controller
             $bookingGroupId = $group->id;
         }
 
-        // Handle Identity Image
-        $imagePath = null;
-        if ($request->has('identity_image')) {
-            $imageData = $request->input('identity_image');
-            if (str_starts_with($imageData, 'data:image')) {
-                // Base64 from Camera
-                $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
-                $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
-                $fileName = 'guest_id_' . time() . '.' . $format;
-                \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
-                $imagePath = 'identities/' . $fileName;
-            } else if ($request->hasFile('identity_image')) {
-                // Direct File Upload
-                $imagePath = $request->file('identity_image')->store('identities', 'public');
+        // Handle Identity Images
+        $imagePaths = [];
+        if ($request->has('guest_identities')) {
+            $images = $request->input('guest_identities') ?: [];
+            foreach ($images as $index => $imageData) {
+                if (!$imageData) continue;
+                
+                if (str_starts_with($imageData, 'data:image')) {
+                    // Base64 from Camera or Upload
+                    $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
+                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
+                    $fileName = 'guest_id_' . time() . '_' . $index . '.' . $format;
+                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
+                    $imagePaths[] = 'identities/' . $fileName;
+                } else if ($request->hasFile("guest_identities.{$index}")) {
+                    // Direct File Upload (if sent as multipart/form-data)
+                    $imagePaths[] = $request->file("guest_identities.{$index}")->store('identities', 'public');
+                } else {
+                    // Already uploaded path
+                    $imagePaths[] = $imageData;
+                }
             }
         }
 
@@ -156,7 +165,7 @@ class BookingController extends Controller
             $bookingData['room_id'] = $roomId;
             $bookingData['created_by'] = $creatorId;
             $bookingData['booking_group_id'] = $bookingGroupId;
-            $bookingData['identity_image'] = $imagePath;
+            $bookingData['guest_identities'] = $imagePaths;
 
             // Apply individual room occupancy if provided
             if (isset($roomOccupancy[$roomId])) {
@@ -205,6 +214,10 @@ class BookingController extends Controller
             'status'           => 'in:pending,confirmed,checked_in,checked_out,cancelled',
             'booking_source'   => 'nullable|string',
             'notes'            => 'nullable|string',
+            'guest_identity_types' => 'nullable|array',
+            'guest_identity_types.*' => 'nullable|string|max:255',
+            'guest_identities' => 'nullable|array',
+            'guest_identities.*' => 'nullable|string', // Base64 or paths
         ]);
 
         // Checkout validation: must be paid
@@ -213,6 +226,33 @@ class BookingController extends Controller
             if ($currentPaymentStatus !== 'paid') {
                 return response()->json(['message' => 'Checkout not allowed until payment is fully paid'], 422);
             }
+        }
+
+        // Handle Identity Images (Update/Append)
+        if ($request->has('guest_identities')) {
+            $existingIdentities = $booking->guest_identities ?: [];
+            $incomingImages = $request->input('guest_identities') ?: [];
+            $newPaths = [];
+
+            foreach ($incomingImages as $index => $imageData) {
+                if (!$imageData) continue;
+                
+                if (str_starts_with($imageData, 'data:image')) {
+                    // New Base64 from Camera or Upload
+                    $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
+                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
+                    $fileName = 'guest_id_' . time() . '_' . $index . '.' . $format;
+                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
+                    $newPaths[] = 'identities/' . $fileName;
+                } else if ($request->hasFile("guest_identities.{$index}")) {
+                    // New Direct File Upload
+                    $newPaths[] = $request->file("guest_identities.{$index}")->store('identities', 'public');
+                } else {
+                    // Retain existing image path
+                    $newPaths[] = $imageData;
+                }
+            }
+            $validated['guest_identities'] = $newPaths;
         }
 
         $booking->update($validated);

@@ -12,8 +12,8 @@ class Booking extends Model
         'last_name',
         'email',
         'phone',
-        'identity_type',
-        'identity_image',
+        'guest_identity_types',
+        'guest_identities',
         'city',
         'country',
         'adults_count',
@@ -60,4 +60,9 @@ class Booking extends Model
 
     // Appended attributes
     protected $appends = ['guest_name'];
+
+    protected $casts = [
+        'guest_identities' => 'array',
+        'guest_identity_types' => 'array',
+    ];
 }
