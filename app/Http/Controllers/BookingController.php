@@ -43,6 +43,7 @@ class BookingController extends Controller
             'occupied'       => Room::where('status', 'occupied')->count(),
             'maintenance'    => Room::where('status', 'maintenance')->count(),
             'dirty'          => Room::where('status', 'dirty')->count(),
+            'cleaning'       => Room::where('status', 'cleaning')->count(),
             'checkins_today' => Booking::whereDate('check_in',  $today)->whereIn('status', ['confirmed','checked_in'])->count(),
             'checkouts_today'=> Booking::whereDate('check_out', $today)->whereIn('status', ['checked_in','checked_out'])->count(),
         ]);
@@ -117,7 +118,7 @@ class BookingController extends Controller
         $bookingGroupId = null;
         if ($isGroup) {
             $group = BookingGroup::create([
-                'name'           => $request->input('group_name', "Group - " . $validated['last_name']),
+                'name'           => $request->input('group_name') ?: ("Group - " . $validated['first_name'] . ' ' . $validated['last_name']),
                 'contact_person' => $validated['first_name'] . ' ' . $validated['last_name'],
                 'phone'          => $validated['phone'],
                 'email'          => $validated['email'],
@@ -136,7 +137,7 @@ class BookingController extends Controller
                 $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
                 $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
                 $fileName = 'guest_id_' . time() . '.' . $format;
-                \Storage::disk('public')->put('identities/' . $fileName, $data);
+                \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
                 $imagePath = 'identities/' . $fileName;
             } else if ($request->hasFile('identity_image')) {
                 // Direct File Upload
@@ -204,6 +205,14 @@ class BookingController extends Controller
             'booking_source'   => 'nullable|string',
             'notes'            => 'nullable|string',
         ]);
+
+        // Checkout validation: must be paid
+        if (isset($validated['status']) && $validated['status'] === 'checked_out') {
+            $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
+            if ($currentPaymentStatus !== 'paid') {
+                return response()->json(['message' => 'Checkout not allowed until payment is fully paid'], 422);
+            }
+        }
 
         $booking->update($validated);
 
