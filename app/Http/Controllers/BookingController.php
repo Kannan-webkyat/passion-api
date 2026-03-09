@@ -20,7 +20,7 @@ class BookingController extends Controller
         $start = Carbon::parse($request->query('start', Carbon::today()));
         $end   = Carbon::parse($request->query('end', Carbon::today()->addDays(6)));
 
-        $rooms = Room::with(['roomType', 'bookings' => function ($q) use ($start, $end) {
+        $rooms = Room::with(['roomType.tax', 'bookings' => function ($q) use ($start, $end) {
             $q->where('check_out', '>=', $start)
               ->where('check_in',  '<=', $end)
               ->whereNotIn('status', ['cancelled']);
@@ -231,7 +231,7 @@ class BookingController extends Controller
                 Room::findOrFail($roomId)->update(['status' => 'occupied']);
             }
             
-            $bookings[] = $booking->load(['room.roomType', 'creator', 'bookingGroup']);
+            $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
         }
 
         return response()->json($isGroup ? $bookings : $bookings[0], 201);
@@ -239,7 +239,7 @@ class BookingController extends Controller
 
     public function show(Booking $booking)
     {
-        return $booking->load(['room.roomType', 'creator', 'bookingGroup']);
+        return $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
     }
 
     public function update(Request $request, Booking $booking)
@@ -347,7 +347,7 @@ class BookingController extends Controller
             $booking->room->update(['status' => $roomStatus]);
         }
 
-        return response()->json($booking->load(['room.roomType', 'creator']));
+        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
     }
 
     // ── Early Check-In ────────────────────────────────────────────────────────
@@ -390,7 +390,7 @@ class BookingController extends Controller
             'notes'              => $notes,
         ]);
 
-        return response()->json($booking->load(['room.roomType', 'creator', 'bookingGroup']));
+        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
     }
 
     // ── Late Checkout ─────────────────────────────────────────────────────────
@@ -431,7 +431,7 @@ class BookingController extends Controller
             'notes'              => $notes,
         ]);
 
-        return response()->json($booking->load(['room.roomType', 'creator', 'bookingGroup']));
+        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
     }
 
     // ── Reservation Extension ─────────────────────────────────────────────────
@@ -460,7 +460,7 @@ class BookingController extends Controller
         }
 
         // Recalculate total price: add nightly rate × additional nights
-        $room = $booking->room()->with('roomType')->first();
+        $room = $booking->room()->with('roomType.tax')->first();
         $extraNights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
         $extraCost   = 0;
         if ($room?->roomType) {
@@ -477,6 +477,9 @@ class BookingController extends Controller
             $baseNightCost += $breakfastCost;
             
             $extraCost = $baseNightCost;
+            if ($rt->tax) {
+                $extraCost += $extraCost * ($rt->tax->rate / 100);
+            }
         }
         $newTotalPrice = (float) $booking->total_price + $extraCost;
 
@@ -490,7 +493,7 @@ class BookingController extends Controller
             'notes'       => $notes,
         ]);
 
-        return response()->json($booking->load(['room.roomType', 'creator', 'bookingGroup']));
+        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
     }
 
     public function destroy(Booking $booking)
