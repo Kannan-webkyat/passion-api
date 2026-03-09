@@ -10,10 +10,15 @@ class StoreRequest extends Model
     use HasFactory;
 
     protected $fillable = [
-        'request_number', 'from_location_id', 'to_location_id',
+        'request_number', 'from_location_id', 'to_location_id', 'department_id', 'required_date',
         'requested_by', 'approved_by', 'status', 'notes',
         'requested_at', 'approved_at', 'issued_at'
     ];
+
+    public function department()
+    {
+        return $this->belongsTo(Department::class);
+    }
 
     public function fromLocation()
     {

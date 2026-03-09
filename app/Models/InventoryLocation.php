@@ -9,7 +9,12 @@ class InventoryLocation extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['name', 'type', 'is_active'];
+    protected $fillable = ['name', 'type', 'is_active', 'department_id'];
+
+    public function department()
+    {
+        return $this->belongsTo(Department::class);
+    }
 
     public function items()
     {

@@ -19,12 +19,14 @@ class RolePermissionSeeder extends Seeder
         $permissions = [
             'manage-rooms',
             'view-rooms',
+            'reservation',
             'manage-inventory',
             'manage-restaurant',
             'manage-bar',
             'view-reports',
             'manage-users',
             'manage-settings',
+            'create-requisition',
         ];
 
         foreach ($permissions as $permission) {
@@ -36,15 +38,18 @@ class RolePermissionSeeder extends Seeder
         $admin->syncPermissions(Permission::all());
 
         $receptionist = Role::firstOrCreate(['name' => 'Receptionist']);
-        $receptionist->syncPermissions(['manage-rooms', 'view-rooms']);
+        $receptionist->syncPermissions(['manage-rooms', 'view-rooms', 'reservation', 'create-requisition']);
 
         $inventoryManager = Role::firstOrCreate(['name' => 'Inventory Manager']);
         $inventoryManager->syncPermissions(['manage-inventory']);
 
         $restaurantStaff = Role::firstOrCreate(['name' => 'Restaurant Staff']);
-        $restaurantStaff->syncPermissions(['manage-restaurant']);
+        $restaurantStaff->syncPermissions(['manage-restaurant', 'create-requisition']);
 
         $barStaff = Role::firstOrCreate(['name' => 'Bar Staff']);
-        $barStaff->syncPermissions(['manage-bar']);
+        $barStaff->syncPermissions(['manage-bar', 'create-requisition']);
+
+        $kitchenStaff = Role::firstOrCreate(['name' => 'Kitchen Staff']);
+        $kitchenStaff->syncPermissions(['create-requisition']);
     }
 }

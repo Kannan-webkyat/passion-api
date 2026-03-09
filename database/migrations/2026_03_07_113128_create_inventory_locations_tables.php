@@ -14,7 +14,7 @@ return new class extends Migration
         Schema::create('inventory_locations', function (Blueprint $table) {
             $table->id();
             $table->string('name')->unique();
-            $table->string('type')->default('department'); // main_store, department, satellite
+            $table->string('type')->default('sub_store'); // main_store, sub_store, satellite
             $table->boolean('is_active')->default(true);
             $table->timestamps();
         });

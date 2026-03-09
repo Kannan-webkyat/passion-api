@@ -11,11 +11,11 @@ class InventoryLocationSeeder extends Seeder
     {
         $locations = [
             ['name' => 'Main Store',    'type' => 'main_store'],
-            ['name' => 'Kitchen Store', 'type' => 'department'],
-            ['name' => 'Bar Store',     'type' => 'department'],
-            ['name' => 'HK Store',      'type' => 'department'],
-            ['name' => 'Front Office',  'type' => 'department'],
-            ['name' => 'Laundry',       'type' => 'department'],
+            ['name' => 'Kitchen Store', 'type' => 'sub_store'],
+            ['name' => 'Bar Store',     'type' => 'sub_store'],
+            ['name' => 'HK Store',      'type' => 'sub_store'],
+            ['name' => 'Front Office',  'type' => 'sub_store'],
+            ['name' => 'Laundry',       'type' => 'sub_store'],
         ];
 
         foreach ($locations as $loc) {

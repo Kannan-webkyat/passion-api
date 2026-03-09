@@ -118,7 +118,7 @@ class InventoryController extends Controller
 
         $totalValue      = $items->sum(fn($i) => $i->current_stock * $i->cost_price);
         $lowStockCount   = $items->filter(fn($i) => $i->current_stock <= $i->reorder_level)->count();
-        $recentTx        = InventoryTransaction::with('item')->latest()->take(10)->get();
+        $recentTx        = InventoryTransaction::with(['item', 'location'])->latest()->take(10)->get();
 
         return response()->json([
             'total_items'         => $items->count(),
@@ -131,14 +131,15 @@ class InventoryController extends Controller
     public function issue(Request $request)
     {
         $validated = $request->validate([
-            'item_id'     => 'required|exists:inventory_items,id',
-            'location_id' => 'required|exists:inventory_locations,id',
-            'quantity'    => 'required|numeric|min:0.01',
-            'department'  => 'required|string',
-            'notes'       => 'nullable|string',
+            'item_id'       => 'required|exists:inventory_items,id',
+            'location_id'   => 'required|exists:inventory_locations,id',
+            'quantity'      => 'required|numeric|min:0.01',
+            'department_id' => 'required|exists:departments,id',
+            'notes'         => 'nullable|string',
         ]);
 
-        $item = InventoryItem::findOrFail($validated['item_id']);
+        $item = \App\Models\InventoryItem::findOrFail($validated['item_id']);
+        $dept = \App\Models\Department::findOrFail($validated['department_id']);
 
         // Check stock at location
         $locationStock = DB::table('inventory_item_locations')
@@ -162,12 +163,13 @@ class InventoryController extends Controller
                 ->decrement('quantity', $validated['quantity']);
 
             // 3. Log Transaction
-            $tx = InventoryTransaction::create([
+            $tx = \App\Models\InventoryTransaction::create([
                 'inventory_item_id' => $item->id,
                 'inventory_location_id' => $validated['location_id'],
+                'department_id'     => $dept->id,
                 'type'              => 'out',
                 'quantity'          => $validated['quantity'],
-                'department'        => $validated['department'],
+                'department'        => $dept->name, // Keep for legacy
                 'reason'            => 'Issuance',
                 'notes'             => ($validated['notes'] ?? '') . ' (Issued from ' . \App\Models\InventoryLocation::find($validated['location_id'])->name . ')',
                 'user_id'           => auth()->id(),

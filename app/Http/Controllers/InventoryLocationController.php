@@ -9,40 +9,49 @@ class InventoryLocationController extends Controller
 {
     public function index()
     {
-        return response()->json(InventoryLocation::all());
+        return response()->json(InventoryLocation::with('department')->get());
     }
 
     public function store(Request $request)
     {
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name',
-            'type' => 'required|string|in:main_store,department,satellite',
+            'type' => 'required|string|in:main_store,sub_store,satellite',
+            'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean'
         ]);
 
         $location = InventoryLocation::create($validated);
-        return response()->json($location, 201);
+        return response()->json($location->load('department'), 201);
     }
 
     public function show(InventoryLocation $location)
     {
-        return response()->json($location->load('items'));
+        return response()->json($location->load(['items', 'department']));
     }
 
     public function update(Request $request, InventoryLocation $location)
     {
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name,' . $location->id,
-            'type' => 'required|string|in:main_store,department,satellite',
+            'type' => 'required|string|in:main_store,sub_store,satellite',
+            'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean'
         ]);
 
+        if ($location->type === 'main_store' && isset($validated['is_active']) && $validated['is_active'] == false) {
+            return response()->json(['message' => 'The Main Store cannot be blocked.'], 422);
+        }
+
         $location->update($validated);
-        return response()->json($location);
+        return response()->json($location->load('department'));
     }
 
     public function destroy(InventoryLocation $location)
     {
+        if ($location->type === 'main_store') {
+            return response()->json(['message' => 'The Main Store cannot be deleted.'], 422);
+        }
         $location->delete();
         return response()->json(null, 204);
     }

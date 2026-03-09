@@ -15,7 +15,7 @@ class StoreRequestController extends Controller
     public function index()
     {
         return response()->json(
-            StoreRequest::with(['fromLocation', 'toLocation', 'requester', 'items.item'])
+            StoreRequest::with(['department', 'fromLocation', 'toLocation', 'requester', 'items.item'])
                         ->latest()
                         ->get()
         );
@@ -26,6 +26,7 @@ class StoreRequestController extends Controller
         $validated = $request->validate([
             'from_location_id' => 'required|exists:inventory_locations,id',
             'to_location_id'   => 'required|exists:inventory_locations,id',
+            'required_date'    => 'nullable|date',
             'notes'            => 'nullable|string',
             'items'            => 'required|array|min:1',
             'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
@@ -34,10 +35,23 @@ class StoreRequestController extends Controller
 
         DB::beginTransaction();
         try {
+            $location = InventoryLocation::findOrFail($validated['from_location_id']);
+
+            // Security check: non-admin can only request for their own department
+            if (!auth()->user()->hasRole('Admin')) {
+                $userDeptIds = auth()->user()->departments()->pluck('departments.id')->toArray();
+                
+                if (!$location->department_id || !in_array($location->department_id, $userDeptIds)) {
+                    return response()->json(['message' => 'Unauthorized: You can only request for your assigned department.'], 403);
+                }
+            }
+
             $storeRequest = StoreRequest::create([
                 'request_number'   => 'REQ-' . date('Ymd') . '-' . strtoupper(uniqid()),
                 'from_location_id' => $validated['from_location_id'],
                 'to_location_id'   => $validated['to_location_id'],
+                'department_id'     => $location->department_id,
+                'required_date'    => $validated['required_date'],
                 'requested_by'     => auth()->id(),
                 'status'           => 'pending',
                 'notes'            => $validated['notes'],
@@ -76,11 +90,27 @@ class StoreRequestController extends Controller
         return response()->json($storeRequest);
     }
 
+    public function reject(StoreRequest $storeRequest)
+    {
+        if ($storeRequest->status !== 'pending') {
+            return response()->json(['message' => 'Request already processed'], 422);
+        }
+
+        $storeRequest->update([
+            'status' => 'rejected',
+            'notes' => $storeRequest->notes . ' (Rejected by ' . auth()->user()->name . ')',
+        ]);
+
+        return response()->json($storeRequest);
+    }
+
     public function issue(Request $request, StoreRequest $storeRequest)
     {
         if (!in_array($storeRequest->status, ['approved', 'partially_issued'])) {
             return response()->json(['message' => 'Request must be approved before issuance'], 422);
         }
+
+        $storeRequest->load(['department', 'fromLocation', 'toLocation']);
 
         $validated = $request->validate([
             'items' => 'required|array',
@@ -131,21 +161,25 @@ class StoreRequestController extends Controller
                 InventoryTransaction::create([
                     'inventory_item_id' => $requestItem->inventory_item_id,
                     'inventory_location_id' => $storeRequest->to_location_id,
+                    'department_id' => $storeRequest->department_id,
                     'type' => 'out',
                     'quantity' => $qtyToIssue,
                     'reason' => 'Store Issue',
                     'notes' => 'Issued to ' . $storeRequest->fromLocation->name . ' (Req: ' . $storeRequest->request_number . ')',
                     'user_id' => auth()->id(),
+                    'department' => $storeRequest->department?->name,
                 ]);
 
                 InventoryTransaction::create([
                     'inventory_item_id' => $requestItem->inventory_item_id,
                     'inventory_location_id' => $storeRequest->from_location_id,
+                    'department_id' => $storeRequest->department_id,
                     'type' => 'in',
                     'quantity' => $qtyToIssue,
                     'reason' => 'Store Receipt',
                     'notes' => 'Received from ' . $storeRequest->toLocation->name . ' (Req: ' . $storeRequest->request_number . ')',
                     'user_id' => auth()->id(),
+                    'department' => $storeRequest->department?->name,
                 ]);
             }
 

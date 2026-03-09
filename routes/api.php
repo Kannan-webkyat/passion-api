@@ -8,6 +8,7 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\DepartmentController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -21,9 +22,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Rooms
     Route::apiResource('rooms', RoomController::class);
 
-    // Users & Roles
+    // Users, Roles & Departments
     Route::apiResource('users', UserController::class);
     Route::apiResource('roles', RoleController::class);
+    Route::apiResource('departments', DepartmentController::class);
     Route::get('permissions', [RoleController::class, 'permissions']);
 
     // Bookings & Room Chart
@@ -46,6 +48,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('inventory/store-requests', \App\Http\Controllers\StoreRequestController::class);
     Route::post('inventory/store-requests/{storeRequest}/approve', [\App\Http\Controllers\StoreRequestController::class, 'approve']);
     Route::post('inventory/store-requests/{storeRequest}/issue',   [\App\Http\Controllers\StoreRequestController::class, 'issue']);
+    Route::post('inventory/store-requests/{storeRequest}/reject',  [\App\Http\Controllers\StoreRequestController::class, 'reject']);
 
     Route::apiResource('inventory/purchase-orders', \App\Http\Controllers\PurchaseOrderController::class);
     Route::post('inventory/purchase-orders/{purchaseOrder}/receive', [\App\Http\Controllers\PurchaseOrderController::class, 'receive']);
