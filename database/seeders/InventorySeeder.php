@@ -21,7 +21,7 @@ class InventorySeeder extends Seeder
         ];
 
         foreach ($cats as $name => $desc) {
-            InventoryCategory::create(['name' => $name, 'description' => $desc]);
+            InventoryCategory::firstOrCreate(['name' => $name], ['description' => $desc]);
         }
 
         // 2. Create Vendors
@@ -43,7 +43,7 @@ class InventorySeeder extends Seeder
         ];
 
         foreach ($vendors as $v) {
-            Vendor::create($v);
+            Vendor::firstOrCreate(['name' => $v['name']], $v);
         }
 
         // 3. Create Items
@@ -85,16 +85,20 @@ class InventorySeeder extends Seeder
         ];
 
         foreach ($items as $itemData) {
-            $item = InventoryItem::create($itemData);
+            $item = InventoryItem::updateOrCreate(['sku' => $itemData['sku']], $itemData);
             
-            // Add an initial stock-in transaction
-            InventoryTransaction::create([
-                'inventory_item_id' => $item->id,
-                'type' => 'in',
-                'quantity' => $itemData['current_stock'],
-                'reason' => 'Initial Seeding',
-                'notes' => 'Bulk opening balance',
-            ]);
+            // Add an initial stock-in transaction if none exists
+            InventoryTransaction::firstOrCreate(
+                [
+                    'inventory_item_id' => $item->id,
+                    'reason' => 'Initial Seeding',
+                ],
+                [
+                    'type' => 'in',
+                    'quantity' => $itemData['current_stock'],
+                    'notes' => 'Bulk opening balance',
+                ]
+            );
         }
     }
 }

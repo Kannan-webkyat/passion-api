@@ -10,7 +10,7 @@ class RoomTypeController extends Controller
 {
     public function index()
     {
-        return RoomType::all();
+        return RoomType::with('tax')->get();
     }
 
     /**
@@ -33,43 +33,49 @@ class RoomTypeController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'name'               => 'required|string|max:255',
-            'description'        => 'nullable|string',
-            'base_price'         => 'required|numeric|min:0',
-            'extra_bed_cost'     => 'required|numeric|min:0',
-            'base_occupancy'     => 'required|integer|min:1',
-            'capacity'           => 'required|integer|min:1',
-            'extra_bed_capacity' => 'required|integer|min:0',
-            'child_sharing_limit'=> 'required|integer|min:0',
-            'bed_config'         => 'nullable|string|max:255',
-            'amenities'          => 'nullable|array',
+            'name'                  => 'required|string|max:255',
+            'description'           => 'nullable|string',
+            'base_price'            => 'required|numeric|min:0',
+            'breakfast_price'       => 'nullable|numeric|min:0',
+            'child_breakfast_price' => 'nullable|numeric|min:0',
+            'extra_bed_cost'        => 'required|numeric|min:0',
+            'base_occupancy'        => 'required|integer|min:1',
+            'capacity'              => 'required|integer|min:1',
+            'extra_bed_capacity'    => 'required|integer|min:0',
+            'child_sharing_limit'   => 'required|integer|min:0',
+            'bed_config'            => 'nullable|string|max:255',
+            'amenities'             => 'nullable|array',
+            'tax_id'                => 'nullable|exists:inventory_taxes,id',
         ]);
 
         $this->validateCapacity($validated);
 
         $roomType = RoomType::create($validated);
 
-        return response()->json($roomType, 201);
+        return response()->json($roomType->load('tax'), 201);
     }
 
     public function show(RoomType $roomType)
     {
-        return $roomType;
+        return $roomType->load('tax');
     }
 
     public function update(Request $request, RoomType $roomType)
     {
         $validated = $request->validate([
-            'name'               => 'string|max:255',
-            'description'        => 'nullable|string',
-            'base_price'         => 'numeric|min:0',
-            'extra_bed_cost'     => 'numeric|min:0',
-            'base_occupancy'     => 'integer|min:1',
-            'capacity'           => 'integer|min:1',
-            'extra_bed_capacity' => 'integer|min:0',
-            'child_sharing_limit'=> 'integer|min:0',
-            'bed_config'         => 'nullable|string|max:255',
-            'amenities'          => 'nullable|array',
+            'name'                  => 'string|max:255',
+            'description'           => 'nullable|string',
+            'base_price'            => 'numeric|min:0',
+            'breakfast_price'       => 'nullable|numeric|min:0',
+            'child_breakfast_price' => 'nullable|numeric|min:0',
+            'extra_bed_cost'        => 'numeric|min:0',
+            'base_occupancy'        => 'integer|min:1',
+            'capacity'              => 'integer|min:1',
+            'extra_bed_capacity'    => 'integer|min:0',
+            'child_sharing_limit'   => 'integer|min:0',
+            'bed_config'            => 'nullable|string|max:255',
+            'amenities'             => 'nullable|array',
+            'tax_id'                => 'nullable|exists:inventory_taxes,id',
         ]);
 
         // Merge with existing values to handle partial updates
@@ -84,7 +90,7 @@ class RoomTypeController extends Controller
 
         $roomType->update($validated);
 
-        return response()->json($roomType);
+        return response()->json($roomType->load('tax'));
     }
 
     public function destroy(RoomType $roomType)

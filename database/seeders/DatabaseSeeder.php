@@ -21,10 +21,12 @@ class DatabaseSeeder extends Seeder
             BookingSeeder::class,
         ]);
 
-        User::factory()->create([
-            'name' => 'Admin User',
-            'email' => 'admin@hotel.com',
-            'password' => bcrypt('password'),
-        ])->assignRole('Admin');
+        User::firstOrCreate(
+            ['email' => 'admin@hotel.com'],
+            [
+                'name' => 'Admin User',
+                'password' => bcrypt('password'),
+            ]
+        )->assignRole('Admin');
     }
 }

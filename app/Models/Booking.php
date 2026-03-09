@@ -34,7 +34,9 @@ class Booking extends Model
         'source_reference',
         'notes',
         'booking_group_id',
-        'created_by'
+        'created_by',
+        'adult_breakfast_count',
+        'child_breakfast_count'
     ];
 
     public function bookingGroup()
