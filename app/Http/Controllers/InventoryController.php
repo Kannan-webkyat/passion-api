@@ -170,8 +170,8 @@ class InventoryController extends Controller
                 'type'              => 'out',
                 'quantity'          => $validated['quantity'],
                 'department'        => $dept->name, // Keep for legacy
-                'reason'            => 'Issuance',
-                'notes'             => ($validated['notes'] ?? '') . ' (Issued from ' . \App\Models\InventoryLocation::find($validated['location_id'])->name . ')',
+                'reason'            => 'Consumption',
+                'notes'             => ($validated['notes'] ?? '') . ' (Consumed from ' . \App\Models\InventoryLocation::find($validated['location_id'])->name . ')',
                 'user_id'           => auth()->id(),
             ]);
 
