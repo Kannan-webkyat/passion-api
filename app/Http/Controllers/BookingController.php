@@ -33,20 +33,49 @@ class BookingController extends Controller
         ]);
     }
 
-    public function summary()
+    public function summary(Request $request)
     {
+        $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
 
-        return response()->json([
-            'total'          => Room::count(),
-            'available'      => Room::where('status', 'available')->count(),
-            'occupied'       => Room::where('status', 'occupied')->count(),
-            'maintenance'    => Room::where('status', 'maintenance')->count(),
-            'dirty'          => Room::where('status', 'dirty')->count(),
-            'cleaning'       => Room::where('status', 'cleaning')->count(),
-            'checkins_today' => Booking::whereDate('check_in',  $today)->whereIn('status', ['confirmed','checked_in'])->count(),
-            'checkouts_today'=> Booking::whereDate('check_out', $today)->whereIn('status', ['checked_in','checked_out'])->count(),
-        ]);
+        // Mutually Exclusive Logic: Priority Precedence
+        // 1. Occupied/Reserved: Has an active booking for this date
+        // 2. Maintenance: Physical room status (checked if not occupied)
+        // 3. Housekeeping (Dirty/Cleaning): Physical status (checked if not occupied/maintenance)
+        // 4. Available: Everything else
+
+        $rooms = Room::with(['bookings' => function ($q) use ($date) {
+            $q->where('status', '!=', 'cancelled')
+              ->where('check_in', '<=', $date)
+              ->where('check_out', '>', $date);
+        }])->get();
+
+        $counts = [
+            'total'           => $rooms->count(),
+            'occupied'        => 0,
+            'maintenance'     => 0,
+            'dirty'           => 0,
+            'cleaning'        => 0,
+            'available'       => 0,
+            'checkins_today'  => Booking::whereDate('check_in',  $today)->whereIn('status', ['confirmed','checked_in'])->count(),
+            'checkouts_today' => Booking::whereDate('check_out', $today)->whereIn('status', ['checked_in','checked_out'])->count(),
+        ];
+
+        foreach ($rooms as $room) {
+            if ($room->bookings->isNotEmpty()) {
+                $counts['occupied']++;
+            } elseif ($room->status === 'maintenance') {
+                $counts['maintenance']++;
+            } elseif ($room->status === 'dirty') {
+                $counts['dirty']++;
+            } elseif ($room->status === 'cleaning') {
+                $counts['cleaning']++;
+            } else {
+                $counts['available']++;
+            }
+        }
+
+        return response()->json($counts);
     }
 
     public function store(Request $request)
@@ -77,10 +106,10 @@ class BookingController extends Controller
             'payment_method'   => 'nullable|string',
             'deposit_amount'   => 'nullable|numeric|min:0',
             'status'           => 'nullable|in:pending,confirmed,checked_in,checked_out,cancelled',
-            'booking_source'   => 'nullable|string',
-            'source_reference' => 'nullable|string|max:255',
             'notes'            => 'nullable|string',
             'group_name'       => 'nullable|string|max:255', // For group master
+            'adult_breakfast_count' => 'nullable|integer|min:0',
+            'child_breakfast_count' => 'nullable|integer|min:0',
         ]);
 
         $creatorId = $request->user()?->id;
@@ -88,6 +117,22 @@ class BookingController extends Controller
         $checkIn = $validated['check_in'];
         $checkOut = $validated['check_out'];
         $status = $validated['status'] ?? 'confirmed';
+
+        // Breakfast count validation
+        $totalAdults = (int) ($validated['adults_count'] ?? 1);
+        $totalChildren = (int) ($validated['children_count'] ?? 0);
+        $adultB = (int) ($validated['adult_breakfast_count'] ?? 0);
+        $childB = (int) ($validated['child_breakfast_count'] ?? 0);
+
+        if ($adultB > $totalAdults || $childB > $totalChildren) {
+            return response()->json([
+                'message' => 'Breakfast counts cannot exceed guest counts.',
+                'errors' => [
+                    'adult_breakfast_count' => $adultB > $totalAdults ? ['Must be <= adults count'] : [],
+                    'child_breakfast_count' => $childB > $totalChildren ? ['Must be <= children count'] : [],
+                ]
+            ], 422);
+        }
 
         // 1. Availability Check (Overlap)
         foreach ($roomIds as $roomId) {
@@ -166,6 +211,8 @@ class BookingController extends Controller
             $bookingData['created_by'] = $creatorId;
             $bookingData['booking_group_id'] = $bookingGroupId;
             $bookingData['guest_identities'] = $imagePaths;
+            $bookingData['adult_breakfast_count'] = $validated['adult_breakfast_count'] ?? 0;
+            $bookingData['child_breakfast_count'] = $validated['child_breakfast_count'] ?? 0;
 
             // Apply individual room occupancy if provided
             if (isset($roomOccupancy[$roomId])) {
@@ -174,6 +221,8 @@ class BookingController extends Controller
                 $bookingData['children_count'] = $occ['children'] ?? ($bookingData['children_count'] ?? 0);
                 $bookingData['infants_count'] = $occ['infants'] ?? ($bookingData['infants_count'] ?? 0);
                 $bookingData['extra_beds_count'] = $occ['extra_beds'] ?? ($bookingData['extra_beds_count'] ?? 0);
+                $bookingData['adult_breakfast_count'] = $occ['adult_breakfast'] ?? $bookingData['adult_breakfast_count'];
+                $bookingData['child_breakfast_count'] = $occ['child_breakfast'] ?? $bookingData['child_breakfast_count'];
             }
 
             $booking = Booking::create($bookingData);
@@ -218,13 +267,43 @@ class BookingController extends Controller
             'guest_identity_types.*' => 'nullable|string|max:255',
             'guest_identities' => 'nullable|array',
             'guest_identities.*' => 'nullable|string', // Base64 or paths
+            'adult_breakfast_count' => 'nullable|integer|min:0',
+            'child_breakfast_count' => 'nullable|integer|min:0',
         ]);
 
+        // Breakfast count validation
+        $totalAdults = (int) ($validated['adults_count'] ?? $booking->adults_count);
+        $totalChildren = (int) ($validated['children_count'] ?? $booking->children_count);
+        $adultB = (int) ($validated['adult_breakfast_count'] ?? $booking->adult_breakfast_count);
+        $childB = (int) ($validated['child_breakfast_count'] ?? $booking->child_breakfast_count);
+
+        if ($adultB > $totalAdults || $childB > $totalChildren) {
+            return response()->json([
+                'message' => 'Breakfast counts cannot exceed guest counts.',
+                'errors' => [
+                    'adult_breakfast_count' => $adultB > $totalAdults ? ['Must be <= adults count'] : [],
+                    'child_breakfast_count' => $childB > $totalChildren ? ['Must be <= children count'] : [],
+                ]
+            ], 422);
+        }
+
         // Checkout validation: must be paid
-        if (isset($validated['status']) && $validated['status'] === 'checked_out') {
+        if (isset($validated['status']) && $validated['status'] === 'checked_out' && $booking->status !== 'checked_out') {
             $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
             if ($currentPaymentStatus !== 'paid') {
                 return response()->json(['message' => 'Checkout not allowed until payment is fully paid'], 422);
+            }
+
+            // Early checkout: truncate the check_out date to free the room for other bookings
+            $today = \Carbon\Carbon::today()->toDateString();
+            $currentCheckOut = $validated['check_out'] ?? $booking->check_out;
+            if ($currentCheckOut > $today) {
+                $validated['check_out'] = $today;
+                
+                $userId = $request->user()?->id;
+                $auditMsg = "[Early CO: on {$today}" . ($userId ? " by User #{$userId}" : "") . "]";
+                $existingNotes = $validated['notes'] ?? $booking->notes;
+                $validated['notes'] = $existingNotes ? $existingNotes . "\n" . $auditMsg : $auditMsg;
             }
         }
 
@@ -387,7 +466,17 @@ class BookingController extends Controller
         if ($room?->roomType) {
             $rt        = $room->roomType;
             $extraBeds = $booking->extra_beds_count ?? 0;
-            $extraCost = ($rt->base_price * $extraNights) + ($rt->extra_bed_cost * $extraBeds * $extraNights);
+            $adults    = $booking->adults_count ?? 1;
+            $children  = $booking->children_count ?? 0;
+            
+            $baseNightCost = ($rt->base_price * $extraNights) + ($rt->extra_bed_cost * $extraBeds * $extraNights);
+            
+            $adultB   = $booking->adult_breakfast_count ?? 0;
+            $childB   = $booking->child_breakfast_count ?? 0;
+            $breakfastCost = (($rt->breakfast_price * $adultB) + ($rt->child_breakfast_price * $childB)) * $extraNights;
+            $baseNightCost += $breakfastCost;
+            
+            $extraCost = $baseNightCost;
         }
         $newTotalPrice = (float) $booking->total_price + $extraCost;
 
