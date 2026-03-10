@@ -55,4 +55,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('inventory/purchase-orders/{purchaseOrder}/pay', [\App\Http\Controllers\PurchaseOrderController::class, 'pay']);
     Route::apiResource('payment-methods', \App\Http\Controllers\PaymentMethodController::class);
     Route::get('inventory/movements', [\App\Http\Controllers\StockMovementController::class, 'index']);
+
+    // Restaurant Tables
+    Route::apiResource('table-categories', \App\Http\Controllers\TableCategorieController::class);
+    Route::patch('tables/{table}/status', [\App\Http\Controllers\TableController::class, 'changeStatus']);
+    Route::apiResource('tables', \App\Http\Controllers\TableController::class);
 });
