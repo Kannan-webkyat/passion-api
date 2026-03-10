@@ -11,7 +11,7 @@ class UserController extends Controller
 {
     public function index()
     {
-        return User::with('roles')->get();
+        return User::with(['roles', 'departments'])->get();
     }
 
     public function store(Request $request)
@@ -21,6 +21,7 @@ class UserController extends Controller
             'email' => 'required|string|email|max:255|unique:users',
             'password' => 'required|string|min:8',
             'roles' => 'nullable|array',
+            'departments' => 'nullable|array',
         ]);
 
         $user = User::create([
@@ -33,12 +34,16 @@ class UserController extends Controller
             $user->syncRoles($validated['roles']);
         }
 
-        return response()->json($user->load('roles'), 201);
+        if (isset($validated['departments'])) {
+            $user->departments()->sync($validated['departments']);
+        }
+
+        return response()->json($user->load(['roles', 'departments']), 201);
     }
 
     public function show(User $user)
     {
-        return $user->load('roles');
+        return $user->load(['roles', 'departments']);
     }
 
     public function update(Request $request, User $user)
@@ -48,6 +53,7 @@ class UserController extends Controller
             'email' => 'string|email|max:255|unique:users,email,' . $user->id,
             'password' => 'nullable|string|min:8',
             'roles' => 'nullable|array',
+            'departments' => 'nullable|array',
         ]);
 
         if (isset($validated['name'])) $user->name = $validated['name'];
@@ -60,7 +66,11 @@ class UserController extends Controller
             $user->syncRoles($validated['roles']);
         }
 
-        return response()->json($user->load('roles'));
+        if (isset($validated['departments'])) {
+            $user->departments()->sync($validated['departments']);
+        }
+
+        return response()->json($user->load(['roles', 'departments']));
     }
 
     public function destroy(User $user)
