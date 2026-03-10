@@ -9,6 +9,11 @@ use App\Http\Controllers\RoleController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\DepartmentController;
+use App\Http\Controllers\MenuCategoryController;
+use App\Http\Controllers\MenuSubCategoryController;
+use App\Http\Controllers\MenuItemController;
+use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\ComboController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -35,6 +40,13 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/late-checkout',  [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend',         [BookingController::class, 'extendReservation']);
     Route::apiResource('bookings', BookingController::class);
+
+    // F&B Module (Menu Configuration)
+    Route::apiResource('menu-categories', MenuCategoryController::class);
+    Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);
+    Route::apiResource('menu-items', MenuItemController::class);
+    Route::apiResource('menu-dietary-types', DietaryTypeController::class);
+    Route::apiResource('menu-combos', ComboController::class);
 
     // Inventory Module
     Route::get('inventory/stats',  [\App\Http\Controllers\InventoryController::class, 'stats']);
