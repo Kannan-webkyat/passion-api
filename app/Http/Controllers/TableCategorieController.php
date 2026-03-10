@@ -24,12 +24,12 @@ class TableCategorieController extends Controller
         return response()->json($category, 201);
     }
 
-    public function show(TableCategorie $tableCategorie)
+    public function show(TableCategorie $tableCategory)
     {
-        return response()->json($tableCategorie->load('tables'));
+        return response()->json($tableCategory->load('tables'));
     }
 
-    public function update(Request $request, TableCategorie $tableCategorie)
+    public function update(Request $request, TableCategorie $tableCategory)
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
@@ -37,13 +37,13 @@ class TableCategorieController extends Controller
             'description' => 'nullable|string',
         ]);
 
-        $tableCategorie->update($validated);
-        return response()->json($tableCategorie);
+        $tableCategory->update($validated);
+        return response()->json($tableCategory);
     }
 
-    public function destroy(TableCategorie $tableCategorie)
+    public function destroy(TableCategorie $tableCategory)
     {
-        $tableCategorie->delete();
+        $tableCategory->delete();
         return response()->json(null, 204);
     }
 }
