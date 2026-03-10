@@ -60,4 +60,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('table-categories', \App\Http\Controllers\TableCategorieController::class);
     Route::patch('tables/{table}/status', [\App\Http\Controllers\TableController::class, 'changeStatus']);
     Route::apiResource('tables', \App\Http\Controllers\TableController::class);
+
+    // Table Reservations
+    Route::post('table-reservations/{tableReservation}/check-in', [\App\Http\Controllers\TableReservationController::class, 'checkIn']);
+    Route::post('table-reservations/{tableReservation}/complete',  [\App\Http\Controllers\TableReservationController::class, 'complete']);
+    Route::post('table-reservations/{tableReservation}/cancel',    [\App\Http\Controllers\TableReservationController::class, 'cancel']);
+    Route::apiResource('table-reservations', \App\Http\Controllers\TableReservationController::class);
 });
