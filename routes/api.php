@@ -12,6 +12,8 @@ use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\MenuCategoryController;
 use App\Http\Controllers\MenuSubCategoryController;
 use App\Http\Controllers\MenuItemController;
+use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\ComboController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -43,6 +45,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('menu-categories', MenuCategoryController::class);
     Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);
     Route::apiResource('menu-items', MenuItemController::class);
+    Route::apiResource('menu-dietary-types', DietaryTypeController::class);
+    Route::apiResource('menu-combos', ComboController::class);
 
     // Inventory Module
     Route::get('inventory/stats',  [\App\Http\Controllers\InventoryController::class, 'stats']);

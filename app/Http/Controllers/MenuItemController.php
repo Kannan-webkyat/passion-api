@@ -22,8 +22,14 @@ class MenuItemController extends Controller
             'price' => 'required|numeric|min:0',
             'fixed_ept' => 'nullable|integer|min:0',
             'type' => 'nullable|string',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
+            'image' => 'nullable|image|max:2048'
         ]);
+
+        if ($request->hasFile('image')) {
+            $path = $request->file('image')->store('menu-items', 'public');
+            $validated['image'] = url('storage/' . $path);
+        }
 
         $item = MenuItem::create($validated);
         return response()->json($item, 201);
@@ -44,8 +50,15 @@ class MenuItemController extends Controller
             'price' => 'sometimes|required|numeric|min:0',
             'fixed_ept' => 'nullable|integer|min:0',
             'type' => 'nullable|string',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
+            'image' => 'nullable|image|max:2048'
         ]);
+
+        if ($request->hasFile('image')) {
+            // Optional: delete old image
+            $path = $request->file('image')->store('menu-items', 'public');
+            $validated['image'] = url('storage/' . $path);
+        }
 
         $menuItem->update($validated);
         return response()->json($menuItem);
