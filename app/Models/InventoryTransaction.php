@@ -8,6 +8,7 @@ class InventoryTransaction extends Model
 {
     protected $fillable = [
         'inventory_item_id', 'inventory_location_id', 'department_id', 'type', 'quantity', 'department', 'reason', 'notes', 'user_id',
+        'reference_id', 'reference_type',
     ];
 
     public function location()
