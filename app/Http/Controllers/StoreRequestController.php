@@ -9,6 +9,7 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class StoreRequestController extends Controller
 {
@@ -157,7 +158,9 @@ class StoreRequestController extends Controller
                 // 3. Update Request Item
                 $requestItem->increment('quantity_issued', $qtyToIssue);
 
-                // 4. Log Transactions (Double Entry)
+                // 4. Log Transactions (Double Entry) — share a reference_id to link them
+                $refId = (string) Str::uuid();
+
                 InventoryTransaction::create([
                     'inventory_item_id' => $requestItem->inventory_item_id,
                     'inventory_location_id' => $storeRequest->to_location_id,
@@ -168,6 +171,8 @@ class StoreRequestController extends Controller
                     'notes' => 'Issued to ' . $storeRequest->fromLocation->name . ' (Req: ' . $storeRequest->request_number . ')',
                     'user_id' => auth()->id(),
                     'department' => $storeRequest->department?->name,
+                    'reference_id' => $refId,
+                    'reference_type' => 'requisition',
                 ]);
 
                 InventoryTransaction::create([
@@ -180,6 +185,8 @@ class StoreRequestController extends Controller
                     'notes' => 'Received from ' . $storeRequest->toLocation->name . ' (Req: ' . $storeRequest->request_number . ')',
                     'user_id' => auth()->id(),
                     'department' => $storeRequest->department?->name,
+                    'reference_id' => $refId,
+                    'reference_type' => 'requisition',
                 ]);
             }
 
