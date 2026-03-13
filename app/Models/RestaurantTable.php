@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class RestaurantTable extends Model
 {
     protected $fillable = [
+        'restaurant_master_id',
         'table_number',
         'category_id',
         'capacity',
@@ -18,5 +19,10 @@ class RestaurantTable extends Model
     public function category()
     {
         return $this->belongsTo(TableCategorie::class, 'category_id');
+    }
+
+    public function restaurantMaster()
+    {
+        return $this->belongsTo(RestaurantMaster::class, 'restaurant_master_id');
     }
 }

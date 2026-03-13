@@ -42,6 +42,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('bookings', BookingController::class);
 
     // F&B Module (Menu Configuration)
+    Route::apiResource('restaurant-masters', \App\Http\Controllers\RestaurantMasterController::class);
     Route::apiResource('menu-categories', MenuCategoryController::class);
     Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);
     Route::apiResource('menu-items', MenuItemController::class);

@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 class Combo extends Model
 {
     protected $fillable = [
-        'name', 'price', 'fixed_ept', 'is_active'
+        'restaurant_master_id', 'name', 'price', 'fixed_ept', 'is_active'
     ];
 
     protected $casts = [
@@ -20,5 +20,10 @@ class Combo extends Model
     public function menuItems(): BelongsToMany
     {
         return $this->belongsToMany(MenuItem::class, 'combo_items', 'combo_id', 'menu_item_id')->withTimestamps();
+    }
+
+    public function restaurantMaster(): BelongsTo
+    {
+        return $this->belongsTo(RestaurantMaster::class, 'restaurant_master_id');
     }
 }

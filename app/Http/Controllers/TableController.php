@@ -9,7 +9,7 @@ class TableController extends Controller
 {
     public function index()
     {
-        return response()->json(RestaurantTable::with('category')->get());
+        return response()->json(RestaurantTable::with(['category', 'restaurantMaster'])->get());
     }
 
     public function store(Request $request)
@@ -17,6 +17,7 @@ class TableController extends Controller
         $validated = $request->validate([
             'table_number' => 'required|string|max:255|unique:restaurant_tables,table_number',
             'category_id' => 'required|exists:table_categories,id',
+            'restaurant_master_id' => 'required|exists:restaurant_masters,id',
             'capacity' => 'required|integer|min:1',
             'status' => 'nullable|in:available,occupied,reserved,cleaning,inactive',
             'location' => 'nullable|string|max:255',
@@ -24,12 +25,12 @@ class TableController extends Controller
         ]);
 
         $table = RestaurantTable::create($validated);
-        return response()->json($table->load('category'), 201);
+        return response()->json($table->load(['category', 'restaurantMaster']), 201);
     }
 
     public function show(RestaurantTable $table)
     {
-        return response()->json($table->load('category'));
+        return response()->json($table->load(['category', 'restaurantMaster']));
     }
 
     public function update(Request $request, RestaurantTable $table)
@@ -37,6 +38,7 @@ class TableController extends Controller
         $validated = $request->validate([
             'table_number' => 'required|string|max:255|unique:restaurant_tables,table_number,' . $table->id,
             'category_id' => 'required|exists:table_categories,id',
+            'restaurant_master_id' => 'required|exists:restaurant_masters,id',
             'capacity' => 'required|integer|min:1',
             'status' => 'nullable|in:available,occupied,reserved,cleaning,inactive',
             'location' => 'nullable|string|max:255',
@@ -44,7 +46,7 @@ class TableController extends Controller
         ]);
 
         $table->update($validated);
-        return response()->json($table->load('category'));
+        return response()->json($table->load(['category', 'restaurantMaster']));
     }
 
     public function destroy(RestaurantTable $table)

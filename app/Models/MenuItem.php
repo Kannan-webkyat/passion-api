@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class MenuItem extends Model
 {
     protected $fillable = [
-        'item_code', 'name', 'menu_category_id', 'menu_sub_category_id',
+        'restaurant_master_id', 'item_code', 'name', 'menu_category_id', 'menu_sub_category_id',
         'price', 'fixed_ept', 'type', 'is_active', 'image'
     ];
 
@@ -24,5 +24,10 @@ class MenuItem extends Model
     public function subCategory()
     {
         return $this->belongsTo(MenuSubCategory::class, 'menu_sub_category_id');
+    }
+
+    public function restaurantMaster()
+    {
+        return $this->belongsTo(RestaurantMaster::class, 'restaurant_master_id');
     }
 }
