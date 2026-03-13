@@ -19,9 +19,7 @@ return new class extends Migration
             $table->foreignId('restaurant_master_id')->nullable()->constrained('restaurant_masters')->onDelete('cascade');
         });
 
-        Schema::table('combo_items', function (Blueprint $table) {
-            $table->foreignId('restaurant_master_id')->nullable()->constrained('restaurant_masters')->onDelete('cascade');
-        });
+
 
         Schema::table('combos', function (Blueprint $table) {
             $table->foreignId('restaurant_master_id')->nullable()->constrained('restaurant_masters')->onDelete('cascade');
@@ -43,10 +41,7 @@ return new class extends Migration
             $table->dropColumn('restaurant_master_id');
         });
 
-        Schema::table('combo_items', function (Blueprint $table) {
-            $table->dropForeign(['restaurant_master_id']);
-            $table->dropColumn('restaurant_master_id');
-        });
+
 
         Schema::table('combos', function (Blueprint $table) {
             $table->dropForeign(['restaurant_master_id']);

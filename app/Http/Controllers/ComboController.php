@@ -9,13 +9,14 @@ class ComboController extends Controller
 {
     public function index()
     {
-        return response()->json(Combo::with(['menuItems'])->get());
+        return response()->json(Combo::with(['menuItems', 'restaurantMaster'])->get());
     }
 
     public function store(Request $request)
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
+            'restaurant_master_id' => 'required|exists:restaurant_masters,id',
             'price' => 'required|numeric',
             'fixed_ept' => 'nullable|integer',
             'is_active' => 'boolean',
@@ -26,18 +27,19 @@ class ComboController extends Controller
         $combo = Combo::create($validated);
         $combo->menuItems()->sync($request->menu_item_ids);
 
-        return response()->json($combo->load(['menuItems']), 201);
+        return response()->json($combo->load(['menuItems', 'restaurantMaster']), 201);
     }
 
     public function show(Combo $menuCombo)
     {
-        return response()->json($menuCombo->load(['menuItems']));
+        return response()->json($menuCombo->load(['menuItems', 'restaurantMaster']));
     }
 
     public function update(Request $request, Combo $menuCombo)
     {
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
+            'restaurant_master_id' => 'sometimes|required|exists:restaurant_masters,id',
             'price' => 'sometimes|required|numeric',
             'fixed_ept' => 'nullable|integer',
             'is_active' => 'boolean',
@@ -51,7 +53,7 @@ class ComboController extends Controller
             $menuCombo->menuItems()->sync($request->menu_item_ids);
         }
 
-        return response()->json($menuCombo->load(['menuItems']));
+        return response()->json($menuCombo->load(['menuItems', 'restaurantMaster']));
     }
 
     public function destroy(Combo $menuCombo)
