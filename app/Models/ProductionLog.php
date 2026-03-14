@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class ProductionLog extends Model
 {
     protected $fillable = [
-        'recipe_id', 'inventory_location_id', 'quantity_produced',
+        'recipe_id', 'inventory_location_id', 'quantity_produced', 'unit_cost', 'total_cost',
         'produced_by', 'production_date', 'notes', 'reference_id',
     ];
 

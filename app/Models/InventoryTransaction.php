@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class InventoryTransaction extends Model
 {
     protected $fillable = [
-        'inventory_item_id', 'inventory_location_id', 'department_id', 'type', 'quantity', 'department', 'reason', 'notes', 'user_id',
+        'inventory_item_id', 'inventory_location_id', 'department_id', 'type', 'quantity', 'unit_cost', 'total_cost', 'department', 'reason', 'notes', 'user_id',
         'reference_id', 'reference_type',
     ];
 

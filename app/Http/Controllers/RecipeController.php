@@ -130,9 +130,43 @@ class RecipeController extends Controller
         $multiplier = $validated['quantity_produced'] / $recipe->yield_quantity;
         $refId = (string) Str::uuid();
 
-        DB::transaction(function () use ($recipe, $multiplier, $validated, $refId) {
+        // 1. Pre-check stock availability for ALL ingredients
+        $insufficient = [];
+        foreach ($recipe->ingredients as $ing) {
+            $rawQty = round($ing->raw_quantity * $multiplier, 3);
+            $currentStock = DB::table('inventory_item_locations')
+                ->where('inventory_item_id', $ing->inventory_item_id)
+                ->where('inventory_location_id', $validated['inventory_location_id'])
+                ->value('quantity') ?? 0;
+
+            if ($currentStock < $rawQty) {
+                $insufficient[] = [
+                    'item' => $ing->inventoryItem->name,
+                    'required' => $rawQty,
+                    'available' => $currentStock,
+                    'uom' => $ing->uom?->short_name ?? 'unit'
+                ];
+            }
+        }
+
+        if (!empty($insufficient)) {
+            return response()->json([
+                'message' => 'Insufficient stock for one or more ingredients.',
+                'errors' => $insufficient
+            ], 422);
+        }
+
+        $totalProductionCost = 0;
+
+        DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$totalProductionCost) {
             foreach ($recipe->ingredients as $ing) {
                 $rawQty = round($ing->raw_quantity * $multiplier, 3);
+                
+                // Calculate snapshot cost
+                $item = $ing->inventoryItem;
+                $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
+                $lineCostAtTime = $rawQty * $unitCostAtTime;
+                $totalProductionCost += $lineCostAtTime;
 
                 // Deduct from kitchen location stock
                 DB::table('inventory_item_locations')
@@ -145,6 +179,8 @@ class RecipeController extends Controller
                     'inventory_location_id'=> $validated['inventory_location_id'],
                     'type'                 => 'out',
                     'quantity'             => $rawQty,
+                    'unit_cost'            => $unitCostAtTime,
+                    'total_cost'           => $lineCostAtTime,
                     'reason'               => 'Production',
                     'notes'                => 'Recipe: ' . $recipe->menuItem->name . ' × ' . $validated['quantity_produced'],
                     'user_id'              => auth()->id(),
@@ -157,6 +193,8 @@ class RecipeController extends Controller
                 'recipe_id'             => $recipe->id,
                 'inventory_location_id' => $validated['inventory_location_id'],
                 'quantity_produced'     => $validated['quantity_produced'],
+                'unit_cost'             => $totalProductionCost / $validated['quantity_produced'],
+                'total_cost'            => $totalProductionCost,
                 'produced_by'           => auth()->id(),
                 'production_date'       => now(),
                 'notes'                 => $validated['notes'] ?? null,
