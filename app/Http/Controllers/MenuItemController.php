@@ -9,7 +9,9 @@ class MenuItemController extends Controller
 {
     public function index()
     {
-        return response()->json(MenuItem::with(['category', 'subCategory'])->get());
+        return response()->json(
+            MenuItem::with(['category', 'subCategory'])->orderBy('name')->get()
+        );
     }
 
     public function store(Request $request)

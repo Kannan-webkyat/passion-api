@@ -196,8 +196,12 @@ class PurchaseOrderController extends Controller
             foreach ($purchaseOrder->items as $poItem) {
                 $item = $poItem->inventoryItem;
                 if ($item) {
+                    // Convert quantity based on conversion factor (e.g., 1 KG -> 1000 Grams)
+                    $conversionFactor = floatval($item->conversion_factor ?? 1);
+                    $convertedQuantity = $poItem->quantity_ordered * $conversionFactor;
+
                     // 1. Update Global Total Stock
-                    $item->increment('current_stock', $poItem->quantity_ordered);
+                    $item->increment('current_stock', $convertedQuantity);
 
                     // 2. Update Location Specific Stock
                     DB::table('inventory_item_locations')->updateOrInsert(
@@ -206,7 +210,7 @@ class PurchaseOrderController extends Controller
                             'inventory_location_id' => $locationId
                         ],
                         [
-                            'quantity' => DB::raw('quantity + ' . $poItem->quantity_ordered),
+                            'quantity' => DB::raw('quantity + ' . $convertedQuantity),
                             'updated_at' => now(),
                             'created_at' => now()
                         ]
@@ -217,9 +221,9 @@ class PurchaseOrderController extends Controller
                         'inventory_item_id' => $item->id,
                         'inventory_location_id' => $locationId,
                         'type' => 'in',
-                        'quantity' => $poItem->quantity_ordered,
+                        'quantity' => $convertedQuantity,
                         'reason' => 'Purchase Receipt',
-                        'notes' => 'From PO: ' . $purchaseOrder->po_number . ' at ' . \App\Models\InventoryLocation::find($locationId)->name,
+                        'notes' => 'From PO: ' . $purchaseOrder->po_number . ' at ' . \App\Models\InventoryLocation::find($locationId)->name . ' (Ordered: ' . $poItem->quantity_ordered . ' ' . ($item->purchaseUom->short_name ?? '') . ')',
                         'user_id' => auth()->id(),
                     ]);
                 }
