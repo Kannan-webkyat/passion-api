@@ -128,79 +128,92 @@ class RecipeController extends Controller
 
         $recipe = Recipe::with('ingredients.inventoryItem')->findOrFail($recipeId);
         $multiplier = $validated['quantity_produced'] / $recipe->yield_quantity;
-        $refId = (string) Str::uuid();
+        $refId      = (string) Str::uuid();
 
-        // 1. Pre-check stock availability for ALL ingredients
-        $insufficient = [];
-        foreach ($recipe->ingredients as $ing) {
-            $rawQty = round($ing->raw_quantity * $multiplier, 3);
-            $currentStock = DB::table('inventory_item_locations')
-                ->where('inventory_item_id', $ing->inventory_item_id)
-                ->where('inventory_location_id', $validated['inventory_location_id'])
-                ->value('quantity') ?? 0;
-
-            if ($currentStock < $rawQty) {
-                $insufficient[] = [
-                    'item' => $ing->inventoryItem->name,
-                    'required' => $rawQty,
-                    'available' => $currentStock,
-                    'uom' => $ing->uom?->short_name ?? 'unit'
-                ];
-            }
-        }
-
-        if (!empty($insufficient)) {
-            return response()->json([
-                'message' => 'Insufficient stock for one or more ingredients.',
-                'errors' => $insufficient
-            ], 422);
-        }
-
+        $insufficient        = [];
         $totalProductionCost = 0;
 
-        DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$totalProductionCost) {
-            foreach ($recipe->ingredients as $ing) {
-                $rawQty = round($ing->raw_quantity * $multiplier, 3);
-                
-                // Calculate snapshot cost
-                $item = $ing->inventoryItem;
-                $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
-                $lineCostAtTime = $rawQty * $unitCostAtTime;
-                $totalProductionCost += $lineCostAtTime;
+        try {
+            DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$insufficient, &$totalProductionCost) {
 
-                // Deduct from kitchen location stock
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $ing->inventory_item_id)
-                    ->where('inventory_location_id', $validated['inventory_location_id'])
-                    ->decrement('quantity', $rawQty);
+                // ── Pass 1: Lock rows and verify stock atomically ──────────────
+                // lockForUpdate() issues SELECT … FOR UPDATE so concurrent
+                // production requests are serialised at the DB level.
+                foreach ($recipe->ingredients as $ing) {
+                    $rawQty       = round($ing->raw_quantity * $multiplier, 3);
+                    $currentStock = DB::table('inventory_item_locations')
+                        ->where('inventory_item_id',       $ing->inventory_item_id)
+                        ->where('inventory_location_id',   $validated['inventory_location_id'])
+                        ->lockForUpdate()
+                        ->value('quantity') ?? 0;
 
-                InventoryTransaction::create([
-                    'inventory_item_id'    => $ing->inventory_item_id,
-                    'inventory_location_id'=> $validated['inventory_location_id'],
-                    'type'                 => 'out',
-                    'quantity'             => $rawQty,
-                    'unit_cost'            => $unitCostAtTime,
-                    'total_cost'           => $lineCostAtTime,
-                    'reason'               => 'Production',
-                    'notes'                => 'Recipe: ' . $recipe->menuItem->name . ' × ' . $validated['quantity_produced'],
-                    'user_id'              => auth()->id(),
-                    'reference_id'         => $refId,
-                    'reference_type'       => 'production',
+                    if ((float) $currentStock < $rawQty) {
+                        $insufficient[] = [
+                            'item'      => $ing->inventoryItem->name,
+                            'required'  => $rawQty,
+                            'available' => (float) $currentStock,
+                            'uom'       => $ing->uom?->short_name ?? 'unit',
+                        ];
+                    }
+                }
+
+                // Throw inside the transaction so it rolls back automatically
+                // before any stock is touched.
+                if (!empty($insufficient)) {
+                    throw new \RuntimeException('INSUFFICIENT_STOCK');
+                }
+
+                // ── Pass 2: Deduct stock and record snapshot costs ─────────────
+                foreach ($recipe->ingredients as $ing) {
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+
+                    $item            = $ing->inventoryItem;
+                    $unitCostAtTime  = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
+                    $lineCostAtTime  = $rawQty * $unitCostAtTime;
+                    $totalProductionCost += $lineCostAtTime;
+
+                    DB::table('inventory_item_locations')
+                        ->where('inventory_item_id',     $ing->inventory_item_id)
+                        ->where('inventory_location_id', $validated['inventory_location_id'])
+                        ->decrement('quantity', $rawQty);
+
+                    InventoryTransaction::create([
+                        'inventory_item_id'    => $ing->inventory_item_id,
+                        'inventory_location_id'=> $validated['inventory_location_id'],
+                        'type'                 => 'out',
+                        'quantity'             => $rawQty,
+                        'unit_cost'            => $unitCostAtTime,   // price snapshot
+                        'total_cost'           => $lineCostAtTime,   // price snapshot
+                        'reason'               => 'Production',
+                        'notes'                => 'Recipe: ' . $recipe->menuItem->name . ' × ' . $validated['quantity_produced'],
+                        'user_id'              => auth()->id(),
+                        'reference_id'         => $refId,
+                        'reference_type'       => 'production',
+                    ]);
+                }
+
+                ProductionLog::create([
+                    'recipe_id'             => $recipe->id,
+                    'inventory_location_id' => $validated['inventory_location_id'],
+                    'quantity_produced'     => $validated['quantity_produced'],
+                    'unit_cost'             => $totalProductionCost / $validated['quantity_produced'],
+                    'total_cost'            => $totalProductionCost,
+                    'produced_by'           => auth()->id(),
+                    'production_date'       => now(),
+                    'notes'                 => $validated['notes'] ?? null,
+                    'reference_id'          => $refId,
                 ]);
-            }
+            });
 
-            ProductionLog::create([
-                'recipe_id'             => $recipe->id,
-                'inventory_location_id' => $validated['inventory_location_id'],
-                'quantity_produced'     => $validated['quantity_produced'],
-                'unit_cost'             => $totalProductionCost / $validated['quantity_produced'],
-                'total_cost'            => $totalProductionCost,
-                'produced_by'           => auth()->id(),
-                'production_date'       => now(),
-                'notes'                 => $validated['notes'] ?? null,
-                'reference_id'          => $refId,
-            ]);
-        });
+        } catch (\RuntimeException $e) {
+            if ($e->getMessage() === 'INSUFFICIENT_STOCK') {
+                return response()->json([
+                    'message' => 'Insufficient stock for one or more ingredients.',
+                    'errors'  => $insufficient,
+                ], 422);
+            }
+            throw $e; // unexpected error — let the default handler take over
+        }
 
         return response()->json(['message' => 'Production logged successfully.', 'reference_id' => $refId]);
     }
