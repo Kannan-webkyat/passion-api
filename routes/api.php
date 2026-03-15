@@ -69,6 +69,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('pos/orders/{order}/settle',   [PosController::class, 'settle']);
     Route::post('pos/orders/{order}/void',     [PosController::class, 'void']);
 
+    // Kitchen Display
+    Route::get('kitchen/display',                          [PosController::class, 'kitchenDisplay']);
+    Route::patch('pos/orders/{order}/kitchen-status',      [PosController::class, 'updateKitchenStatus']);
+
     // F&B Module (Menu Configuration)
     Route::apiResource('menu-categories', MenuCategoryController::class);
     Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);

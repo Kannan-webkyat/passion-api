@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class PosOrder extends Model
 {
     protected $fillable = [
-        'table_id', 'restaurant_id', 'waiter_id', 'covers', 'status',
+        'table_id', 'restaurant_id', 'waiter_id', 'covers', 'status', 'kitchen_status',
         'discount_type', 'discount_value', 'subtotal', 'tax_amount',
         'discount_amount', 'total_amount', 'opened_at', 'closed_at', 'notes',
     ];

@@ -7,6 +7,9 @@ use App\Models\MenuCategory;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
 use App\Models\PosPayment;
+use App\Models\Recipe;
+use App\Models\InventoryLocation;
+use App\Models\InventoryTransaction;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantTable;
 use Illuminate\Http\Request;
@@ -49,12 +52,13 @@ class PosController extends Controller
                     'location'     => $table->location,
                     'category'     => $table->category,
                     'open_order'   => $openOrder ? [
-                        'id'          => $openOrder->id,
-                        'status'      => $openOrder->status,
-                        'covers'      => $openOrder->covers,
-                        'item_count'  => $openOrder->items->sum('quantity'),
-                        'total'       => $openOrder->total_amount,
-                        'opened_at'   => $openOrder->opened_at,
+                        'id'             => $openOrder->id,
+                        'status'         => $openOrder->status,
+                        'kitchen_status' => $openOrder->kitchen_status ?? 'pending',
+                        'covers'         => $openOrder->covers,
+                        'item_count'     => $openOrder->items->sum('quantity'),
+                        'total'          => $openOrder->total_amount,
+                        'opened_at'      => $openOrder->opened_at,
                     ] : null,
                 ];
             });
@@ -196,7 +200,11 @@ class PosController extends Controller
     public function sendKot(PosOrder $order)
     {
         $order->items()->where('kot_sent', false)->update(['kot_sent' => true]);
-        return response()->json(['message' => 'KOT sent.']);
+        // New items added — reset to pending so kitchen re-acknowledges
+        if (!in_array($order->kitchen_status, ['pending', 'preparing'])) {
+            $order->update(['kitchen_status' => 'pending']);
+        }
+        return response()->json(['message' => 'KOT sent.', 'kitchen_status' => $order->fresh()->kitchen_status]);
     }
 
     // ── Settle / Pay ──────────────────────────────────────────────────────────
@@ -261,9 +269,164 @@ class PosController extends Controller
             $order->update(['status' => 'void', 'closed_at' => now()]);
             RestaurantTable::where('id', $order->table_id)
                 ->update(['status' => 'available']);
+
+            // ── Reverse ingredient deductions if kitchen had already marked Ready ──
+            $deductions = InventoryTransaction::where('reference_type', 'pos_order')
+                ->where('reference_id', (string) $order->id)
+                ->where('type', 'out')
+                ->get();
+
+            foreach ($deductions as $tx) {
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id',     $tx->inventory_item_id)
+                    ->where('inventory_location_id', $tx->inventory_location_id)
+                    ->increment('quantity', $tx->quantity);
+
+                InventoryTransaction::create([
+                    'inventory_item_id'     => $tx->inventory_item_id,
+                    'inventory_location_id' => $tx->inventory_location_id,
+                    'type'                  => 'in',
+                    'quantity'              => $tx->quantity,
+                    'unit_cost'             => $tx->unit_cost,
+                    'total_cost'            => $tx->total_cost,
+                    'reason'                => 'Void Reversal',
+                    'notes'                 => 'Reversed: Order #' . $order->id . ' voided',
+                    'user_id'               => auth()->id(),
+                    'reference_type'        => 'pos_order_void',
+                    'reference_id'          => (string) $order->id,
+                ]);
+            }
         });
 
         return response()->json(['message' => 'Order voided.']);
+    }
+
+    // ── Kitchen Display ───────────────────────────────────────────────────────
+
+    public function kitchenDisplay()
+    {
+        $orders = PosOrder::with(['items.menuItem', 'table', 'restaurant'])
+            ->whereIn('status', ['open', 'billed'])
+            ->where('kitchen_status', '!=', 'served')
+            ->whereHas('items', fn($q) => $q->where('kot_sent', true))
+            ->orderBy('opened_at')
+            ->get()
+            ->map(function ($order) {
+                $kotItems = $order->items->where('kot_sent', true)->values();
+                return [
+                    'id'             => $order->id,
+                    'table_number'   => $order->table?->table_number,
+                    'restaurant'     => $order->restaurant?->name,
+                    'covers'         => $order->covers,
+                    'status'         => $order->status,
+                    'kitchen_status' => $order->kitchen_status ?? 'pending',
+                    'opened_at'      => $order->opened_at,
+                    'items'          => $kotItems->map(fn($i) => [
+                        'id'       => $i->id,
+                        'name'     => $i->menuItem?->name ?? 'Unknown',
+                        'type'     => $i->menuItem?->type ?? null,
+                        'quantity' => $i->quantity,
+                        'notes'    => $i->notes,
+                    ]),
+                ];
+            });
+
+        return response()->json($orders);
+    }
+
+    // ── Update Kitchen Status ─────────────────────────────────────────────────
+
+    public function updateKitchenStatus(Request $request, PosOrder $order)
+    {
+        $validated = $request->validate([
+            'kitchen_status' => 'required|in:pending,preparing,ready,served',
+        ]);
+
+        $previousStatus = $order->kitchen_status;
+        $newStatus      = $validated['kitchen_status'];
+
+        $order->update(['kitchen_status' => $newStatus]);
+
+        // ── Deduct ingredients when kitchen marks the order Ready ─────────────
+        // Only deduct once — skip if already deducted (idempotent).
+        if ($newStatus === 'ready' && $previousStatus !== 'ready') {
+            $alreadyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
+                ->where('reference_id', (string) $order->id)
+                ->exists();
+
+            if (!$alreadyDeducted) {
+                $this->deductOrderIngredients($order);
+            }
+        }
+
+        return response()->json([
+            'id'             => $order->id,
+            'kitchen_status' => $order->fresh()->kitchen_status,
+        ]);
+    }
+
+    /**
+     * Deduct recipe ingredients for all KOT items in an order from Kitchen Store.
+     * Uses lockForUpdate() for concurrency safety. Silently skips items with no recipe.
+     */
+    private function deductOrderIngredients(PosOrder $order): void
+    {
+        $kitchenStore = InventoryLocation::where('name', 'Kitchen Store')->first();
+        if (!$kitchenStore) return;
+
+        $kotItems = $order->items()->with('menuItem')->where('kot_sent', true)->get();
+
+        DB::transaction(function () use ($order, $kotItems, $kitchenStore) {
+            foreach ($kotItems as $orderItem) {
+                $recipe = Recipe::with('ingredients.inventoryItem')
+                    ->where('menu_item_id', $orderItem->menu_item_id)
+                    ->where('is_active', true)
+                    ->first();
+
+                if (!$recipe) continue;
+
+                // multiplier = portions ordered / recipe yield
+                $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+
+                foreach ($recipe->ingredients as $ing) {
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+
+                    // Lock the row before reading to prevent race conditions
+                    $currentStock = DB::table('inventory_item_locations')
+                        ->where('inventory_item_id',     $ing->inventory_item_id)
+                        ->where('inventory_location_id', $kitchenStore->id)
+                        ->lockForUpdate()
+                        ->value('quantity') ?? 0;
+
+                    // Deduct only what's available — no hard-stop for quick items
+                    $deduct = min($rawQty, max(0, (float) $currentStock));
+
+                    if ($deduct <= 0) continue;
+
+                    DB::table('inventory_item_locations')
+                        ->where('inventory_item_id',     $ing->inventory_item_id)
+                        ->where('inventory_location_id', $kitchenStore->id)
+                        ->decrement('quantity', $deduct);
+
+                    $item           = $ing->inventoryItem;
+                    $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
+
+                    InventoryTransaction::create([
+                        'inventory_item_id'     => $ing->inventory_item_id,
+                        'inventory_location_id' => $kitchenStore->id,
+                        'type'                  => 'out',
+                        'quantity'              => $deduct,
+                        'unit_cost'             => $unitCostAtTime,
+                        'total_cost'            => round($deduct * $unitCostAtTime, 2),
+                        'reason'                => 'POS Order',
+                        'notes'                 => 'Order #' . $order->id . ' — ' . ($orderItem->menuItem?->name ?? 'item') . ' ×' . $orderItem->quantity,
+                        'user_id'               => auth()->id(),
+                        'reference_type'        => 'pos_order',
+                        'reference_id'          => (string) $order->id,
+                    ]);
+                }
+            }
+        });
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -298,6 +461,7 @@ class PosController extends Controller
             'restaurant_id'   => $order->restaurant_id,
             'covers'          => $order->covers,
             'status'          => $order->status,
+            'kitchen_status'  => $order->kitchen_status ?? 'pending',
             'discount_type'   => $order->discount_type,
             'discount_value'  => (float) $order->discount_value,
             'subtotal'        => (float) $order->subtotal,
