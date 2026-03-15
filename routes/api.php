@@ -15,6 +15,10 @@ use App\Http\Controllers\MenuItemController;
 use App\Http\Controllers\DietaryTypeController;
 use App\Http\Controllers\ComboController;
 use App\Http\Controllers\RecipeController;
+use App\Http\Controllers\RestaurantMasterController;
+use App\Http\Controllers\TableCategoryController;
+use App\Http\Controllers\TableController;
+use App\Http\Controllers\TableReservationController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -42,6 +46,17 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/extend',         [BookingController::class, 'extendReservation']);
     Route::apiResource('bookings', BookingController::class);
 
+    // F&B Module (Restaurant Master)
+    Route::apiResource('restaurant-masters', RestaurantMasterController::class);
+
+    // F&B Module (Table Master)
+    Route::apiResource('table-categories', TableCategoryController::class);
+    Route::apiResource('tables', TableController::class);
+    Route::post('table-reservations/{tableReservation}/check-in', [TableReservationController::class, 'checkIn']);
+    Route::post('table-reservations/{tableReservation}/complete',  [TableReservationController::class, 'complete']);
+    Route::post('table-reservations/{tableReservation}/cancel',    [TableReservationController::class, 'cancel']);
+    Route::apiResource('table-reservations', TableReservationController::class);
+
     // F&B Module (Menu Configuration)
     Route::apiResource('menu-categories', MenuCategoryController::class);
     Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);
@@ -53,6 +68,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('recipes',                            [RecipeController::class, 'index']);
     Route::put('recipes/menu-item/{menuItemId}',     [RecipeController::class, 'upsert']);
     Route::post('recipes/{recipe}/produce',          [RecipeController::class, 'produce']);
+    Route::get('production-logs',                    [RecipeController::class, 'productionLogs']);
 
     // Inventory Module
     Route::get('inventory/stats',  [\App\Http\Controllers\InventoryController::class, 'stats']);

@@ -204,4 +204,35 @@ class RecipeController extends Controller
 
         return response()->json(['message' => 'Production logged successfully.', 'reference_id' => $refId]);
     }
+
+    /**
+     * List recent production runs.
+     */
+    public function productionLogs()
+    {
+        $logs = ProductionLog::with([
+                'recipe.menuItem',
+                'recipe.yieldUom',
+                'location',
+                'producer',
+            ])
+            ->orderByDesc('production_date')
+            ->limit(50)
+            ->get()
+            ->map(fn($log) => [
+                'id'                => $log->id,
+                'reference_id'      => $log->reference_id,
+                'recipe_name'       => $log->recipe?->menuItem?->name ?? 'Unknown',
+                'yield_uom'         => $log->recipe?->yieldUom?->short_name ?? 'unit',
+                'quantity_produced' => $log->quantity_produced,
+                'unit_cost'         => $log->unit_cost,
+                'total_cost'        => $log->total_cost,
+                'location'          => $log->location?->name ?? '—',
+                'produced_by'       => $log->producer?->name ?? '—',
+                'production_date'   => $log->production_date,
+                'notes'             => $log->notes,
+            ]);
+
+        return response()->json($logs);
+    }
 }
