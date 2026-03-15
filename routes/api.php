@@ -19,6 +19,7 @@ use App\Http\Controllers\RestaurantMasterController;
 use App\Http\Controllers\TableCategoryController;
 use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
+use App\Http\Controllers\PosController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -56,6 +57,17 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('table-reservations/{tableReservation}/complete',  [TableReservationController::class, 'complete']);
     Route::post('table-reservations/{tableReservation}/cancel',    [TableReservationController::class, 'cancel']);
     Route::apiResource('table-reservations', TableReservationController::class);
+
+    // POS Module
+    Route::get('pos/restaurants',              [PosController::class, 'restaurants']);
+    Route::get('pos/tables',                   [PosController::class, 'tables']);
+    Route::get('pos/menu',                     [PosController::class, 'menu']);
+    Route::post('pos/orders',                  [PosController::class, 'openOrder']);
+    Route::get('pos/orders/{order}',           [PosController::class, 'getOrder']);
+    Route::put('pos/orders/{order}/items',     [PosController::class, 'syncItems']);
+    Route::post('pos/orders/{order}/kot',      [PosController::class, 'sendKot']);
+    Route::post('pos/orders/{order}/settle',   [PosController::class, 'settle']);
+    Route::post('pos/orders/{order}/void',     [PosController::class, 'void']);
 
     // F&B Module (Menu Configuration)
     Route::apiResource('menu-categories', MenuCategoryController::class);
