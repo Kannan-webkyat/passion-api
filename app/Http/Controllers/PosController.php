@@ -66,9 +66,37 @@ class PosController extends Controller
 
     public function menu()
     {
+        // Total portions produced per menu_item (via recipe)
+        $produced = DB::table('production_logs')
+            ->join('recipes', 'production_logs.recipe_id', '=', 'recipes.id')
+            ->select('recipes.menu_item_id', DB::raw('SUM(production_logs.quantity_produced) as total'))
+            ->groupBy('recipes.menu_item_id')
+            ->pluck('total', 'menu_item_id')
+            ->map(fn($v) => (float) $v);
+
+        // Total portions already consumed in non-void orders
+        $sold = DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->where('pos_orders.status', '!=', 'void')
+            ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
+            ->groupBy('pos_order_items.menu_item_id')
+            ->pluck('total', 'menu_item_id')
+            ->map(fn($v) => (float) $v);
+
         $categories = MenuCategory::with(['items' => function ($q) {
             $q->where('is_active', true)->orderBy('name');
         }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
+
+        // Attach available_qty to each item (null = no recipe / no tracking)
+        $categories->each(function ($cat) use ($produced, $sold) {
+            $cat->items->each(function ($item) use ($produced, $sold) {
+                if ($produced->has($item->id)) {
+                    $item->available_qty = max(0, $produced[$item->id] - ($sold[$item->id] ?? 0));
+                } else {
+                    $item->available_qty = null;
+                }
+            });
+        });
 
         return response()->json($categories);
     }
