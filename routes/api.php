@@ -69,6 +69,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::put('recipes/menu-item/{menuItemId}',     [RecipeController::class, 'upsert']);
     Route::post('recipes/{recipe}/produce',          [RecipeController::class, 'produce']);
     Route::get('production-logs',                    [RecipeController::class, 'productionLogs']);
+    Route::get('production-logs/{log}/details',      [RecipeController::class, 'productionLogDetails']);
 
     // Inventory Module
     Route::get('inventory/stats',  [\App\Http\Controllers\InventoryController::class, 'stats']);

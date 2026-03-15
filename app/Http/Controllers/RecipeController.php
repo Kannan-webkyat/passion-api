@@ -206,6 +206,43 @@ class RecipeController extends Controller
     }
 
     /**
+     * Return ingredient breakdown for a single production run.
+     */
+    public function productionLogDetails(ProductionLog $log)
+    {
+        $ingredients = InventoryTransaction::with(['item.issueUom'])
+            ->where('reference_id', $log->reference_id)
+            ->where('reference_type', 'production')
+            ->get()
+            ->map(fn($tx) => [
+                'name'       => $tx->item?->name ?? 'Unknown',
+                'quantity'   => (float) $tx->quantity,
+                'uom'        => $tx->item?->issueUom?->short_name ?? 'unit',
+                'unit_cost'  => (float) $tx->unit_cost,
+                'total_cost' => (float) $tx->total_cost,
+            ]);
+
+        $log->loadMissing(['recipe.menuItem', 'recipe.yieldUom', 'location', 'producer']);
+
+        return response()->json([
+            'log' => [
+                'id'                => $log->id,
+                'reference_id'      => $log->reference_id,
+                'recipe_name'       => $log->recipe?->menuItem?->name ?? 'Unknown',
+                'yield_uom'         => $log->recipe?->yieldUom?->short_name ?? 'unit',
+                'quantity_produced' => (float) $log->quantity_produced,
+                'unit_cost'         => (float) $log->unit_cost,
+                'total_cost'        => (float) $log->total_cost,
+                'location'          => $log->location?->name ?? '—',
+                'produced_by'       => $log->producer?->name ?? '—',
+                'production_date'   => $log->production_date,
+                'notes'             => $log->notes,
+            ],
+            'ingredients' => $ingredients,
+        ]);
+    }
+
+    /**
      * List recent production runs.
      */
     public function productionLogs()
