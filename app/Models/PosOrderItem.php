@@ -8,7 +8,7 @@ class PosOrderItem extends Model
 {
     protected $fillable = [
         'order_id', 'menu_item_id', 'quantity', 'unit_price',
-        'tax_rate', 'line_total', 'kot_sent', 'notes',
+        'tax_rate', 'line_total', 'kot_sent', 'status', 'kot_batch', 'notes',
     ];
 
     protected $casts = [

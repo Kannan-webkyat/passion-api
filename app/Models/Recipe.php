@@ -7,11 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 class Recipe extends Model
 {
     protected $fillable = [
-        'menu_item_id', 'yield_quantity', 'yield_uom_id', 'food_cost_target', 'notes', 'is_active',
+        'menu_item_id', 'yield_quantity', 'yield_uom_id', 'food_cost_target', 'notes', 'is_active', 'requires_production',
     ];
 
     protected $casts = [
-        'is_active'         => 'boolean',
+        'is_active'           => 'boolean',
+        'requires_production' => 'boolean',
         'yield_quantity'    => 'decimal:3',
         'food_cost_target'  => 'decimal:2',
     ];

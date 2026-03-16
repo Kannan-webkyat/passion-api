@@ -20,6 +20,7 @@ class DatabaseSeeder extends Seeder
             DepartmentSeeder::class,
             LocationSeeder::class,
             ChickenBiryaniSeeder::class,
+            QuickItemsSeeder::class,
             KitchenStaffSeeder::class,
             ReceptionistSeeder::class,
             StoreManagerSeeder::class,

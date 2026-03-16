@@ -126,9 +126,12 @@ class PosController extends Controller
     public function menu()
     {
         // Total portions produced per menu_item (via recipe)
-        $produced = DB::table('production_logs')
-            ->join('recipes', 'production_logs.recipe_id', '=', 'recipes.id')
-            ->select('recipes.menu_item_id', DB::raw('SUM(production_logs.quantity_produced) as total'))
+        // Only for batch-production items (requires_production=true). Quick items (tea, coffee) use requires_production=false → available_qty=null
+        $produced = DB::table('recipes')
+            ->leftJoin('production_logs', 'recipes.id', '=', 'production_logs.recipe_id')
+            ->where('recipes.is_active', true)
+            ->where('recipes.requires_production', true)
+            ->select('recipes.menu_item_id', DB::raw('COALESCE(SUM(production_logs.quantity_produced), 0) as total'))
             ->groupBy('recipes.menu_item_id')
             ->pluck('total', 'menu_item_id')
             ->map(fn($v) => (float) $v);
@@ -243,27 +246,102 @@ class PosController extends Controller
         ]);
 
         DB::transaction(function () use ($order, $validated) {
-            // Keep track of which were already sent to KOT
-            $kotSentIds = $order->items()->where('kot_sent', true)->pluck('menu_item_id')->toArray();
+            // Current active items keyed by menu_item_id
+            $currentActive = $order->items()
+                ->where('status', 'active')
+                ->get()
+                ->keyBy('menu_item_id');
 
-            $order->items()->delete();
+            $incomingMap = collect($validated['items'])->keyBy('menu_item_id');
 
+            // ── Step 1: Cancel items removed from the cart ────────────────────
+            foreach ($currentActive as $menuItemId => $item) {
+                if (!$incomingMap->has($menuItemId)) {
+                    if ($item->kot_sent) {
+                        // Kitchen is cooking it — mark cancelled so KDS shows the notice
+                        $item->update(['status' => 'cancelled']);
+                    } else {
+                        // Never sent — just delete silently
+                        $item->delete();
+                    }
+                }
+            }
+
+            // ── Step 2: Update existing items or create new ones ──────────────
             foreach ($validated['items'] as $row) {
-                $menuItem = MenuItem::find($row['menu_item_id']);
+                $menuItem  = MenuItem::find($row['menu_item_id']);
                 $unitPrice = floatval($menuItem->price);
-                $taxRate   = 0; // extend later with tax configuration
-                $lineTotal = $unitPrice * $row['quantity'];
+                $existing  = $currentActive->get($row['menu_item_id']);
 
-                PosOrderItem::create([
-                    'order_id'     => $order->id,
-                    'menu_item_id' => $row['menu_item_id'],
-                    'quantity'     => $row['quantity'],
-                    'unit_price'   => $unitPrice,
-                    'tax_rate'     => $taxRate,
-                    'line_total'   => $lineTotal,
-                    'kot_sent'     => in_array($row['menu_item_id'], $kotSentIds),
-                    'notes'        => $row['notes'] ?? null,
-                ]);
+                if ($existing) {
+                    if ($existing->quantity == $row['quantity']) {
+                        // No change — nothing to do
+                    } elseif ($row['quantity'] > $existing->quantity) {
+                        // Qty increased
+                        $delta = $row['quantity'] - $existing->quantity;
+                        if ($existing->kot_sent) {
+                            // Already sent — keep original row, add new row for the delta (Addition)
+                            PosOrderItem::create([
+                                'order_id'     => $order->id,
+                                'menu_item_id' => $row['menu_item_id'],
+                                'quantity'     => $delta,
+                                'unit_price'   => $unitPrice,
+                                'tax_rate'     => 0,
+                                'line_total'   => $unitPrice * $delta,
+                                'kot_sent'     => false,
+                                'status'       => 'active',
+                                'kot_batch'    => null,
+                                'notes'        => $row['notes'] ?? $existing->notes,
+                            ]);
+                        } else {
+                            // Not yet sent — just update qty in place
+                            $existing->update([
+                                'quantity'   => $row['quantity'],
+                                'line_total' => $unitPrice * $row['quantity'],
+                                'notes'      => $row['notes'] ?? $existing->notes,
+                            ]);
+                        }
+                    } else {
+                        // Qty decreased
+                        if ($existing->kot_sent) {
+                            // Was already sent — cancel old row, add new with reduced qty (unsent)
+                            $existing->update(['status' => 'cancelled']);
+                            PosOrderItem::create([
+                                'order_id'     => $order->id,
+                                'menu_item_id' => $row['menu_item_id'],
+                                'quantity'     => $row['quantity'],
+                                'unit_price'   => $unitPrice,
+                                'tax_rate'     => 0,
+                                'line_total'   => $unitPrice * $row['quantity'],
+                                'kot_sent'     => false,
+                                'status'       => 'active',
+                                'kot_batch'    => null,
+                                'notes'        => $row['notes'] ?? $existing->notes,
+                            ]);
+                        } else {
+                            // Not yet sent — just update qty in place
+                            $existing->update([
+                                'quantity'   => $row['quantity'],
+                                'line_total' => $unitPrice * $row['quantity'],
+                                'notes'      => $row['notes'] ?? $existing->notes,
+                            ]);
+                        }
+                    }
+                } else {
+                    // Brand new item
+                    PosOrderItem::create([
+                        'order_id'     => $order->id,
+                        'menu_item_id' => $row['menu_item_id'],
+                        'quantity'     => $row['quantity'],
+                        'unit_price'   => $unitPrice,
+                        'tax_rate'     => 0,
+                        'line_total'   => $unitPrice * $row['quantity'],
+                        'kot_sent'     => false,
+                        'status'       => 'active',
+                        'kot_batch'    => null,
+                        'notes'        => $row['notes'] ?? null,
+                    ]);
+                }
             }
 
             $this->recalculate($order);
@@ -276,12 +354,32 @@ class PosController extends Controller
 
     public function sendKot(PosOrder $order)
     {
-        $order->items()->where('kot_sent', false)->update(['kot_sent' => true]);
-        // New items added — reset to pending so kitchen re-acknowledges
+        $hasPending = $order->items()
+            ->where('status', 'active')
+            ->where('kot_sent', false)
+            ->exists();
+
+        if ($hasPending) {
+            // Advance to the next batch
+            $order->increment('current_kot_batch');
+            $batch = $order->fresh()->current_kot_batch;
+
+            $order->items()
+                ->where('status', 'active')
+                ->where('kot_sent', false)
+                ->update(['kot_sent' => true, 'kot_batch' => $batch]);
+        }
+
+        // Always reset kitchen status so the display re-acknowledges
         if (!in_array($order->kitchen_status, ['pending', 'preparing'])) {
             $order->update(['kitchen_status' => 'pending']);
         }
-        return response()->json(['message' => 'KOT sent.', 'kitchen_status' => $order->fresh()->kitchen_status]);
+
+        return response()->json([
+            'message'        => 'KOT sent.',
+            'kitchen_status' => $order->fresh()->kitchen_status,
+            'kot_batch'      => $order->fresh()->current_kot_batch,
+        ]);
     }
 
     // ── Settle / Pay ──────────────────────────────────────────────────────────
@@ -398,36 +496,57 @@ class PosController extends Controller
         $orders = PosOrder::with(['items.menuItem', 'table', 'restaurant', 'room'])
             ->whereIn('status', ['open', 'billed'])
             ->where('kitchen_status', '!=', 'served')
-            ->whereHas('items', fn($q) => $q->where('kot_sent', true))
+            ->whereHas('items', fn($q) => $q->where('kot_sent', true)->where('status', 'active'))
             ->orderBy('opened_at')
             ->get()
             ->map(function ($order) {
-                $kotItems = $order->items->where('kot_sent', true)->values();
-
                 $label = match($order->order_type ?? 'dine_in') {
                     'takeaway'     => 'Takeaway' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
                     'room_service' => 'Room ' . ($order->room?->room_number ?? $order->room_id),
                     default        => 'Table ' . ($order->table?->table_number ?? '?'),
                 };
 
+                // Active items sent to kitchen, grouped by batch
+                $activeKotItems = $order->items
+                    ->where('status', 'active')
+                    ->where('kot_sent', true)
+                    ->values();
+
+                // Cancelled items that were previously sent — visible cancellation notices
+                $cancelledItems = $order->items
+                    ->where('status', 'cancelled')
+                    ->where('kot_sent', true)
+                    ->values();
+
+                $maxBatch = $activeKotItems->max('kot_batch') ?? 1;
+
                 return [
-                    'id'             => $order->id,
-                    'order_type'     => $order->order_type ?? 'dine_in',
-                    'label'          => $label,
-                    'table_number'   => $order->table?->table_number,
-                    'room_number'    => $order->room?->room_number,
-                    'customer_name'  => $order->customer_name,
-                    'restaurant'     => $order->restaurant?->name,
-                    'covers'         => $order->covers,
-                    'status'         => $order->status,
-                    'kitchen_status' => $order->kitchen_status ?? 'pending',
-                    'opened_at'      => $order->opened_at,
-                    'items'          => $kotItems->map(fn($i) => [
-                        'id'       => $i->id,
-                        'name'     => $i->menuItem?->name ?? 'Unknown',
-                        'type'     => $i->menuItem?->type ?? null,
-                        'quantity' => $i->quantity,
-                        'notes'    => $i->notes,
+                    'id'              => $order->id,
+                    'order_type'      => $order->order_type ?? 'dine_in',
+                    'label'           => $label,
+                    'table_number'    => $order->table?->table_number,
+                    'room_number'     => $order->room?->room_number,
+                    'customer_name'   => $order->customer_name,
+                    'restaurant'      => $order->restaurant?->name,
+                    'covers'          => $order->covers,
+                    'status'          => $order->status,
+                    'kitchen_status'  => $order->kitchen_status ?? 'pending',
+                    'current_batch'   => $maxBatch,
+                    'opened_at'       => $order->opened_at,
+                    'items'           => $activeKotItems->map(fn($i) => [
+                        'id'        => $i->id,
+                        'name'      => $i->menuItem?->name ?? 'Unknown',
+                        'type'      => $i->menuItem?->type ?? null,
+                        'quantity'  => $i->quantity,
+                        'notes'     => $i->notes,
+                        'kot_batch' => $i->kot_batch ?? 1,
+                        'is_addl'   => ($i->kot_batch ?? 1) > 1,
+                    ]),
+                    'cancellations'   => $cancelledItems->map(fn($i) => [
+                        'id'        => $i->id,
+                        'name'      => $i->menuItem?->name ?? 'Unknown',
+                        'quantity'  => $i->quantity,
+                        'kot_batch' => $i->kot_batch ?? 1,
                     ]),
                 ];
             });
@@ -486,6 +605,10 @@ class PosController extends Controller
 
                 if (!$recipe) continue;
 
+                // Batch items (Chicken Biryani): ingredients already deducted at production.
+                // Only deduct for made-to-order items (Tea, Coffee, Omelette).
+                if ($recipe->requires_production ?? true) continue;
+
                 // multiplier = portions ordered / recipe yield
                 $multiplier = $orderItem->quantity / $recipe->yield_quantity;
 
@@ -535,8 +658,10 @@ class PosController extends Controller
     private function recalculate(PosOrder $order): void
     {
         $order->refresh();
-        $subtotal = $order->items->sum(fn($i) => floatval($i->line_total));
-        $taxAmount = $order->items->sum(fn($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
+        // Only count active (non-cancelled) items in totals
+        $activeItems = $order->items->where('status', 'active');
+        $subtotal    = $activeItems->sum(fn($i) => floatval($i->line_total));
+        $taxAmount   = $activeItems->sum(fn($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
 
         $discountAmount = 0;
         if ($order->discount_type === 'percent') {
@@ -578,7 +703,7 @@ class PosController extends Controller
             'opened_at'       => $order->opened_at,
             'closed_at'       => $order->closed_at,
             'notes'           => $order->notes,
-            'items'           => $order->items->map(fn($i) => [
+            'items'           => $order->items->where('status', 'active')->values()->map(fn($i) => [
                 'id'           => $i->id,
                 'menu_item_id' => $i->menu_item_id,
                 'name'         => $i->menuItem?->name ?? 'Unknown',
@@ -589,7 +714,15 @@ class PosController extends Controller
                 'tax_rate'     => (float) $i->tax_rate,
                 'line_total'   => (float) $i->line_total,
                 'kot_sent'     => $i->kot_sent,
+                'kot_batch'    => $i->kot_batch,
                 'notes'        => $i->notes,
+            ]),
+            'cancellations'   => $order->items->where('status', 'cancelled')->values()->map(fn($i) => [
+                'id'           => $i->id,
+                'menu_item_id' => $i->menu_item_id,
+                'name'         => $i->menuItem?->name ?? 'Unknown',
+                'quantity'     => $i->quantity,
+                'kot_batch'    => $i->kot_batch,
             ]),
             'payments'        => $order->payments->map(fn($p) => [
                 'id'           => $p->id,

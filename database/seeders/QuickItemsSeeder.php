@@ -166,12 +166,13 @@ class QuickItemsSeeder extends Seeder
         // ── Tea (1 cup) ──
         if (!Recipe::where('menu_item_id', $menuTea->id)->exists()) {
             $teaRecipe = Recipe::create([
-                'menu_item_id'     => $menuTea->id,
-                'yield_quantity'   => 1,
-                'yield_uom_id'     => $pcs->id,
-                'food_cost_target' => 40.00,
-                'notes'            => 'Standard cup of milk tea. Adjust sugar to taste.',
-                'is_active'        => true,
+                'menu_item_id'       => $menuTea->id,
+                'yield_quantity'     => 1,
+                'yield_uom_id'       => $pcs->id,
+                'food_cost_target'   => 40.00,
+                'notes'              => 'Standard cup of milk tea. Adjust sugar to taste.',
+                'is_active'          => true,
+                'requires_production'=> false,
             ]);
             foreach ([
                 [$itemMap['Tea Leaves'], 3,   100, 'Loose leaf or equivalent tea bags.'],
@@ -192,12 +193,13 @@ class QuickItemsSeeder extends Seeder
         // ── Coffee (1 cup) ──
         if (!Recipe::where('menu_item_id', $menuCoffee->id)->exists()) {
             $coffeeRecipe = Recipe::create([
-                'menu_item_id'     => $menuCoffee->id,
-                'yield_quantity'   => 1,
-                'yield_uom_id'     => $pcs->id,
-                'food_cost_target' => 35.00,
-                'notes'            => 'South Indian filter coffee style. Strong decoction with steamed milk.',
-                'is_active'        => true,
+                'menu_item_id'       => $menuCoffee->id,
+                'yield_quantity'     => 1,
+                'yield_uom_id'       => $pcs->id,
+                'food_cost_target'   => 35.00,
+                'notes'              => 'South Indian filter coffee style. Strong decoction with steamed milk.',
+                'is_active'          => true,
+                'requires_production'=> false,
             ]);
             foreach ([
                 [$itemMap['Coffee Powder'], 5,   100, 'Strong decoction. Use filter coffee blend.'],
@@ -218,12 +220,13 @@ class QuickItemsSeeder extends Seeder
         // ── Omelette (1 plate, 2-egg) ──
         if (!Recipe::where('menu_item_id', $menuOmelette->id)->exists()) {
             $omelRecipe = Recipe::create([
-                'menu_item_id'     => $menuOmelette->id,
-                'yield_quantity'   => 1,
-                'yield_uom_id'     => $pcs->id,
-                'food_cost_target' => 30.00,
-                'notes'            => 'Plain 2-egg omelette with onion and green chilli. Served with toast.',
-                'is_active'        => true,
+                'menu_item_id'       => $menuOmelette->id,
+                'yield_quantity'     => 1,
+                'yield_uom_id'       => $pcs->id,
+                'food_cost_target'   => 30.00,
+                'notes'              => 'Plain 2-egg omelette with onion and green chilli. Served with toast.',
+                'is_active'          => true,
+                'requires_production'=> false,
             ]);
             foreach ([
                 [$itemMap['Eggs'],         2,  100, '2 whole eggs, beaten.'],
