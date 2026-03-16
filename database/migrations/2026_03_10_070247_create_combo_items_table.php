@@ -11,12 +11,14 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('combo_items', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('combo_id')->constrained('combos')->onDelete('cascade');
-            $table->foreignId('menu_item_id')->constrained('menu_items')->onDelete('cascade');
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('combo_items')) {
+            Schema::create('combo_items', function (Blueprint $table) {
+                $table->id();
+                $table->foreignId('combo_id')->constrained('combos')->onDelete('cascade');
+                $table->foreignId('menu_item_id')->constrained('menu_items')->onDelete('cascade');
+                $table->timestamps();
+            });
+        }
     }
 
     /**

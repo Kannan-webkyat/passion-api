@@ -11,10 +11,19 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('combos', function (Blueprint $table) {
-            $table->dropForeign(['menu_sub_category_id']);
-            $table->dropColumn('menu_sub_category_id');
-        });
+        if (Schema::hasColumn('combos', 'menu_sub_category_id')) {
+            try {
+                Schema::table('combos', function (Blueprint $table) {
+                    $table->dropForeign(['menu_sub_category_id']);
+                });
+            } catch (\Exception $e) {
+                // Foreign key might not exist, ignore
+            }
+
+            Schema::table('combos', function (Blueprint $table) {
+                $table->dropColumn('menu_sub_category_id');
+            });
+        }
     }
 
     /**
@@ -22,8 +31,10 @@ return new class extends Migration
      */
     public function down(): void
     {
-        Schema::table('combos', function (Blueprint $table) {
-            $table->foreignId('menu_sub_category_id')->nullable()->constrained('menu_sub_categories')->onDelete('set null');
-        });
+        if (!Schema::hasColumn('combos', 'menu_sub_category_id')) {
+            Schema::table('combos', function (Blueprint $table) {
+                $table->foreignId('menu_sub_category_id')->nullable()->constrained('menu_sub_categories')->onDelete('set null');
+            });
+        }
     }
 };
