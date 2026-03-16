@@ -61,6 +61,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // POS Module
     Route::get('pos/restaurants',              [PosController::class, 'restaurants']);
     Route::get('pos/tables',                   [PosController::class, 'tables']);
+    Route::get('pos/rooms',                    [PosController::class, 'rooms']);
+    Route::get('pos/active-orders',            [PosController::class, 'activeOrders']);
     Route::get('pos/menu',                     [PosController::class, 'menu']);
     Route::post('pos/orders',                  [PosController::class, 'openOrder']);
     Route::get('pos/orders/{order}',           [PosController::class, 'getOrder']);

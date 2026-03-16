@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Booking;
 use App\Models\MenuItem;
 use App\Models\MenuCategory;
 use App\Models\PosOrder;
@@ -18,6 +19,60 @@ use Illuminate\Support\Facades\DB;
 class PosController extends Controller
 {
     // ── Restaurants ──────────────────────────────────────────────────────────
+
+    // ── Checked-in rooms for Room Service ────────────────────────────────────
+
+    public function rooms()
+    {
+        $rooms = DB::table('bookings')
+            ->join('rooms', 'bookings.room_id', '=', 'rooms.id')
+            ->where('bookings.status', 'checked_in')
+            ->select(
+                'rooms.id as room_id',
+                'rooms.room_number',
+                'bookings.id as booking_id',
+                'bookings.first_name',
+                'bookings.last_name',
+                'bookings.phone'
+            )
+            ->orderBy('rooms.room_number')
+            ->get();
+
+        return response()->json($rooms);
+    }
+
+    // ── Open takeaway & room service orders ──────────────────────────────────
+
+    public function activeOrders(Request $request)
+    {
+        $request->validate(['restaurant_id' => 'required|exists:restaurant_masters,id']);
+
+        $orders = PosOrder::with(['room'])
+            ->where('restaurant_id', $request->restaurant_id)
+            ->whereIn('order_type', ['takeaway', 'room_service'])
+            ->whereIn('status', ['open', 'billed'])
+            ->orderBy('created_at', 'desc')
+            ->get()
+            ->map(function ($order) {
+                $itemCount = $order->items()->where('kot_sent', true)->sum('quantity');
+                $total     = $order->items()->where('kot_sent', true)->sum(DB::raw('quantity * unit_price'));
+
+                return [
+                    'id'             => $order->id,
+                    'order_type'     => $order->order_type,
+                    'status'         => $order->status,
+                    'kitchen_status' => $order->kitchen_status ?? 'pending',
+                    'room_number'    => $order->room?->room_number,
+                    'customer_name'  => $order->customer_name,
+                    'customer_phone' => $order->customer_phone,
+                    'item_count'     => (int) $itemCount,
+                    'total'          => (float) $total,
+                    'opened_at'      => $order->created_at,
+                ];
+            });
+
+        return response()->json($orders);
+    }
 
     public function restaurants()
     {
@@ -109,45 +164,67 @@ class PosController extends Controller
 
     public function openOrder(Request $request)
     {
-        $validated = $request->validate([
-            'table_id'      => 'required|exists:restaurant_tables,id',
-            'restaurant_id' => 'required|exists:restaurant_masters,id',
-            'covers'        => 'required|integer|min:1',
-        ]);
+        $orderType = $request->input('order_type', 'dine_in');
 
-        // Prevent duplicate open orders on the same table
-        $existing = PosOrder::where('table_id', $validated['table_id'])
-            ->whereIn('status', ['open', 'billed'])
-            ->first();
+        $rules = [
+            'order_type'     => 'nullable|in:dine_in,takeaway,room_service',
+            'restaurant_id'  => 'required|exists:restaurant_masters,id',
+            'covers'         => 'required|integer|min:1',
+            'customer_name'  => 'nullable|string|max:191',
+            'customer_phone' => 'nullable|string|max:30',
+        ];
 
-        if ($existing) {
-            return response()->json($this->formatOrder($existing->load('items.menuItem', 'payments')));
+        if ($orderType === 'dine_in') {
+            $rules['table_id'] = 'required|exists:restaurant_tables,id';
+        } elseif ($orderType === 'room_service') {
+            $rules['room_id']    = 'required|exists:rooms,id';
+            $rules['booking_id'] = 'nullable|exists:bookings,id';
         }
 
-        $order = DB::transaction(function () use ($validated) {
+        $validated = $request->validate($rules);
+
+        if ($orderType === 'dine_in') {
+            // Prevent duplicate open orders on the same table
+            $existing = PosOrder::where('table_id', $validated['table_id'])
+                ->whereIn('status', ['open', 'billed'])
+                ->first();
+
+            if ($existing) {
+                return response()->json($this->formatOrder($existing->load('items.menuItem', 'payments', 'room')));
+            }
+        }
+
+        $order = DB::transaction(function () use ($validated, $orderType) {
             $order = PosOrder::create([
-                'table_id'      => $validated['table_id'],
-                'restaurant_id' => $validated['restaurant_id'],
-                'waiter_id'     => auth()->id(),
-                'covers'        => $validated['covers'],
-                'status'        => 'open',
-                'opened_at'     => now(),
+                'order_type'     => $orderType,
+                'table_id'       => $orderType === 'dine_in' ? $validated['table_id'] : null,
+                'restaurant_id'  => $validated['restaurant_id'],
+                'room_id'        => $validated['room_id'] ?? null,
+                'booking_id'     => $validated['booking_id'] ?? null,
+                'customer_name'  => $validated['customer_name'] ?? null,
+                'customer_phone' => $validated['customer_phone'] ?? null,
+                'waiter_id'      => auth()->id(),
+                'covers'         => $validated['covers'],
+                'status'         => 'open',
+                'opened_at'      => now(),
             ]);
 
-            RestaurantTable::where('id', $validated['table_id'])
-                ->update(['status' => 'occupied']);
+            if ($orderType === 'dine_in') {
+                RestaurantTable::where('id', $validated['table_id'])
+                    ->update(['status' => 'occupied']);
+            }
 
             return $order;
         });
 
-        return response()->json($this->formatOrder($order->load('items.menuItem', 'payments')), 201);
+        return response()->json($this->formatOrder($order->load('items.menuItem', 'payments', 'room')), 201);
     }
 
     // ── Get a single order ────────────────────────────────────────────────────
 
     public function getOrder(PosOrder $order)
     {
-        return response()->json($this->formatOrder($order->load('items.menuItem', 'payments')));
+        return response()->json($this->formatOrder($order->load('items.menuItem', 'payments', 'room')));
     }
 
     // ── Sync order items (replace all) ────────────────────────────────────────
@@ -192,7 +269,7 @@ class PosController extends Controller
             $this->recalculate($order);
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem', 'payments')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem', 'payments', 'room')));
     }
 
     // ── Send KOT ──────────────────────────────────────────────────────────────
@@ -249,12 +326,23 @@ class PosController extends Controller
             // Close order
             $order->update(['status' => 'paid', 'closed_at' => now()]);
 
-            // Free the table
-            RestaurantTable::where('id', $order->table_id)
-                ->update(['status' => 'available']);
+            // Free the table (dine-in only)
+            if ($order->table_id) {
+                RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
+            }
+
+            // Post room_charge payments to the booking folio
+            $roomChargeTotal = collect($validated['payments'])
+                ->where('method', 'room_charge')
+                ->sum('amount');
+
+            if ($roomChargeTotal > 0 && $order->booking_id) {
+                Booking::where('id', $order->booking_id)
+                    ->increment('extra_charges', $roomChargeTotal);
+            }
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem', 'payments')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem', 'payments', 'room')));
     }
 
     // ── Void ──────────────────────────────────────────────────────────────────
@@ -267,8 +355,10 @@ class PosController extends Controller
 
         DB::transaction(function () use ($order) {
             $order->update(['status' => 'void', 'closed_at' => now()]);
-            RestaurantTable::where('id', $order->table_id)
-                ->update(['status' => 'available']);
+
+            if ($order->table_id) {
+                RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
+            }
 
             // ── Reverse ingredient deductions if kitchen had already marked Ready ──
             $deductions = InventoryTransaction::where('reference_type', 'pos_order')
@@ -305,7 +395,7 @@ class PosController extends Controller
 
     public function kitchenDisplay()
     {
-        $orders = PosOrder::with(['items.menuItem', 'table', 'restaurant'])
+        $orders = PosOrder::with(['items.menuItem', 'table', 'restaurant', 'room'])
             ->whereIn('status', ['open', 'billed'])
             ->where('kitchen_status', '!=', 'served')
             ->whereHas('items', fn($q) => $q->where('kot_sent', true))
@@ -313,9 +403,20 @@ class PosController extends Controller
             ->get()
             ->map(function ($order) {
                 $kotItems = $order->items->where('kot_sent', true)->values();
+
+                $label = match($order->order_type ?? 'dine_in') {
+                    'takeaway'     => 'Takeaway' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
+                    'room_service' => 'Room ' . ($order->room?->room_number ?? $order->room_id),
+                    default        => 'Table ' . ($order->table?->table_number ?? '?'),
+                };
+
                 return [
                     'id'             => $order->id,
+                    'order_type'     => $order->order_type ?? 'dine_in',
+                    'label'          => $label,
                     'table_number'   => $order->table?->table_number,
+                    'room_number'    => $order->room?->room_number,
+                    'customer_name'  => $order->customer_name,
                     'restaurant'     => $order->restaurant?->name,
                     'covers'         => $order->covers,
                     'status'         => $order->status,
@@ -457,8 +558,14 @@ class PosController extends Controller
     {
         return [
             'id'              => $order->id,
+            'order_type'      => $order->order_type ?? 'dine_in',
             'table_id'        => $order->table_id,
             'restaurant_id'   => $order->restaurant_id,
+            'room_id'         => $order->room_id,
+            'room_number'     => $order->room?->room_number ?? null,
+            'booking_id'      => $order->booking_id,
+            'customer_name'   => $order->customer_name,
+            'customer_phone'  => $order->customer_phone,
             'covers'          => $order->covers,
             'status'          => $order->status,
             'kitchen_status'  => $order->kitchen_status ?? 'pending',
