@@ -24,8 +24,32 @@ class RecipeController extends Controller
             'subCategory',
             'recipe.ingredients.inventoryItem.issueUom',
             'recipe.yieldUom',
+            'restaurantMenuItems.restaurant',
         ])->get()->map(function ($item) {
             $recipe = $item->recipe;
+            $costPerPortion = $recipe ? round($recipe->cost_per_portion, 2) : null;
+
+            // Per-restaurant food cost % (price varies by restaurant)
+            $foodCostByRestaurant = [];
+            if ($recipe && $costPerPortion > 0) {
+                $links = $item->restaurantMenuItems ?? collect();
+                foreach ($links->where('is_active', true) as $rmi) {
+                    $price = (float) $rmi->price;
+                    $foodCostByRestaurant[] = [
+                        'restaurant_id'   => $rmi->restaurant_master_id,
+                        'restaurant_name'  => $rmi->restaurant?->name ?? '—',
+                        'price'            => round($price, 2),
+                        'food_cost_pct'    => $price > 0 ? round(($costPerPortion / $price) * 100, 1) : null,
+                    ];
+                }
+            }
+
+            // Fallback: single food_cost_pct using menu_items.price (for items without restaurant links)
+            $fallbackPrice = (float) $item->price;
+            $foodCostPct = $recipe && $costPerPortion > 0 && $fallbackPrice > 0
+                ? round(($costPerPortion / $fallbackPrice) * 100, 1)
+                : (count($foodCostByRestaurant) > 0 ? $foodCostByRestaurant[0]['food_cost_pct'] : null);
+
             return [
                 'id'            => $item->id,
                 'item_code'     => $item->item_code,
@@ -37,18 +61,17 @@ class RecipeController extends Controller
                 'sub_category'  => $item->subCategory,
                 'has_recipe'    => !!$recipe,
                 'recipe'        => $recipe ? [
-                    'id'               => $recipe->id,
-                    'yield_quantity'   => $recipe->yield_quantity,
-                    'yield_uom'        => $recipe->yieldUom,
-                    'food_cost_target' => $recipe->food_cost_target,
-                    'notes'            => $recipe->notes,
-                    'is_active'        => $recipe->is_active,
-                    'total_cost'       => round($recipe->total_cost, 2),
-                    'cost_per_portion' => round($recipe->cost_per_portion, 2),
-                    'food_cost_pct'    => $item->price > 0
-                        ? round(($recipe->cost_per_portion / $item->price) * 100, 1)
-                        : null,
-                    'ingredients'      => $recipe->ingredients->map(fn($ing) => [
+                    'id'                   => $recipe->id,
+                    'yield_quantity'       => $recipe->yield_quantity,
+                    'yield_uom'            => $recipe->yieldUom,
+                    'food_cost_target'     => $recipe->food_cost_target,
+                    'notes'                => $recipe->notes,
+                    'is_active'            => $recipe->is_active,
+                    'total_cost'           => round($recipe->total_cost, 2),
+                    'cost_per_portion'     => $costPerPortion,
+                    'food_cost_pct'        => $foodCostPct,
+                    'food_cost_by_restaurant' => $foodCostByRestaurant,
+                    'ingredients'          => $recipe->ingredients->map(fn($ing) => [
                         'id'               => $ing->id,
                         'inventory_item'   => $ing->inventoryItem,
                         'uom'              => $ing->uom,
