@@ -31,4 +31,5 @@ class PosOrder extends Model
     public function booking()    { return $this->belongsTo(Booking::class, 'booking_id'); }
     public function items()      { return $this->hasMany(PosOrderItem::class, 'order_id'); }
     public function payments()   { return $this->hasMany(PosPayment::class, 'order_id'); }
+    public function refunds()    { return $this->hasMany(PosOrderRefund::class, 'order_id'); }
 }

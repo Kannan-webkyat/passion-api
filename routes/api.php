@@ -20,6 +20,7 @@ use App\Http\Controllers\TableCategoryController;
 use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
 use App\Http\Controllers\PosController;
+use App\Http\Controllers\DayClosingController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -65,11 +66,20 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('pos/active-orders',            [PosController::class, 'activeOrders']);
     Route::get('pos/menu',                     [PosController::class, 'menu']);
     Route::post('pos/orders',                  [PosController::class, 'openOrder']);
+    Route::get('pos/orders/history',           [PosController::class, 'orderHistory']);
     Route::get('pos/orders/{order}',           [PosController::class, 'getOrder']);
+    Route::patch('pos/orders/{order}',         [PosController::class, 'updateOrder']);
+    Route::post('pos/orders/{order}/transfer-table', [PosController::class, 'transferTable']);
     Route::put('pos/orders/{order}/items',     [PosController::class, 'syncItems']);
     Route::post('pos/orders/{order}/kot',      [PosController::class, 'sendKot']);
     Route::post('pos/orders/{order}/settle',   [PosController::class, 'settle']);
     Route::post('pos/orders/{order}/void',     [PosController::class, 'void']);
+    Route::post('pos/orders/{order}/refund',   [PosController::class, 'refund']);
+
+    // Day Closing
+    Route::get('pos/day-closing/preview',      [DayClosingController::class, 'preview']);
+    Route::post('pos/day-closing',              [DayClosingController::class, 'close']);
+    Route::get('pos/day-closings',              [DayClosingController::class, 'index']);
 
     // Kitchen Display
     Route::get('kitchen/display',                          [PosController::class, 'kitchenDisplay']);

@@ -1,0 +1,197 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\PosDayClosing;
+use App\Models\PosOrder;
+use App\Models\PosPayment;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+
+class DayClosingController extends Controller
+{
+    /**
+     * Preview day closing summary for a restaurant and date.
+     * GET /pos/day-closing/preview?restaurant_id=&date=YYYY-MM-DD
+     */
+    public function preview(Request $request)
+    {
+        $validated = $request->validate([
+            'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'date'          => 'required|date',
+        ]);
+
+        $restaurantId = (int) $validated['restaurant_id'];
+        $closedDate   = $validated['date'];
+
+        $existing = PosDayClosing::where('restaurant_id', $restaurantId)
+            ->where('closed_date', $closedDate)
+            ->first();
+
+        $summary = $this->computeSummary($restaurantId, $closedDate);
+
+        return response()->json([
+            'already_closed' => (bool) $existing,
+            'closing'        => $existing?->load('closedByUser'),
+            'summary'        => $summary,
+        ]);
+    }
+
+    /**
+     * Perform day closing.
+     * POST /pos/day-closing
+     */
+    public function close(Request $request)
+    {
+        $validated = $request->validate([
+            'restaurant_id'   => 'required|exists:restaurant_masters,id',
+            'date'            => 'required|date',
+            'opening_balance' => 'nullable|numeric',
+            'closing_balance' => 'nullable|numeric',
+            'notes'           => 'nullable|string',
+        ]);
+
+        $restaurantId = (int) $validated['restaurant_id'];
+        $closedDate   = $validated['date'];
+
+        $summary = $this->computeSummary($restaurantId, $closedDate);
+
+        $existing = PosDayClosing::where('restaurant_id', $restaurantId)
+            ->where('closed_date', $closedDate)
+            ->first();
+
+        if ($existing) {
+            $recloseNote = 'Re-closed at ' . now()->format('d M Y H:i') . ' by ' . (auth()->user()?->name ?? 'System');
+            $notes = $existing->notes ? $existing->notes . "\n\n" . $recloseNote : $recloseNote;
+            if (!empty($validated['notes'])) {
+                $notes = trim($validated['notes']) . "\n\n" . $notes;
+            }
+
+            $existing->update([
+                'closed_at'         => now(),
+                'closed_by'         => auth()->id(),
+                'opening_balance'   => $validated['opening_balance'] ?? $existing->opening_balance,
+                'closing_balance'   => $validated['closing_balance'] ?? $existing->closing_balance,
+                'total_sales'       => $summary['total_sales'],
+                'total_discount'    => $summary['total_discount'],
+                'total_tax'         => $summary['total_tax'],
+                'total_paid'        => $summary['total_paid'],
+                'cash_total'        => $summary['cash_total'],
+                'card_total'        => $summary['card_total'],
+                'upi_total'         => $summary['upi_total'],
+                'room_charge_total' => $summary['room_charge_total'],
+                'order_count'       => $summary['order_count'],
+                'void_count'        => $summary['void_count'],
+                'notes'             => $notes ?: null,
+            ]);
+
+            return response()->json([
+                'message' => 'Day closing updated successfully.',
+                'closing' => $existing->fresh()->load('closedByUser'),
+            ], 200);
+        }
+
+        $closing = PosDayClosing::create([
+            'restaurant_id'     => $restaurantId,
+            'closed_date'       => $closedDate,
+            'closed_at'         => now(),
+            'closed_by'         => auth()->id(),
+            'opening_balance'   => $validated['opening_balance'] ?? null,
+            'closing_balance'   => $validated['closing_balance'] ?? null,
+            'total_sales'       => $summary['total_sales'],
+            'total_discount'    => $summary['total_discount'],
+            'total_tax'         => $summary['total_tax'],
+            'total_paid'        => $summary['total_paid'],
+            'cash_total'        => $summary['cash_total'],
+            'card_total'        => $summary['card_total'],
+            'upi_total'         => $summary['upi_total'],
+            'room_charge_total' => $summary['room_charge_total'],
+            'order_count'       => $summary['order_count'],
+            'void_count'        => $summary['void_count'],
+            'notes'             => $validated['notes'] ?? null,
+        ]);
+
+        return response()->json([
+            'message' => 'Day closed successfully.',
+            'closing' => $closing->load('closedByUser'),
+        ], 201);
+    }
+
+    /**
+     * List past day closings.
+     * GET /pos/day-closings?restaurant_id=&from=&to=
+     */
+    public function index(Request $request)
+    {
+        $validated = $request->validate([
+            'restaurant_id' => 'nullable|exists:restaurant_masters,id',
+            'from'          => 'nullable|date',
+            'to'            => 'nullable|date|after_or_equal:from',
+        ]);
+
+        $query = PosDayClosing::with('restaurant', 'closedByUser')
+            ->orderByDesc('closed_date');
+
+        if (!empty($validated['restaurant_id'])) {
+            $query->where('restaurant_id', $validated['restaurant_id']);
+        }
+        if (!empty($validated['from'])) {
+            $query->where('closed_date', '>=', $validated['from']);
+        }
+        if (!empty($validated['to'])) {
+            $query->where('closed_date', '<=', $validated['to']);
+        }
+
+        $closings = $query->paginate($request->get('per_page', 20));
+
+        return response()->json($closings);
+    }
+
+    /**
+     * Compute summary for a restaurant and date.
+     * Uses orders where closed_at date = closed_date (paid or void).
+     */
+    private function computeSummary(int $restaurantId, string $closedDate): array
+    {
+        $paidOrders = PosOrder::where('restaurant_id', $restaurantId)
+            ->whereIn('status', ['paid', 'refunded'])
+            ->whereDate('closed_at', $closedDate);
+
+        $voidOrders = PosOrder::where('restaurant_id', $restaurantId)
+            ->where('status', 'void')
+            ->whereDate('closed_at', $closedDate);
+
+        $orderIds = (clone $paidOrders)->pluck('id');
+
+        $totals = (clone $paidOrders)->selectRaw(
+            'COALESCE(SUM(subtotal), 0) as total_sales,
+             COALESCE(SUM(discount_amount), 0) as total_discount,
+             COALESCE(SUM(tax_amount), 0) as total_tax,
+             COALESCE(SUM(total_amount), 0) as total_paid'
+        )->first();
+
+        $totalRefunded = \App\Models\PosOrderRefund::whereIn('order_id', $orderIds)
+            ->sum('amount');
+
+        $paymentsByMethod = PosPayment::whereIn('order_id', $orderIds)
+            ->selectRaw('method, COALESCE(SUM(amount), 0) as total')
+            ->groupBy('method')
+            ->pluck('total', 'method');
+
+        $orderCount = (clone $paidOrders)->count();
+        $voidCount  = (clone $voidOrders)->count();
+
+        return [
+            'total_sales'       => (float) ($totals->total_sales ?? 0),
+            'total_discount'    => (float) ($totals->total_discount ?? 0),
+            'total_tax'         => (float) ($totals->total_tax ?? 0),
+            'total_paid'        => (float) (($totals->total_paid ?? 0) - $totalRefunded),
+            'cash_total'        => (float) ($paymentsByMethod->get('cash', 0)),
+            'card_total'        => (float) ($paymentsByMethod->get('card', 0)),
+            'upi_total'         => (float) ($paymentsByMethod->get('upi', 0)),
+            'room_charge_total' => (float) ($paymentsByMethod->get('room_charge', 0)),
+            'order_count'       => $orderCount,
+            'void_count'        => $voidCount,
+        ];
+    }
+}

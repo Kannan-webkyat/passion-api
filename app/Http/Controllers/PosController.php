@@ -7,6 +7,7 @@ use App\Models\MenuItem;
 use App\Models\MenuCategory;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
+use App\Models\PosOrderRefund;
 use App\Models\PosPayment;
 use App\Models\Recipe;
 use App\Models\InventoryLocation;
@@ -253,11 +254,131 @@ class PosController extends Controller
         return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room')), 201);
     }
 
+    // ── Order history (paid orders for reprint) ─────────────────────────────────
+
+    public function orderHistory(Request $request)
+    {
+        $validated = $request->validate([
+            'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'from'          => 'nullable|date',
+            'to'            => 'nullable|date|after_or_equal:from',
+        ]);
+
+        $query = PosOrder::with(['room', 'table', 'refunds'])
+            ->where('restaurant_id', $validated['restaurant_id'])
+            ->whereIn('status', ['paid', 'refunded'])
+            ->orderByDesc('closed_at');
+
+        if (!empty($validated['from'])) {
+            $query->whereDate('closed_at', '>=', $validated['from']);
+        }
+        if (!empty($validated['to'])) {
+            $query->whereDate('closed_at', '<=', $validated['to']);
+        }
+
+        $orders = $query->limit(100)->get()->map(fn ($o) => [
+            'id'              => $o->id,
+            'order_type'      => $o->order_type,
+            'customer_name'   => $o->customer_name,
+            'room_number'     => $o->room?->room_number,
+            'table_number'    => $o->table?->table_number,
+            'total_amount'    => (float) $o->total_amount,
+            'refunded_amount'  => (float) $o->refunds->sum('amount'),
+            'status'          => $o->status,
+            'closed_at'       => $o->closed_at,
+        ]);
+
+        return response()->json($orders);
+    }
+
     // ── Get a single order ────────────────────────────────────────────────────
 
     public function getOrder(PosOrder $order)
     {
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+    }
+
+    // ── Update order details (customer, covers) ─────────────────────────────────
+
+    public function updateOrder(Request $request, PosOrder $order)
+    {
+        if (!in_array($order->status, ['open', 'billed'])) {
+            return response()->json(['message' => 'Order is not editable.'], 422);
+        }
+
+        $rules = [
+            'customer_name'  => 'nullable|string|max:191',
+            'customer_phone' => 'nullable|string|max:30',
+            'covers'         => 'nullable|integer|min:1',
+            'notes'          => 'nullable|string|max:1000',
+        ];
+        $validated = $request->validate($rules);
+
+        $updates = [];
+        if (array_key_exists('customer_name', $validated)) {
+            $updates['customer_name'] = $validated['customer_name'] ?: null;
+        }
+        if (array_key_exists('customer_phone', $validated)) {
+            $updates['customer_phone'] = $validated['customer_phone'] ?: null;
+        }
+        if (array_key_exists('covers', $validated) && $validated['covers'] !== null) {
+            $updates['covers'] = (int) $validated['covers'];
+        }
+        if (array_key_exists('notes', $validated)) {
+            $updates['notes'] = $validated['notes'] ? trim($validated['notes']) : null;
+        }
+
+        if (empty($updates)) {
+            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+        }
+
+        $order->update($updates);
+
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+    }
+
+    // ── Transfer order to another table (dine-in only) ────────────────────────
+
+    public function transferTable(Request $request, PosOrder $order)
+    {
+        if ($order->order_type !== 'dine_in') {
+            return response()->json(['message' => 'Only dine-in orders can be transferred.'], 422);
+        }
+        if (!in_array($order->status, ['open', 'billed'])) {
+            return response()->json(['message' => 'Order is not transferable.'], 422);
+        }
+
+        $validated = $request->validate([
+            'table_id' => 'required|exists:restaurant_tables,id',
+        ]);
+        $newTableId = (int) $validated['table_id'];
+
+        if ($newTableId === $order->table_id) {
+            return response()->json(['message' => 'Order is already at this table.'], 422);
+        }
+
+        $newTable = RestaurantTable::find($newTableId);
+        if ($newTable->restaurant_master_id != $order->restaurant_id) {
+            return response()->json(['message' => 'Target table must be in the same restaurant.'], 422);
+        }
+
+        $existingOrder = PosOrder::where('table_id', $newTableId)
+            ->whereIn('status', ['open', 'billed'])
+            ->where('id', '!=', $order->id)
+            ->first();
+        if ($existingOrder) {
+            return response()->json(['message' => 'Target table already has an active order.'], 422);
+        }
+
+        DB::transaction(function () use ($order, $newTableId) {
+            if ($order->table_id) {
+                RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
+            }
+            $order->update(['table_id' => $newTableId]);
+            RestaurantTable::where('id', $newTableId)->update(['status' => 'occupied']);
+        });
+
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
     }
 
     // ── Sync order items (replace all) ────────────────────────────────────────
@@ -555,6 +676,56 @@ class PosController extends Controller
         return response()->json(['message' => 'Order voided.']);
     }
 
+    // ── Refund (paid orders) ───────────────────────────────────────────────────
+
+    public function refund(Request $request, PosOrder $order)
+    {
+        if (!in_array($order->status, ['paid', 'refunded'])) {
+            return response()->json(['message' => 'Only paid orders can be refunded.'], 422);
+        }
+
+        $validated = $request->validate([
+            'amount'       => 'required|numeric|min:0.01',
+            'method'       => 'required|in:cash,card,upi,room_charge',
+            'reference_no' => 'nullable|string|max:100',
+            'reason'       => 'nullable|string|max:500',
+        ]);
+
+        $amount = (float) $validated['amount'];
+        $totalRefunded = (float) $order->refunds()->sum('amount');
+        $refundable = (float) $order->total_amount - $totalRefunded;
+
+        if ($amount > $refundable + 0.01) {
+            return response()->json([
+                'message' => 'Refund amount (' . number_format($amount, 2) . ') exceeds refundable amount (' . number_format($refundable, 2) . ').',
+            ], 422);
+        }
+
+        DB::transaction(function () use ($order, $validated, $amount) {
+            PosOrderRefund::create([
+                'order_id'     => $order->id,
+                'amount'       => $amount,
+                'method'       => $validated['method'],
+                'reference_no' => $validated['reference_no'] ?? null,
+                'reason'       => $validated['reason'] ?? null,
+                'refunded_at'  => now(),
+                'refunded_by'  => auth()->id(),
+            ]);
+
+            if ($validated['method'] === 'room_charge' && $order->booking_id) {
+                Booking::where('id', $order->booking_id)
+                    ->decrement('extra_charges', $amount);
+            }
+
+            $newTotalRefunded = (float) $order->refunds()->sum('amount');
+            if ($newTotalRefunded >= (float) $order->total_amount - 0.01) {
+                $order->update(['status' => 'refunded']);
+            }
+        });
+
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'refunds', 'room', 'table')));
+    }
+
     // ── Kitchen Display ───────────────────────────────────────────────────────
 
     public function kitchenDisplay()
@@ -754,6 +925,7 @@ class PosController extends Controller
             'restaurant_id'   => $order->restaurant_id,
             'room_id'         => $order->room_id,
             'room_number'     => $order->room?->room_number ?? null,
+            'table_number'    => $order->table?->table_number ?? null,
             'booking_id'      => $order->booking_id,
             'customer_name'   => $order->customer_name,
             'customer_phone'  => $order->customer_phone,
@@ -798,6 +970,15 @@ class PosController extends Controller
                 'reference_no' => $p->reference_no,
                 'paid_at'      => $p->paid_at,
             ]),
+            'refunds'         => $order->refunds->map(fn($r) => [
+                'id'           => $r->id,
+                'amount'       => (float) $r->amount,
+                'method'       => $r->method,
+                'reference_no' => $r->reference_no,
+                'reason'       => $r->reason,
+                'refunded_at'  => $r->refunded_at,
+            ]),
+            'refunded_amount' => (float) $order->refunds->sum('amount'),
         ];
     }
 }
