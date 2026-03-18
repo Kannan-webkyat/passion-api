@@ -10,7 +10,7 @@ class RoomTypeController extends Controller
 {
     public function index()
     {
-        return RoomType::with('tax')->get();
+        return RoomType::with(['tax', 'ratePlans'])->get();
     }
 
     /**
@@ -46,18 +46,26 @@ class RoomTypeController extends Controller
             'bed_config'            => 'nullable|string|max:255',
             'amenities'             => 'nullable|array',
             'tax_id'                => 'nullable|exists:inventory_taxes,id',
+            'rate_plans'            => 'nullable|array',
+            'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
+            'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
+            'rate_plans.*.includes_breakfast' => 'nullable|boolean',
         ]);
 
         $this->validateCapacity($validated);
 
         $roomType = RoomType::create($validated);
 
-        return response()->json($roomType->load('tax'), 201);
+        if (!empty($validated['rate_plans'])) {
+            $roomType->ratePlans()->createMany($validated['rate_plans']);
+        }
+
+        return response()->json($roomType->load(['tax', 'ratePlans']), 201);
     }
 
     public function show(RoomType $roomType)
     {
-        return $roomType->load('tax');
+        return $roomType->load(['tax', 'ratePlans']);
     }
 
     public function update(Request $request, RoomType $roomType)
@@ -76,6 +84,11 @@ class RoomTypeController extends Controller
             'bed_config'            => 'nullable|string|max:255',
             'amenities'             => 'nullable|array',
             'tax_id'                => 'nullable|exists:inventory_taxes,id',
+            'rate_plans'            => 'nullable|array',
+            'rate_plans.*.id'       => 'nullable|exists:rate_plans,id',
+            'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
+            'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
+            'rate_plans.*.includes_breakfast' => 'nullable|boolean',
         ]);
 
         // Merge with existing values to handle partial updates
@@ -90,7 +103,29 @@ class RoomTypeController extends Controller
 
         $roomType->update($validated);
 
-        return response()->json($roomType->load('tax'));
+        if (array_key_exists('rate_plans', $validated)) {
+            $incomingPlans = $validated['rate_plans'] ?? [];
+            $incomingIds = collect($incomingPlans)->pluck('id')->filter()->toArray();
+            $roomType->ratePlans()->whereNotIn('id', $incomingIds)->delete();
+
+            foreach ($incomingPlans as $planData) {
+                if (!empty($planData['id'])) {
+                    $roomType->ratePlans()->where('id', $planData['id'])->update([
+                        'name' => $planData['name'],
+                        'base_price' => $planData['base_price'],
+                        'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                    ]);
+                } else {
+                    $roomType->ratePlans()->create([
+                        'name' => $planData['name'],
+                        'base_price' => $planData['base_price'],
+                        'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                    ]);
+                }
+            }
+        }
+
+        return response()->json($roomType->load(['tax', 'ratePlans']));
     }
 
     public function destroy(RoomType $roomType)

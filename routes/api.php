@@ -34,6 +34,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/early-checkin',  [BookingController::class, 'earlyCheckin']);
     Route::post('bookings/{booking}/late-checkout',  [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend',         [BookingController::class, 'extendReservation']);
+    Route::post('bookings/{booking}/split-stay',     [BookingController::class, 'splitStay']);
+    Route::get('bookings/available-rooms',           [BookingController::class, 'getAvailableRooms']);
+    Route::post('booking-groups',                    [BookingController::class, 'storeGroup']);
     Route::apiResource('bookings', BookingController::class);
 
     // Inventory Module

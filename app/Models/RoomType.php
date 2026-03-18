@@ -37,4 +37,9 @@ class RoomType extends Model
     {
         return $this->belongsTo(InventoryTax::class, 'tax_id');
     }
+
+    public function ratePlans()
+    {
+        return $this->hasMany(RatePlan::class);
+    }
 }

@@ -16,4 +16,8 @@ class Room extends Model
     {
         return $this->hasMany(Booking::class);
     }
+    public function segments()
+    {
+        return $this->hasMany(BookingSegment::class);
+    }
 }

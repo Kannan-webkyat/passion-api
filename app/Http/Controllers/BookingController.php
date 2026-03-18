@@ -4,26 +4,35 @@ namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use App\Models\Room;
+use App\Models\BookingSegment;
 use App\Models\BookingGroup;
+use App\Models\RatePlan;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 
 class BookingController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return Booking::with(['room.roomType', 'creator', 'bookingGroup'])->orderBy('check_in')->get();
+        return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
+            ->when($request->booking_group_id, function($q) use ($request) {
+                $q->where('booking_group_id', $request->booking_group_id);
+            })
+            ->orderBy('check_in')
+            ->get();
     }
 
     public function chart(Request $request)
     {
         $start = Carbon::parse($request->query('start', Carbon::today()));
-        $end   = Carbon::parse($request->query('end', Carbon::today()->addDays(6)));
+        // Show 14 days by default for better visibility
+        $end   = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
 
-        $rooms = Room::with(['roomType.tax', 'bookings' => function ($q) use ($start, $end) {
+        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'segments' => function ($q) use ($start, $end) {
             $q->where('check_out', '>=', $start)
               ->where('check_in',  '<=', $end)
-              ->whereNotIn('status', ['cancelled']);
+              ->whereNotIn('status', ['cancelled'])
+              ->with(['booking', 'ratePlan']);
         }])->get();
 
         return response()->json([
@@ -38,13 +47,7 @@ class BookingController extends Controller
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
 
-        // Mutually Exclusive Logic: Priority Precedence
-        // 1. Occupied/Reserved: Has an active booking for this date
-        // 2. Maintenance: Physical room status (checked if not occupied)
-        // 3. Housekeeping (Dirty/Cleaning): Physical status (checked if not occupied/maintenance)
-        // 4. Available: Everything else
-
-        $rooms = Room::with(['bookings' => function ($q) use ($date) {
+        $rooms = Room::with(['segments' => function ($q) use ($date) {
             $q->where('status', '!=', 'cancelled')
               ->where('check_in', '<=', $date)
               ->where('check_out', '>', $date);
@@ -62,7 +65,7 @@ class BookingController extends Controller
         ];
 
         foreach ($rooms as $room) {
-            if ($room->bookings->isNotEmpty()) {
+            if ($room->segments->isNotEmpty()) {
                 $counts['occupied']++;
             } elseif ($room->status === 'maintenance') {
                 $counts['maintenance']++;
@@ -110,6 +113,7 @@ class BookingController extends Controller
             'group_name'       => 'nullable|string|max:255', // For group master
             'adult_breakfast_count' => 'nullable|integer|min:0',
             'child_breakfast_count' => 'nullable|integer|min:0',
+            'rate_plan_id'     => 'nullable|exists:rate_plans,id',
         ]);
 
         $creatorId = $request->user()?->id;
@@ -134,9 +138,9 @@ class BookingController extends Controller
             ], 422);
         }
 
-        // 1. Availability Check (Overlap)
+        // 1. Availability Check (Overlap) - Using BookingSegment
         foreach ($roomIds as $roomId) {
-            $overlap = Booking::where('room_id', $roomId)
+            $overlap = BookingSegment::where('room_id', $roomId)
                 ->where('status', '!=', 'cancelled')
                 ->where(function ($query) use ($checkIn, $checkOut) {
                     $query->where('check_in', '<', $checkOut)
@@ -207,12 +211,13 @@ class BookingController extends Controller
             unset($bookingData['room_ids']);
             unset($bookingData['group_name']);
             
-            $bookingData['room_id'] = $roomId;
+            $bookingData['room_id'] = $roomId; // Retain for legacy
             $bookingData['created_by'] = $creatorId;
             $bookingData['booking_group_id'] = $bookingGroupId;
             $bookingData['guest_identities'] = $imagePaths;
             $bookingData['adult_breakfast_count'] = $validated['adult_breakfast_count'] ?? 0;
             $bookingData['child_breakfast_count'] = $validated['child_breakfast_count'] ?? 0;
+            $bookingData['rate_plan_id'] = $validated['rate_plan_id'] ?? null;
 
             // Apply individual room occupancy if provided
             if (isset($roomOccupancy[$roomId])) {
@@ -223,18 +228,62 @@ class BookingController extends Controller
                 $bookingData['extra_beds_count'] = $occ['extra_beds'] ?? ($bookingData['extra_beds_count'] ?? 0);
                 $bookingData['adult_breakfast_count'] = $occ['adult_breakfast'] ?? $bookingData['adult_breakfast_count'];
                 $bookingData['child_breakfast_count'] = $occ['child_breakfast'] ?? $bookingData['child_breakfast_count'];
+                if (!empty($occ['rate_plan_id'])) {
+                    $bookingData['rate_plan_id'] = $occ['rate_plan_id'];
+                }
             }
 
             $booking = Booking::create($bookingData);
+            
+            // Create initial Stay Segment
+            BookingSegment::create([
+                'booking_id'    => $booking->id,
+                'room_id'       => $roomId,
+                'check_in'      => $booking->check_in,
+                'check_out'     => $booking->check_out,
+                'rate_plan_id'  => $bookingData['rate_plan_id'],
+                'adults_count'  => $bookingData['adults_count'],
+                'children_count'=> $bookingData['children_count'],
+                'extra_beds_count' => $bookingData['extra_beds_count'],
+                'total_price'   => $bookingData['total_price'],
+                'status'        => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
+            ]);
             
             if (($validated['status'] ?? '') === 'checked_in') {
                 Room::findOrFail($roomId)->update(['status' => 'occupied']);
             }
             
-            $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
+            $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
         }
 
         return response()->json($isGroup ? $bookings : $bookings[0], 201);
+    }
+
+    // --- Booking Group Management ---
+
+    /**
+     * Create only the BookingGroup master record.
+     */
+    public function storeGroup(Request $request)
+    {
+        $validated = $request->validate([
+            'name'           => 'required|string|max:255',
+            'contact_person' => 'nullable|string|max:255',
+            'phone'          => 'nullable|string|max:255',
+            'email'          => 'nullable|email|max:255',
+            'notes'          => 'nullable|string',
+        ]);
+
+        $group = BookingGroup::create([
+            'name'           => $validated['name'],
+            'contact_person' => $validated['contact_person'] ?? '',
+            'phone'          => $validated['phone'] ?? '',
+            'email'          => $validated['email'] ?? '',
+            'status'         => 'confirmed',
+            'notes'          => $validated['notes'] ?? '',
+        ]);
+
+        return response()->json($group, 201);
     }
 
     public function show(Booking $booking)
@@ -269,6 +318,8 @@ class BookingController extends Controller
             'guest_identities.*' => 'nullable|string', // Base64 or paths
             'adult_breakfast_count' => 'nullable|integer|min:0',
             'child_breakfast_count' => 'nullable|integer|min:0',
+            'rate_plan_id'     => 'nullable|exists:rate_plans,id',
+            'booking_group_id' => 'nullable|exists:booking_groups,id',
         ]);
 
         // Breakfast count validation
@@ -295,13 +346,14 @@ class BookingController extends Controller
             }
 
             // Early checkout: truncate the check_out date to free the room for other bookings
-            $today = \Carbon\Carbon::today()->toDateString();
+            $today = Carbon::today()->toDateString();
             $currentCheckOut = $validated['check_out'] ?? $booking->check_out;
             if ($currentCheckOut > $today) {
                 $validated['check_out'] = $today;
                 
-                $userId = $request->user()?->id;
-                $auditMsg = "[Early CO: on {$today}" . ($userId ? " by User #{$userId}" : "") . "]";
+                $user = $request->user();
+                $userName = $user ? $user->name : ($user ? "User #{$user->id}" : "");
+                $auditMsg = "[Early CO: on {$today}" . ($userName ? " by {$userName}" : "") . "]";
                 $existingNotes = $validated['notes'] ?? $booking->notes;
                 $validated['notes'] = $existingNotes ? $existingNotes . "\n" . $auditMsg : $auditMsg;
             }
@@ -336,15 +388,56 @@ class BookingController extends Controller
 
         $booking->update($validated);
 
-        // Sync room status
+        // Sync Stay Segments
+        if (isset($validated['room_id']) || isset($validated['check_in']) || isset($validated['check_out']) || isset($validated['status'])) {
+            $segmentCount = $booking->segments()->count();
+            $newStatus = $validated['status'] ?? $booking->status;
+            
+            // If No segments exist, create a baseline one (safety for legacy data)
+            if ($segmentCount === 0) {
+                $booking->segments()->create([
+                    'room_id'   => $booking->room_id,
+                    'check_in'  => $booking->check_in,
+                    'check_out' => $booking->check_out,
+                    'total_price' => $booking->total_price,
+                    'status'    => $newStatus,
+                ]);
+            } else if ($segmentCount === 1) {
+                // Keep the single segment in perfect sync
+                $booking->segments()->first()->update([
+                    'room_id'   => $booking->room_id,
+                    'check_in'  => $booking->check_in,
+                    'check_out' => $booking->check_out,
+                    'total_price' => $booking->total_price,
+                    'status'    => $newStatus,
+                ]);
+            } else if (isset($validated['status'])) {
+                // For multi-segment stays, when checking in, find the segment that corresponds to "now" or the first one
+                if ($validated['status'] === 'checked_in') {
+                    $firstSegment = $booking->segments()->orderBy('check_in', 'asc')->first();
+                    if ($firstSegment) {
+                        $firstSegment->update(['status' => 'checked_in']);
+                    }
+                } elseif ($validated['status'] === 'checked_out' || $validated['status'] === 'cancelled') {
+                    // Update all segments if the whole booking is cancelled/checked_out
+                    $booking->segments()->update(['status' => $validated['status']]);
+                }
+            }
+        }
+
+        // Sync room status — for split stays, ALL rooms across all segments must be updated.
         if (isset($validated['status'])) {
             $roomStatus = match($validated['status']) {
-                'checked_in'   => 'occupied',
-                'checked_out'  => 'dirty',
-                'cancelled'    => 'available',
-                default        => $booking->room->status,
+                'checked_in'  => 'occupied',
+                'checked_out' => 'dirty',
+                'cancelled'   => 'available',
+                default       => $booking->room->status,
             };
-            $booking->room->update(['status' => $roomStatus]);
+
+            // Collect every distinct room touched by this booking's segments
+            $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
+
+            Room::whereIn('id', $allRoomIds)->update(['status' => $roomStatus]);
         }
 
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
@@ -381,8 +474,9 @@ class BookingController extends Controller
             ], 422);
         }
 
-        $userId   = $request->user()?->id;
-        $auditMsg = "[Early CI: {$time} by User #{$userId} on " . now()->format('Y-m-d H:i') . "]";
+        $user     = $request->user();
+        $userName = $user ? $user->name : ($user ? "User #{$user->id}" : "");
+        $auditMsg = "[Early CI: {$time}" . ($userName ? " by {$userName}" : "") . " on " . now()->format('Y-m-d H:i') . "]";
         $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
@@ -422,8 +516,9 @@ class BookingController extends Controller
             ], 422);
         }
 
-        $userId   = $request->user()?->id;
-        $auditMsg = "[Late CO: {$time} by User #{$userId} on " . now()->format('Y-m-d H:i') . "]";
+        $user     = $request->user();
+        $userName = $user ? $user->name : ($user ? "User #{$user->id}" : "");
+        $auditMsg = "[Late CO: {$time}" . ($userName ? " by {$userName}" : "") . " on " . now()->format('Y-m-d H:i') . "]";
         $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
@@ -446,45 +541,62 @@ class BookingController extends Controller
         $roomId      = $booking->room_id;
 
         // Overlap check for the extension gap [current check_out → new check_out]
-        $overlap = Booking::where('room_id', $roomId)
+        $conflict = Booking::with(['room.roomType'])
+            ->where('room_id', $roomId)
             ->where('id', '!=', $booking->id)
             ->where('status', '!=', 'cancelled')
             ->where('check_in', '<', $newCheckOut)
             ->where('check_out', '>', $oldCheckOut)
-            ->exists();
+            ->first();
 
-        if ($overlap) {
+        if ($conflict) {
             return response()->json([
-                'message' => 'Room is already reserved for the selected extension period.',
-            ], 422);
+                'message' => 'Room Conflict Detected',
+                'conflict' => $conflict,
+                'suggestion' => 'Move incoming guest or split stay.'
+            ], 409);
         }
 
-        // Recalculate total price: add nightly rate × additional nights
-        $room = $booking->room()->with('roomType.tax')->first();
+        // Recalculate total price using rate plan if available
+        $room = $booking->room()->with(['roomType.tax', 'roomType.ratePlans'])->first();
         $extraNights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
         $extraCost   = 0;
+
         if ($room?->roomType) {
-            $rt        = $room->roomType;
+            $rt = $room->roomType;
+            $ratePlan = null;
+            if ($booking->rate_plan_id) {
+                $ratePlan = $rt->ratePlans->find($booking->rate_plan_id);
+            }
+            if (!$ratePlan) {
+                $ratePlan = $rt->ratePlans->first(); // Fallback
+            }
+
+            $basePrice = $ratePlan ? $ratePlan->base_price : $rt->base_price;
+            $extraBedCost = $rt->extra_bed_cost ?? 0;
             $extraBeds = $booking->extra_beds_count ?? 0;
-            $adults    = $booking->adults_count ?? 1;
-            $children  = $booking->children_count ?? 0;
-            
-            $baseNightCost = ($rt->base_price * $extraNights) + ($rt->extra_bed_cost * $extraBeds * $extraNights);
-            
-            $adultB   = $booking->adult_breakfast_count ?? 0;
-            $childB   = $booking->child_breakfast_count ?? 0;
-            $breakfastCost = (($rt->breakfast_price * $adultB) + ($rt->child_breakfast_price * $childB)) * $extraNights;
-            $baseNightCost += $breakfastCost;
-            
-            $extraCost = $baseNightCost;
+
+            $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+
+            // Breakfast inclusion
+            if ($ratePlan && $ratePlan->includes_breakfast) {
+                $adults = $booking->adults_count ?? 1;
+                $children = $booking->children_count ?? 0;
+                $nightlyRoomCost += ($rt->breakfast_price * $adults) + ($rt->child_breakfast_price * $children);
+            }
+
+            $subtotalExtension = $nightlyRoomCost * $extraNights;
+            $extraCost = $subtotalExtension;
+
             if ($rt->tax) {
-                $extraCost += $extraCost * ($rt->tax->rate / 100);
+                $extraCost += $subtotalExtension * ($rt->tax->rate / 100);
             }
         }
         $newTotalPrice = (float) $booking->total_price + $extraCost;
 
-        $userId   = $request->user()?->id;
-        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut} by User #{$userId} on " . now()->format('Y-m-d H:i') . "]";
+        $user     = $request->user();
+        $userName = $user ? $user->name : ($user ? "User #{$user->id}" : "");
+        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut}" . ($userName ? " by {$userName}" : "") . " on " . now()->format('Y-m-d H:i') . "]";
         $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
@@ -493,7 +605,90 @@ class BookingController extends Controller
             'notes'       => $notes,
         ]);
 
-        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
+        // Update the segment to match the extension
+        $lastSegment = $booking->segments()->orderBy('check_out', 'desc')->first();
+        if ($lastSegment && $lastSegment->room_id == $roomId && $lastSegment->check_out == $oldCheckOut) {
+            $lastSegment->update([
+                'check_out' => $newCheckOut,
+                'total_price' => (float)$lastSegment->total_price + $extraCost,
+            ]);
+        }
+
+        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']));
+    }
+
+    /**
+     * Handle Split Stay: Add a new segment to an existing booking.
+     */
+    public function splitStay(Request $request, Booking $booking)
+    {
+        $validated = $request->validate([
+            'new_room_id'   => 'required|exists:rooms,id',
+            'new_check_out' => 'required|date|after:' . $booking->check_out,
+        ]);
+
+        $oldCheckOut = $booking->check_out;
+        $newCheckOut = $validated['new_check_out'];
+        $newRoomId   = $validated['new_room_id'];
+
+        // Calculate price for the new segment
+        $newRoom = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail($newRoomId);
+        $nights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
+        
+        $rt = $newRoom->roomType;
+        // Try to match existing rate plan if possible
+        $ratePlan = $booking->rate_plan_id ? $rt->ratePlans->find($booking->rate_plan_id) : $rt->ratePlans->first();
+        
+        $basePrice = $ratePlan ? $ratePlan->base_price : ($rt->base_price ?? 0);
+        $extraBedCost = $rt->extra_bed_cost ?? 0;
+        $extraBeds = $booking->extra_beds_count ?? 0;
+
+        $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+
+        // Breakfast inclusion
+        if ($ratePlan && $ratePlan->includes_breakfast) {
+            $adults = $booking->adults_count ?? 1;
+            $children = $booking->children_count ?? 0;
+            $nightlyRoomCost += (($rt->breakfast_price ?? 0) * $adults) + (($rt->child_breakfast_price ?? 0) * $children);
+        }
+
+        $segmentSubtotal = $nightlyRoomCost * $nights;
+        $segmentTotal = $segmentSubtotal;
+
+        if ($rt->tax) {
+            $segmentTotal += $segmentSubtotal * ($rt->tax->rate / 100);
+        }
+
+        // Add segment — inherit the parent booking's status so a checked_in guest
+        // shows as "occupied" (not "reserved") on the room chart for the new room.
+        $segmentStatus = $booking->status === 'checked_in' ? 'checked_in' : 'confirmed';
+
+        $newSegment = BookingSegment::create([
+            'booking_id'    => $booking->id,
+            'room_id'       => $newRoomId,
+            'check_in'      => $oldCheckOut,
+            'check_out'     => $newCheckOut,
+            'rate_plan_id'  => $ratePlan ? $ratePlan->id : null,
+            'adults_count'  => $booking->adults_count,
+            'children_count'=> $booking->children_count,
+            'extra_beds_count' => $booking->extra_beds_count,
+            'total_price'   => $segmentTotal,
+            'status'        => $segmentStatus,
+        ]);
+
+        // Update main booking
+        $user     = $request->user();
+        $userName = $user ? $user->name : ($user ? "User #{$user->id}" : "");
+        $auditMsg = "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : "") . " on " . now()->format('Y-m-d H:i') . "]";
+        $notes    = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+        $booking->update([
+            'check_out'   => $newCheckOut,
+            'total_price' => (float)$booking->total_price + $segmentTotal,
+            'notes'       => $notes,
+        ]);
+
+        return response()->json($booking->load(['segments.room', 'creator']));
     }
 
     public function destroy(Booking $booking)
@@ -501,5 +696,42 @@ class BookingController extends Controller
         $booking->room->update(['status' => 'available']);
         $booking->delete();
         return response()->json(null, 204);
+    }
+
+    public function getAvailableRooms(Request $request)
+    {
+        $request->validate([
+            'check_in'  => 'required|date',
+            'check_out' => 'required|date|after:check_in',
+            'room_type_id' => 'nullable|exists:room_types,id',
+            'exclude_booking_id' => 'nullable|integer',
+            'exclude_room_id'    => 'nullable|integer',
+        ]);
+
+        $checkIn  = $request->check_in;
+        $checkOut = $request->check_out;
+        $typeId   = $request->room_type_id;
+        $excludeId = $request->exclude_booking_id;
+        $excludeRoomId = $request->exclude_room_id;
+
+        $rooms = Room::with('roomType')
+            ->where('status', '!=', 'maintenance')
+            ->when($excludeRoomId, function($q) use ($excludeRoomId) {
+                $q->where('id', '!=', $excludeRoomId);
+            })
+            ->when($typeId, function($q) use ($typeId) {
+                $q->where('room_type_id', $typeId);
+            })
+            ->whereDoesntHave('bookings', function($q) use ($checkIn, $checkOut, $excludeId) {
+                $q->where('status', '!=', 'cancelled')
+                  ->where('check_in', '<', $checkOut)
+                  ->where('check_out', '>', $checkIn)
+                  ->when($excludeId, function($sq) use ($excludeId) {
+                      $sq->where('id', '!=', $excludeId);
+                  });
+            })
+            ->get();
+
+        return response()->json($rooms);
     }
 }
