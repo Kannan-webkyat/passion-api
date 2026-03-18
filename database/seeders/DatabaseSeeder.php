@@ -19,10 +19,15 @@ class DatabaseSeeder extends Seeder
             RolePermissionSeeder::class,
             DepartmentSeeder::class,
             LocationSeeder::class,
-            HotelInventorySeeder::class,
+            ChickenBiryaniSeeder::class,
+            QuickItemsSeeder::class,
+            KitchenStaffSeeder::class,
+            ReceptionistSeeder::class,
+            StoreManagerSeeder::class,
             UserDepartmentSeeder::class,
             RoomSeeder::class,
             BookingSeeder::class,
+            RestaurantTableSeeder::class,
         ]);
 
         User::firstOrCreate(

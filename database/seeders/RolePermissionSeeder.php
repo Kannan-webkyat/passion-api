@@ -27,6 +27,8 @@ class RolePermissionSeeder extends Seeder
             'manage-users',
             'manage-settings',
             'create-requisition',
+            'kitchen-production',
+            'pos-order',
         ];
 
         foreach ($permissions as $permission) {
@@ -44,12 +46,12 @@ class RolePermissionSeeder extends Seeder
         $inventoryManager->syncPermissions(['manage-inventory']);
 
         $restaurantStaff = Role::firstOrCreate(['name' => 'Restaurant Staff']);
-        $restaurantStaff->syncPermissions(['manage-restaurant', 'create-requisition']);
+        $restaurantStaff->syncPermissions(['manage-restaurant', 'pos-order', 'create-requisition']);
 
         $barStaff = Role::firstOrCreate(['name' => 'Bar Staff']);
         $barStaff->syncPermissions(['manage-bar', 'create-requisition']);
 
         $kitchenStaff = Role::firstOrCreate(['name' => 'Kitchen Staff']);
-        $kitchenStaff->syncPermissions(['create-requisition']);
+        $kitchenStaff->syncPermissions(['kitchen-production', 'create-requisition']);
     }
 }

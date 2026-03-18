@@ -9,6 +9,17 @@ use App\Http\Controllers\RoleController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\DepartmentController;
+use App\Http\Controllers\MenuCategoryController;
+use App\Http\Controllers\MenuSubCategoryController;
+use App\Http\Controllers\MenuItemController;
+use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\ComboController;
+use App\Http\Controllers\RecipeController;
+use App\Http\Controllers\RestaurantMasterController;
+use App\Http\Controllers\TableCategoryController;
+use App\Http\Controllers\TableController;
+use App\Http\Controllers\TableReservationController;
+use App\Http\Controllers\PosController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -38,6 +49,48 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('bookings/available-rooms',           [BookingController::class, 'getAvailableRooms']);
     Route::post('booking-groups',                    [BookingController::class, 'storeGroup']);
     Route::apiResource('bookings', BookingController::class);
+
+    // F&B Module (Restaurant Master)
+    Route::apiResource('restaurant-masters', RestaurantMasterController::class);
+
+    // F&B Module (Table Master)
+    Route::apiResource('table-categories', TableCategoryController::class);
+    Route::apiResource('tables', TableController::class);
+    Route::post('table-reservations/{tableReservation}/check-in', [TableReservationController::class, 'checkIn']);
+    Route::post('table-reservations/{tableReservation}/complete',  [TableReservationController::class, 'complete']);
+    Route::post('table-reservations/{tableReservation}/cancel',    [TableReservationController::class, 'cancel']);
+    Route::apiResource('table-reservations', TableReservationController::class);
+
+    // POS Module
+    Route::get('pos/restaurants',              [PosController::class, 'restaurants']);
+    Route::get('pos/tables',                   [PosController::class, 'tables']);
+    Route::get('pos/rooms',                    [PosController::class, 'rooms']);
+    Route::get('pos/active-orders',            [PosController::class, 'activeOrders']);
+    Route::get('pos/menu',                     [PosController::class, 'menu']);
+    Route::post('pos/orders',                  [PosController::class, 'openOrder']);
+    Route::get('pos/orders/{order}',           [PosController::class, 'getOrder']);
+    Route::put('pos/orders/{order}/items',     [PosController::class, 'syncItems']);
+    Route::post('pos/orders/{order}/kot',      [PosController::class, 'sendKot']);
+    Route::post('pos/orders/{order}/settle',   [PosController::class, 'settle']);
+    Route::post('pos/orders/{order}/void',     [PosController::class, 'void']);
+
+    // Kitchen Display
+    Route::get('kitchen/display',                          [PosController::class, 'kitchenDisplay']);
+    Route::patch('pos/orders/{order}/kitchen-status',      [PosController::class, 'updateKitchenStatus']);
+
+    // F&B Module (Menu Configuration)
+    Route::apiResource('menu-categories', MenuCategoryController::class);
+    Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);
+    Route::apiResource('menu-items', MenuItemController::class);
+    Route::apiResource('menu-dietary-types', DietaryTypeController::class);
+    Route::apiResource('menu-combos', ComboController::class);
+
+    // BOM / Recipe Module
+    Route::get('recipes',                            [RecipeController::class, 'index']);
+    Route::put('recipes/menu-item/{menuItemId}',     [RecipeController::class, 'upsert']);
+    Route::post('recipes/{recipe}/produce',          [RecipeController::class, 'produce']);
+    Route::get('production-logs',                    [RecipeController::class, 'productionLogs']);
+    Route::get('production-logs/{log}/details',      [RecipeController::class, 'productionLogDetails']);
 
     // Inventory Module
     Route::get('inventory/stats',  [\App\Http\Controllers\InventoryController::class, 'stats']);

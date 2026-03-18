@@ -33,6 +33,7 @@ class Booking extends Model
         'payment_status',
         'payment_method',
         'deposit_amount',
+        'extra_charges',
         'status',
         'booking_source',
         'source_reference',

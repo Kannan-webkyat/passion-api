@@ -116,7 +116,7 @@ class InventoryController extends Controller
     {
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom')->get();
 
-        $totalValue      = $items->sum(fn($i) => $i->current_stock * $i->cost_price);
+        $totalValue      = $items->sum(fn($i) => $i->current_stock * ($i->cost_price / ($i->conversion_factor ?: 1)));
         $lowStockCount   = $items->filter(fn($i) => $i->current_stock <= $i->reorder_level)->count();
         $recentTx        = InventoryTransaction::with(['item', 'location'])->latest()->take(10)->get();
 
