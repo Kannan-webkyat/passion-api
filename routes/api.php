@@ -20,6 +20,7 @@ use App\Http\Controllers\TableCategoryController;
 use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
 use App\Http\Controllers\PosController;
+use App\Http\Controllers\RoomStatusBlockController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -32,6 +33,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Rooms
     Route::apiResource('rooms', RoomController::class);
+    Route::apiResource('room-status-blocks', RoomStatusBlockController::class);
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);

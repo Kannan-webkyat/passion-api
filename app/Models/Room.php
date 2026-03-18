@@ -6,7 +6,11 @@ use Illuminate\Database\Eloquent\Model;
 
 class Room extends Model
 {
-    protected $fillable = ['room_number', 'room_type_id', 'status', 'floor', 'notes'];
+    protected $fillable = ['room_number', 'room_type_id', 'is_active', 'status', 'floor', 'notes'];
+
+    protected $casts = [
+        'is_active' => 'boolean',
+    ];
 
     public function roomType()
     {
@@ -19,5 +23,10 @@ class Room extends Model
     public function segments()
     {
         return $this->hasMany(BookingSegment::class);
+    }
+
+    public function statusBlocks()
+    {
+        return $this->hasMany(RoomStatusBlock::class);
     }
 }

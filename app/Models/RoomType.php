@@ -9,6 +9,7 @@ class RoomType extends Model
     protected $fillable = [
         'name', 
         'description', 
+        'is_active',
         'base_price', 
         'breakfast_price',
         'child_breakfast_price',
@@ -24,6 +25,7 @@ class RoomType extends Model
 
     protected $casts = [
         'amenities' => 'array',
+        'is_active' => 'boolean',
         'breakfast_price' => 'decimal:2',
         'child_breakfast_price' => 'decimal:2',
     ];

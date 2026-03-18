@@ -7,6 +7,7 @@ use App\Models\Room;
 use App\Models\BookingSegment;
 use App\Models\BookingGroup;
 use App\Models\RatePlan;
+use App\Models\RoomStatusBlock;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 
@@ -28,7 +29,11 @@ class BookingController extends Controller
         // Show 14 days by default for better visibility
         $end   = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
 
-        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'segments' => function ($q) use ($start, $end) {
+        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'statusBlocks' => function ($q) use ($start, $end) {
+            $q->where('is_active', true)
+              ->where('start_date', '<', $end->toDateString())
+              ->where('end_date', '>', $start->toDateString());
+        }, 'segments' => function ($q) use ($start, $end) {
             $q->where('check_out', '>=', $start)
               ->where('check_in',  '<=', $end)
               ->whereNotIn('status', ['cancelled'])
@@ -47,15 +52,22 @@ class BookingController extends Controller
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
 
-        $rooms = Room::with(['segments' => function ($q) use ($date) {
+        $rooms = Room::with(['statusBlocks' => function ($q) use ($date) {
+            $d = $date->toDateString();
+            $q->where('is_active', true)
+              // day is active if start_date <= d < end_date  (end_date is exclusive)
+              ->where('start_date', '<=', $d)
+              ->where('end_date', '>', $d);
+        }, 'segments' => function ($q) use ($date) {
             $q->where('status', '!=', 'cancelled')
               ->where('check_in', '<=', $date)
               ->where('check_out', '>', $date);
-        }])->get();
+        }, 'segments.booking'])->get();
 
         $counts = [
             'total'           => $rooms->count(),
             'occupied'        => 0,
+            'reserved'        => 0,
             'maintenance'     => 0,
             'dirty'           => 0,
             'cleaning'        => 0,
@@ -66,13 +78,21 @@ class BookingController extends Controller
 
         foreach ($rooms as $room) {
             if ($room->segments->isNotEmpty()) {
-                $counts['occupied']++;
-            } elseif ($room->status === 'maintenance') {
-                $counts['maintenance']++;
-            } elseif ($room->status === 'dirty') {
-                $counts['dirty']++;
-            } elseif ($room->status === 'cleaning') {
-                $counts['cleaning']++;
+                // If any active segment's booking is checked_in, treat as occupied; else reserved
+                $isCheckedIn = $room->segments->contains(function ($seg) {
+                    $bStatus = $seg->booking?->status;
+                    return $bStatus === 'checked_in' || $seg->status === 'checked_in';
+                });
+
+                if ($isCheckedIn) $counts['occupied']++;
+                else $counts['reserved']++;
+            } elseif ($room->statusBlocks->isNotEmpty()) {
+                // if there are multiple blocks (shouldn't), take first
+                $st = $room->statusBlocks->first()->status;
+                if ($st === 'maintenance') $counts['maintenance']++;
+                else if ($st === 'dirty') $counts['dirty']++;
+                else if ($st === 'cleaning') $counts['cleaning']++;
+                else $counts['available']++;
             } else {
                 $counts['available']++;
             }
@@ -414,10 +434,10 @@ class BookingController extends Controller
             } else if (isset($validated['status'])) {
                 // For multi-segment stays, when checking in, find the segment that corresponds to "now" or the first one
                 if ($validated['status'] === 'checked_in') {
-                    $firstSegment = $booking->segments()->orderBy('check_in', 'asc')->first();
-                    if ($firstSegment) {
-                        $firstSegment->update(['status' => 'checked_in']);
-                    }
+                    // Continuous stay semantics: once the guest is checked in, ALL segments represent the same
+                    // uninterrupted stay (even if room changes later). Mark every segment as checked_in so the
+                    // room chart renders the entire stay as occupied across rooms/dates.
+                    $booking->segments()->update(['status' => 'checked_in']);
                 } elseif ($validated['status'] === 'checked_out' || $validated['status'] === 'cancelled') {
                     // Update all segments if the whole booking is cancelled/checked_out
                     $booking->segments()->update(['status' => $validated['status']]);
@@ -438,6 +458,34 @@ class BookingController extends Controller
             $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
 
             Room::whereIn('id', $allRoomIds)->update(['status' => $roomStatus]);
+
+            // NEW FLOW: date-based housekeeping after checkout
+            // When a booking is checked out, mark the affected rooms as DIRTY for that checkout date
+            // via room_status_blocks so Room Chart + availability reflect housekeeping correctly.
+            if ($validated['status'] === 'checked_out') {
+                $co = Carbon::parse($booking->check_out)->toDateString();
+                $coNext = Carbon::parse($booking->check_out)->addDay()->toDateString(); // [co, co+1)
+
+                foreach ($allRoomIds as $rid) {
+                    $hasBlock = RoomStatusBlock::where('room_id', $rid)
+                        ->where('is_active', true)
+                        ->where('start_date', '<', $coNext)
+                        ->where('end_date', '>', $co)
+                        ->exists();
+
+                    if (!$hasBlock) {
+                        RoomStatusBlock::create([
+                            'room_id' => $rid,
+                            'status' => 'dirty',
+                            'start_date' => $co,
+                            'end_date' => $coNext,
+                            'note' => 'Auto: checkout',
+                            'is_active' => true,
+                            'created_by' => $request->user()?->id,
+                        ]);
+                    }
+                }
+            }
         }
 
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
@@ -536,29 +584,50 @@ class BookingController extends Controller
             'new_check_out' => 'required|date|after:' . $booking->check_out,
         ]);
 
-        $oldCheckOut = $booking->check_out;
+        // IMPORTANT: for multi-segment (room-change) stays, extensions must continue
+        // from the LAST segment (latest check_out), not from booking.room_id.
+        $lastSegment = $booking->segments()->orderBy('check_out', 'desc')->first();
+        if (!$lastSegment) {
+            // Safety for legacy data: if no segment exists, create one mirroring the booking
+            $lastSegment = $booking->segments()->create([
+                'room_id'      => $booking->room_id,
+                'check_in'     => $booking->check_in,
+                'check_out'    => $booking->check_out,
+                'rate_plan_id' => $booking->rate_plan_id,
+                'adults_count' => $booking->adults_count,
+                'children_count' => $booking->children_count,
+                'extra_beds_count' => $booking->extra_beds_count,
+                'total_price'  => $booking->total_price,
+                'status'       => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
+            ]);
+        }
+
+        $oldCheckOut = $lastSegment->check_out;
         $newCheckOut = $request->input('new_check_out');
-        $roomId      = $booking->room_id;
+        $roomId      = $lastSegment->room_id;
 
         // Overlap check for the extension gap [current check_out → new check_out]
-        $conflict = Booking::with(['room.roomType'])
+        // IMPORTANT: use segments (not bookings.room_id) so split-stays are handled correctly.
+        $conflictSegment = BookingSegment::with(['booking.room.roomType'])
             ->where('room_id', $roomId)
-            ->where('id', '!=', $booking->id)
+            ->where('booking_id', '!=', $booking->id)
             ->where('status', '!=', 'cancelled')
             ->where('check_in', '<', $newCheckOut)
             ->where('check_out', '>', $oldCheckOut)
+            ->orderBy('check_in', 'asc')
             ->first();
+        $conflict = $conflictSegment?->booking;
 
         if ($conflict) {
             return response()->json([
                 'message' => 'Room Conflict Detected',
                 'conflict' => $conflict,
-                'suggestion' => 'Move incoming guest or split stay.'
+                'suggestion' => 'Move future reservation or move current guest.'
             ], 409);
         }
 
-        // Recalculate total price using rate plan if available
-        $room = $booking->room()->with(['roomType.tax', 'roomType.ratePlans'])->first();
+        // Recalculate total price using rate plan if available (based on the room being extended)
+        $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->find($roomId);
         $extraNights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
         $extraCost   = 0;
 
@@ -605,14 +674,11 @@ class BookingController extends Controller
             'notes'       => $notes,
         ]);
 
-        // Update the segment to match the extension
-        $lastSegment = $booking->segments()->orderBy('check_out', 'desc')->first();
-        if ($lastSegment && $lastSegment->room_id == $roomId && $lastSegment->check_out == $oldCheckOut) {
-            $lastSegment->update([
-                'check_out' => $newCheckOut,
-                'total_price' => (float)$lastSegment->total_price + $extraCost,
-            ]);
-        }
+        // Update the LAST segment to match the extension (continue the chain)
+        $lastSegment->update([
+            'check_out'    => $newCheckOut,
+            'total_price'  => (float) $lastSegment->total_price + $extraCost,
+        ]);
 
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']));
     }
@@ -715,20 +781,31 @@ class BookingController extends Controller
         $excludeRoomId = $request->exclude_room_id;
 
         $rooms = Room::with('roomType')
-            ->where('status', '!=', 'maintenance')
+            ->where('is_active', true)
             ->when($excludeRoomId, function($q) use ($excludeRoomId) {
                 $q->where('id', '!=', $excludeRoomId);
             })
             ->when($typeId, function($q) use ($typeId) {
                 $q->where('room_type_id', $typeId);
             })
-            ->whereDoesntHave('bookings', function($q) use ($checkIn, $checkOut, $excludeId) {
+            // Room type active is optional; keeping as extra safety
+            ->whereHas('roomType', function ($q) {
+                $q->where('is_active', true);
+            })
+            // IMPORTANT: use segments so split-stays are respected
+            ->whereDoesntHave('segments', function($q) use ($checkIn, $checkOut, $excludeId) {
                 $q->where('status', '!=', 'cancelled')
                   ->where('check_in', '<', $checkOut)
                   ->where('check_out', '>', $checkIn)
                   ->when($excludeId, function($sq) use ($excludeId) {
-                      $sq->where('id', '!=', $excludeId);
+                      $sq->where('booking_id', '!=', $excludeId);
                   });
+            })
+            // Exclude rooms blocked by maintenance/dirty/cleaning ranges
+            ->whereDoesntHave('statusBlocks', function ($q) use ($checkIn, $checkOut) {
+                $q->where('is_active', true)
+                  ->where('start_date', '<', $checkOut)
+                  ->where('end_date', '>', $checkIn);
             })
             ->get();
 

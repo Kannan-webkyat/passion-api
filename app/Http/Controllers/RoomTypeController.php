@@ -35,6 +35,7 @@ class RoomTypeController extends Controller
         $validated = $request->validate([
             'name'                  => 'required|string|max:255',
             'description'           => 'nullable|string',
+            'is_active'             => 'nullable|boolean',
             'base_price'            => 'required|numeric|min:0',
             'breakfast_price'       => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
@@ -73,6 +74,7 @@ class RoomTypeController extends Controller
         $validated = $request->validate([
             'name'                  => 'string|max:255',
             'description'           => 'nullable|string',
+            'is_active'             => 'nullable|boolean',
             'base_price'            => 'numeric|min:0',
             'breakfast_price'       => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
