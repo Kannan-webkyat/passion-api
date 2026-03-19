@@ -20,6 +20,7 @@ class DatabaseSeeder extends Seeder
             RolePermissionSeeder::class,
             DepartmentSeeder::class,
             LocationSeeder::class,
+            RestaurantTableSeeder::class,  // Must run before FreshBiryaniTeaCoffeeSeeder (creates restaurants)
             FreshBiryaniTeaCoffeeSeeder::class,
             KitchenStaffSeeder::class,
             ReceptionistSeeder::class,
@@ -28,7 +29,6 @@ class DatabaseSeeder extends Seeder
             UserDepartmentSeeder::class,
             RoomSeeder::class,
             BookingSeeder::class,
-            RestaurantTableSeeder::class,
         ]);
 
         User::firstOrCreate(

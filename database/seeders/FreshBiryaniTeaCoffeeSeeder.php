@@ -29,7 +29,24 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
 
         $tables = [
             'pos_payments', 'pos_order_items', 'pos_orders',
-            'recipe_ingredients', 'recipes', 'production_logs',
+        ];
+        foreach ($tables as $t) {
+            if (Schema::hasTable($t)) {
+                DB::table($t)->truncate();
+            }
+        }
+
+        // Reset table status: occupied/cleaning tables with no orders → available
+        if (Schema::hasTable('restaurant_tables')) {
+            DB::table('restaurant_tables')
+                ->whereIn('status', ['occupied', 'cleaning'])
+                ->update(['status' => 'available']);
+        }
+
+        $tables = [
+            'recipe_ingredients',
+            'recipes',
+            'production_logs',
             'restaurant_menu_items', 'menu_items', 'menu_sub_categories', 'menu_categories',
             'dietary_types',
             'inventory_item_locations', 'inventory_transactions', 'grns',
