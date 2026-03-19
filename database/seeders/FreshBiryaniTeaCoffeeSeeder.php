@@ -151,24 +151,53 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ]);
         }
 
-        // ─── 6. Stock in locations ──────────────────────────────────────────
+        // ─── 6. Stock in locations (quantities in issue UOM: Gm, Ml, or Pcs) ─
         $mainStore = InventoryLocation::where('name', 'Main Store')->first();
         $kitchenStore = InventoryLocation::where('name', 'Kitchen Store')->first();
 
-        $stockQty = [];
-        foreach ($itemMap as $name => $item) {
-            $stockQty[$name] = $item->reorder_level * 15;
-        }
+        // Stock per item: Main Store + Kitchen Store (each gets same qty in issue UOM)
+        // Gm items: 20000 = 20 kg, 10000 = 10 kg, etc. | Ml: 20000 = 20 Ltr | Pcs: 120 = 10 dozen
+        $stockQty = [
+            'Chicken (Bone-in)'   => 20000,  // 20 kg
+            'Mutton'              => 15000,  // 15 kg
+            'Basmati Rice'        => 25000,  // 25 kg
+            'Onion'               => 10000,  // 10 kg
+            'Tomato'              => 10000,  // 10 kg
+            'Mint Leaves'         => 2000,   // 2 kg
+            'Coriander Leaves'    => 2000,   // 2 kg
+            'Curd (Yogurt)'       => 5000,   // 5 kg
+            'Desi Ghee'           => 5000,   // 5 kg
+            'Sunflower Oil'       => 20000,  // 20 Ltr (ml)
+            'Ginger-Garlic Paste' => 5000,   // 5 kg
+            'Biryani Masala'      => 2000,   // 2 kg
+            'Red Chilli Powder'   => 2000,   // 2 kg
+            'Turmeric Powder'     => 1000,   // 1 kg
+            'Garam Masala'        => 1000,   // 1 kg
+            'Salt'                => 10000,  // 10 kg
+            'Saffron'             => 50,     // 50 gm (expensive)
+            'Tea Leaves'          => 5000,   // 5 kg
+            'Coffee Powder'       => 2000,   // 2 kg
+            'Milk'                => 20000,  // 20 Ltr (ml)
+            'Sugar'               => 10000,  // 10 kg
+            'Cardamom'            => 500,    // 500 gm
+            'Cinnamon'            => 500,    // 500 gm
+            'Ginger'              => 2000,   // 2 kg
+            'Potato'               => 15000, // 15 kg
+            'Eggs'                => 120,    // 120 pcs (10 dozen)
+            'Butter'               => 2000,   // 2 kg
+            'Green Chilli'         => 2000,   // 2 kg
+        ];
 
         foreach (array_filter([$mainStore, $kitchenStore]) as $loc) {
             foreach ($stockQty as $itemName => $qty) {
+                if (!isset($itemMap[$itemName])) continue;
                 DB::table('inventory_item_locations')->insert([
-                    'inventory_item_id' => $itemMap[$itemName]->id,
+                    'inventory_item_id'     => $itemMap[$itemName]->id,
                     'inventory_location_id' => $loc->id,
-                    'quantity' => $qty,
-                    'reorder_level' => 0,
-                    'created_at' => now(),
-                    'updated_at' => now(),
+                    'quantity'              => $qty,
+                    'reorder_level'         => 0,
+                    'created_at'            => now(),
+                    'updated_at'            => now(),
                 ]);
             }
         }
