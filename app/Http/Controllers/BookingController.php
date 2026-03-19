@@ -78,7 +78,7 @@ class BookingController extends Controller
     public function index(Request $request)
     {
         return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
-            ->when($request->booking_group_id, function($q) use ($request) {
+            ->when($request->booking_group_id, function ($q) use ($request) {
                 $q->where('booking_group_id', $request->booking_group_id);
             })
             ->orderBy('check_in')
@@ -96,13 +96,13 @@ class BookingController extends Controller
 
         $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'statusBlocks' => function ($q) use ($start, $end) {
             $q->where('is_active', true)
-              ->where('start_date', '<', $end->toDateString())
-              ->where('end_date', '>', $start->toDateString());
+                ->where('start_date', '<', $end->toDateString())
+                ->where('end_date', '>', $start->toDateString());
         }, 'segments' => function ($q) use ($rangeStartAt, $rangeEndAt) {
             $q->where('check_in_at', '<', $rangeEndAt)
-              ->where('check_out_at', '>', $rangeStartAt)
-              ->whereNotIn('status', ['cancelled'])
-              ->with(['booking', 'ratePlan']);
+                ->where('check_out_at', '>', $rangeStartAt)
+                ->whereNotIn('status', ['cancelled'])
+                ->with(['booking', 'ratePlan']);
         }])->get();
 
         return response()->json([
@@ -122,13 +122,13 @@ class BookingController extends Controller
         $rooms = Room::with(['statusBlocks' => function ($q) use ($date) {
             $d = $date->toDateString();
             $q->where('is_active', true)
-              // day is active if start_date <= d < end_date  (end_date is exclusive)
-              ->where('start_date', '<=', $d)
-              ->where('end_date', '>', $d);
+                // day is active if start_date <= d < end_date  (end_date is exclusive)
+                ->where('start_date', '<=', $d)
+                ->where('end_date', '>', $d);
         }, 'segments' => function ($q) use ($dayStartAt, $dayEndAt) {
             $q->where('status', '!=', 'cancelled')
-              ->where('check_in_at', '<', $dayEndAt)
-              ->where('check_out_at', '>', $dayStartAt);
+                ->where('check_in_at', '<', $dayEndAt)
+                ->where('check_out_at', '>', $dayStartAt);
         }, 'segments.booking'])->get();
 
         $counts = [
@@ -139,8 +139,8 @@ class BookingController extends Controller
             'dirty'           => 0,
             'cleaning'        => 0,
             'available'       => 0,
-            'checkins_today'  => Booking::whereDate('check_in',  $today)->whereIn('status', ['confirmed','checked_in'])->count(),
-            'checkouts_today' => Booking::whereDate('check_out', $today)->whereIn('status', ['checked_in','checked_out'])->count(),
+            'checkins_today'  => Booking::whereDate('check_in',  $today)->whereIn('status', ['confirmed', 'checked_in'])->count(),
+            'checkouts_today' => Booking::whereDate('check_out', $today)->whereIn('status', ['checked_in', 'checked_out'])->count(),
         ];
 
         foreach ($rooms as $room) {
@@ -249,7 +249,7 @@ class BookingController extends Controller
                     // by treating it as +12h (max package) to avoid false availability.
                     $end = $checkOutAt ?: $checkInAt->copy()->addHours(12);
                     $query->where('check_in_at', '<', $end)
-                          ->where('check_out_at', '>', $checkInAt);
+                        ->where('check_out_at', '>', $checkInAt);
                 })->exists();
 
             if ($overlap) {
@@ -403,7 +403,7 @@ class BookingController extends Controller
                 'check_out_at'  => $booking->check_out_at,
                 'rate_plan_id'  => $bookingData['rate_plan_id'],
                 'adults_count'  => $bookingData['adults_count'],
-                'children_count'=> $bookingData['children_count'],
+                'children_count' => $bookingData['children_count'],
                 'extra_beds_count' => $bookingData['extra_beds_count'],
                 'total_price'   => $bookingData['total_price'],
                 'status'        => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
@@ -602,7 +602,7 @@ class BookingController extends Controller
 
         // Sync room status — for split stays, ALL rooms across all segments must be updated.
         if (isset($validated['status'])) {
-            $roomStatus = match($validated['status']) {
+            $roomStatus = match ($validated['status']) {
                 'checked_in'  => 'occupied',
                 'checked_out' => 'dirty',
                 'cancelled'   => 'available',
@@ -668,7 +668,7 @@ class BookingController extends Controller
             ->where(function ($q) use ($time) {
                 // Blocked if: no explicit late_checkout (assume standard noon) OR late_checkout >= requested early CI
                 $q->whereNull('late_checkout_time')
-                  ->orWhereTime('late_checkout_time', '>=', $time);
+                    ->orWhereTime('late_checkout_time', '>=', $time);
             })
             ->exists();
 
@@ -710,7 +710,7 @@ class BookingController extends Controller
             ->whereDate('check_in', $checkOutDay)
             ->where(function ($q) use ($time) {
                 $q->whereNull('early_checkin_time')
-                  ->orWhereTime('early_checkin_time', '<=', $time);
+                    ->orWhereTime('early_checkin_time', '<=', $time);
             })
             ->exists();
 
@@ -993,7 +993,7 @@ class BookingController extends Controller
             'check_out_at'  => Carbon::parse($newCheckOut)->startOfDay(),
             'rate_plan_id'  => $ratePlan ? $ratePlan->id : null,
             'adults_count'  => $booking->adults_count,
-            'children_count'=> $booking->children_count,
+            'children_count' => $booking->children_count,
             'extra_beds_count' => $booking->extra_beds_count,
             'total_price'   => $segmentTotal,
             'status'        => $segmentStatus,
@@ -1087,117 +1087,139 @@ class BookingController extends Controller
   <title>{$title}</title>
   <style>
     @page { size: A4 portrait; margin: 10mm; }
-    body{font-family:DejaVu Sans,Arial,Helvetica,sans-serif;color:#0f172a;margin:0;font-size:10px;line-height:1.3;background:#fff}
-    .doc{border:1px solid #d8dee8;border-radius:8px;overflow:hidden}
-    .head{padding:8px 10px;background:#0f2747;color:#fff}
-    .head-table{width:100%;border-collapse:collapse}
-    .head-left{width:52%;vertical-align:top}
-    .head-right{vertical-align:top;text-align:right;font-size:9px;line-height:1.35;color:#dbe7ff}
-    .logo{display:inline-block;width:30px;height:30px;border:1px solid #d4af37;border-radius:4px;background:#fff;text-align:center;line-height:30px;font-size:8px;font-weight:700;color:#1e293b;margin-right:6px}
-    .hotel{display:inline-block;vertical-align:middle;font-size:15px;font-weight:800;letter-spacing:.02em}
-    .voucher-title{padding:7px 10px;text-align:center;font-size:16px;font-weight:800;color:#0f2747;border-bottom:1px solid #e5e7eb;background:#fcfaf6}
-    .meta-strip{padding:6px 10px;border-bottom:1px solid #eceff4;background:#f8fafc}
-    .meta-table{width:100%;border-collapse:collapse}
-    .meta-table td{font-size:9px;color:#475569}
-    .meta-val{font-weight:800;color:#0f172a}
-    .content{padding:8px 10px}
-    .twocol{width:100%;border-collapse:separate;border-spacing:8px 6px}
-    .cell{vertical-align:top;width:50%}
-    .card{border:1px solid #e5e7eb;border-radius:6px;overflow:hidden}
-    .card-h{background:#f8fafc;border-bottom:1px solid #e5e7eb;padding:4px 7px;font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#475569}
-    .row{display:table;width:100%;border-bottom:1px dashed #edf0f4}
-    .row:last-child{border-bottom:none}
-    .k,.v{display:table-cell;padding:5px 7px;vertical-align:top}
-    .k{width:49%;font-size:9px;color:#64748b;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
-    .v{font-size:10.5px;color:#111827;font-weight:700;text-align:right}
-    .policy{margin-top:6px;border:1px solid #e5e7eb;border-radius:6px;padding:5px 8px}
-    .policy p{margin:3px 0;font-size:9.3px;color:#334155}
-    .footer{padding:8px 10px;border-top:1px solid #e5e7eb;display:table;width:100%}
-    .f-left,.f-right{display:table-cell;vertical-align:bottom}
-    .f-left{font-size:11px;font-weight:700;color:#0f2747}
-    .f-right{text-align:right}
-    .sign{display:inline-block;width:170px;border-top:1px solid #94a3b8;padding-top:3px;font-size:8.7px;color:#64748b;text-align:center}
+    body { font-family: DejaVu Sans, Arial, Helvetica, sans-serif; color: #020617; margin: 0; font-size: 11px; line-height: 1.5; background: #fff; }
+    .wrap { max-width: 720px; margin: 0 auto; }
+    .head { margin-bottom: 14px; text-align: center; padding-bottom: 8px; border-bottom: 1px solid #e5e7eb; }
+    .hotel-name { font-size: 18px; font-weight: 800; margin: 0; color: #020617; }
+    .hotel-address { font-size: 10.5px; margin-top: 2px; color: #374151; }
+    .head-title { font-size: 11px; font-weight: 700; margin: 8px 0 0 0; letter-spacing: .16em; text-transform: uppercase; color: #6b7280; }
+    .head-sub { font-size: 9.5px; margin-top: 2px; color: #4b5563; }
+    .info-row { width: 100%; border-collapse: collapse; margin: 12px 0 14px 0; }
+    .info-row td { vertical-align: top; padding: 0; font-size: 10.5px; color: #111827; }
+    .info-block { padding-right: 24px; }
+    .info-label { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: #4b5563; margin-bottom: 2px; font-weight: 600; }
+    .info-value { display: block; font-weight: 700; color: #020617; }
+    .info-spacer { height: 5px; }
+    .section-title { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #4b5563; margin: 12px 0 6px 0; font-weight: 700; }
+    .simple-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; border: 1px solid #d4d4d8; }
+    .simple-table th,
+    .simple-table td { padding: 5px 8px; font-size: 10.5px; border-top: 1px solid #e5e7eb; }
+    .simple-table tr:first-child th { border-top: none; }
+    .simple-table th { background: #f4f4f5; text-align: left; font-weight: 700; color: #111827; }
+    .label { color: #111827; }
+    .value { text-align: right; font-weight: 700; color: #020617; }
+    .muted { color: #4b5563; font-size: 9.5px; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <div class='doc'>
+  <div class='wrap'>
     <div class='head'>
-      <table class='head-table'>
+      <p class='hotel-name'>" . e($hotelName) . "</p>
+      <p class='hotel-address'>" . e($hotelAddress) . "</p>
+      <p class='head-title'>Reservation Voucher</p>
+      <p class='head-sub'>Reservation #{$reservationNo} · Booked on {$bookingDate}</p>
+    </div>
+
+    <table class='info-row'>
+      <tr>
+        <td class='info-block'>
+          <span class='info-label'>Guest</span>
+          <span class='info-value'>{$guestNameEsc}</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Guests</span>
+          <span class='info-value'>{$guestCountValue}</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Contact</span>
+          <span class='info-value'>" . e($contact) . "</span>
+        </td>
+        <td class='info-block'>
+          <span class='info-label'>Stay</span>
+          <span class='info-value'>{$checkInText} → {$checkOutText}</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Nights</span>
+          <span class='info-value'>{$voucherNights}</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Status</span>
+          <span class='info-value'>" . e($paymentStatus) . "</span>
+        </td>
+      </tr>
+    </table>
+
+    <div>
+      <p class='section-title'>Room</p>
+      <table class='simple-table'>
         <tr>
-          <td class='head-left'>
-            <span class='logo'>LOGO</span>
-            <span class='hotel'>" . e($hotelName) . "</span>
-          </td>
-          <td class='head-right'>
-            " . e($hotelAddress) . "<br>" . e($hotelPhone) . " · " . e($hotelEmail) . "<br>" . e($hotelWebsite) . "
-          </td>
+          <th>Field</th>
+          <th style='text-align:right'>Value</th>
+        </tr>
+        <tr>
+          <td class='label'>Room Type</td>
+          <td class='value'>{$roomTypeEsc}</td>
+        </tr>
+        <tr>
+          <td class='label'>Number of Rooms</td>
+          <td class='value'>{$roomCount}</td>
+        </tr>
+        <tr>
+          <td class='label'>Bed Type</td>
+          <td class='value'>" . e($bedType) . "</td>
         </tr>
       </table>
     </div>
-    <div class='voucher-title'>Reservation Voucher</div>
 
-    <div class='meta-strip'>
-      <table class='meta-table'>
+    <div>
+      <p class='section-title'>Payment ({$currency})</p>
+      <table class='simple-table'>
         <tr>
-          <td>Reservation # <span class='meta-val'>{$reservationNo}</span></td>
-          <td style='text-align:center'>Booking Date <span class='meta-val'>{$bookingDate}</span></td>
-          <td style='text-align:right'>Status <span class='meta-val'>" . e($paymentStatus) . "</span></td>
+          <th>Description</th>
+          <th style='text-align:right'>Amount</th>
         </tr>
+        <tr>
+          <td class='label'>Total Amount</td>
+          <td class='value'>" . number_format($grand, 2) . "</td>
+        </tr>";
+
+        if ($extraHourTotal > 0) {
+            $html .= "
+        <tr>
+          <td class='label'>Extra Hour(s) Included</td>
+          <td class='value'>" . number_format($extraHourTotal, 2) . "</td>
+        </tr>";
+        }
+
+        $html .= "
+        <tr>
+          <td class='label'>GST</td>
+          <td class='value'>" . number_format($gst, 2) . "</td>
+        </tr>
+        <tr>
+          <td class='label'>Total Before Tax</td>
+          <td class='value'>" . number_format($beforeTax, 2) . "</td>
+        </tr>
+        <tr>
+          <td class='label'>Amount Paid</td>
+          <td class='value'>" . number_format($paid, 2) . "</td>
+        </tr>
+        <tr>
+          <td class='label'>Balance</td>
+          <td class='value'>" . number_format($balance, 2) . "</td>
+        </tr>";
+
+        if ($paid > 0) {
+            $html .= "
+        <tr>
+          <td class='label'>Payment Method</td>
+          <td class='value'>" . e($paymentMethod) . "</td>
+        </tr>";
+        }
+
+        $html .= "
       </table>
     </div>
 
-    <div class='content'>
-      <table class='twocol'>
-        <tr>
-          <td class='cell'>
-            <div class='card'>
-              <div class='card-h'>Booking Details</div>
-              <div class='row'><span class='k'>Check-in</span><span class='v'>{$checkInText}</span></div>
-              <div class='row'><span class='k'>Check-out</span><span class='v'>{$checkOutText}</span></div>
-              <div class='row'><span class='k'>Nights</span><span class='v'>{$voucherNights}</span></div>
-            </div>
-          </td>
-          <td class='cell'>
-            <div class='card'>
-              <div class='card-h'>Guest Details</div>
-              <div class='row'><span class='k'>Guest Name</span><span class='v'>{$guestNameEsc}</span></div>
-              <div class='row'><span class='k'>{$guestCountLabel}</span><span class='v'>{$guestCountValue}</span></div>
-              <div class='row'><span class='k'>Contact</span><span class='v'>" . e($contact) . "</span></div>
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td class='cell'>
-            <div class='card'>
-              <div class='card-h'>Room Details</div>
-              <div class='row'><span class='k'>Room Type</span><span class='v'>{$roomTypeEsc}</span></div>
-              <div class='row'><span class='k'>Number of Rooms</span><span class='v'>{$roomCount}</span></div>
-              <div class='row'><span class='k'>Bed Type</span><span class='v'>" . e($bedType) . "</span></div>
-            </div>
-          </td>
-          <td class='cell'>
-            <div class='card'>
-              <div class='card-h'>Payment Details ({$currency})</div>
-              <div class='row'><span class='k'>Total Amount</span><span class='v'>" . number_format($grand, 2) . "</span></div>
-              {$paymentMethodRow}
-              <div class='row'><span class='k'>Balance Pending</span><span class='v'>" . number_format($balance, 2) . "</span></div>
-            </div>
-          </td>
-        </tr>
-      </table>
-
-      <div class='policy'>
-        <p>&bull; Cancellation: Free up to 24 hrs before check-in; late cancellation/no-show may incur charges.</p>
-        <p>&bull; Standard check-in 12:00 PM and check-out 11:00 AM; early/late timing subject to availability.</p>
-        <p>&bull; Carry valid government photo ID for all adult guests at check-in.</p>
-        <p>&bull; Special Requests: " . e($specialRequestsShort) . "</p>
-      </div>
-    </div>
-
-    <div class='footer'>
-      <div class='f-left'>Thank you for choosing us.</div>
-      <div class='f-right'><span class='sign'>Authorized Signature / Hotel Stamp</span></div>
-    </div>
+    <p class='section-title'>Notes</p>
+    <p class='muted'>Special Requests: " . e($specialRequestsShort) . "</p>
+    <p class='muted'>Please carry a valid government photo ID for all adult guests. Check-in and check-out timings are subject to hotel policy and availability.</p>
   </div>
 </body>
 </html>";
@@ -1238,54 +1260,87 @@ class BookingController extends Controller
   <style>
     @page { size: A4 portrait; margin: 12mm; }
     body { font-family: DejaVu Sans, Arial, sans-serif; color: #0f172a; margin: 0; font-size: 11px; }
-    .doc { border: 1px solid #dbe3ea; border-radius: 8px; overflow: hidden; }
-    .head { background: #0f2747; color: #fff; padding: 12px 14px; }
-    .title { font-size: 18px; font-weight: 800; margin: 0; letter-spacing: .03em; }
-    .sub { font-size: 10px; margin-top: 3px; opacity: .9; }
-    .meta { padding: 10px 14px; border-bottom: 1px solid #e5e7eb; }
-    .meta table { width: 100%; border-collapse: collapse; }
-    .meta td { padding: 4px 0; }
-    .k { color: #64748b; text-transform: uppercase; letter-spacing: .06em; font-weight: 700; font-size: 9px; }
-    .v { text-align: right; font-weight: 700; font-size: 11px; color: #111827; }
-    .sec { padding: 10px 14px; border-bottom: 1px solid #e5e7eb; }
-    .sec h4 { margin: 0 0 8px 0; font-size: 10px; letter-spacing: .08em; color: #334155; text-transform: uppercase; }
-    .line { display: flex; justify-content: space-between; border-bottom: 1px dashed #e5e7eb; padding: 6px 0; }
-    .line:last-child { border-bottom: none; }
-    .amt { text-align: right; font-weight: 800; }
-    .totals { background: #f8fafc; padding: 10px 14px; }
-    .grand { font-size: 14px; font-weight: 900; color: #0f2747; }
-    .bal { color: #c2410c; }
-    .foot { padding: 10px 14px; font-size: 9px; color: #64748b; }
+    .wrap { max-width: 700px; margin: 0 auto; }
+    .head { text-align: left; margin-bottom: 10px; }
+    .head-title { font-size: 18px; font-weight: 800; margin: 0; }
+    .head-sub { font-size: 10px; margin-top: 2px; color: #6b7280; }
+    .info-row { width: 100%; border-collapse: collapse; margin: 10px 0 14px 0; }
+    .info-row td { vertical-align: top; padding: 0; font-size: 10px; color: #374151; }
+    .info-block { padding-right: 20px; }
+    .info-label { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; margin-bottom: 2px; }
+    .info-value { display: block; font-weight: 600; color: #111827; }
+    .info-spacer { height: 6px; }
+    .totals-table { width: 100%; border-collapse: collapse; }
+    .totals-table th,
+    .totals-table td { padding: 6px 0; font-size: 11px; }
+    .totals-table tr + tr td { border-top: 1px solid #e5e7eb; }
+    .label { text-align: left; color: #374151; }
+    .amount { text-align: right; font-weight: 600; color: #111827; }
+    .grand { font-size: 13px; font-weight: 800; }
+    .balance { color: #b91c1c; }
+    .muted { color: #6b7280; font-size: 9px; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <div class='doc'>
+  <div class='wrap'>
     <div class='head'>
-      <p class='title'>Billing Statement</p>
-      <p class='sub'>Grand Palace Hotel · Generated {$createdAt->format('d M Y, h:i A')}</p>
+      <p class='head-title'>Billing Statement</p>
+      <p class='head-sub'>Generated {$createdAt->format('d M Y, h:i A')}</p>
     </div>
-    <div class='meta'>
-      <table>
-        <tr><td class='k'>Invoice No</td><td class='v'>{$invoiceNo}</td></tr>
-        <tr><td class='k'>Booking No</td><td class='v'>#" . e((string) $booking->id) . "</td></tr>
-        <tr><td class='k'>Guest</td><td class='v'>" . e($guestName) . "</td></tr>
-        <tr><td class='k'>Room</td><td class='v'>#" . e($roomNo) . " · " . e($roomType) . "</td></tr>
-        <tr><td class='k'>Stay</td><td class='v'>" . e($checkIn->format('d M Y, h:i A')) . " → " . e($checkOut->format('d M Y, h:i A')) . "</td></tr>
-      </table>
-    </div>
-    <div class='sec'>
-      <h4>Payment Summary</h4>
-      <div class='line'><span>Total (Before Tax)</span><span class='amt'>INR " . number_format($subTotal, 2) . "</span></div>
-      <div class='line'><span>GST</span><span class='amt'>INR " . number_format($taxAmount, 2) . "</span></div>
-      <div class='line'><span>Grand Total</span><span class='amt grand'>INR " . number_format($grand, 2) . "</span></div>
-      <div class='line'><span>Total Paid</span><span class='amt'>INR " . number_format($paid, 2) . "</span></div>
-      <div class='line'><span>Balance Pending</span><span class='amt grand bal'>INR " . number_format($balance, 2) . "</span></div>
-      <div class='line'><span>Payment Status</span><span class='amt'>" . e($paymentStatus) . "</span></div>
-      <div class='line'><span>Payment Method</span><span class='amt'>" . e($paymentMethod) . "</span></div>
-    </div>
-    <div class='foot'>
-      Thank you for staying with us. This is a system-generated bill.
-    </div>
+
+    <table class='info-row'>
+      <tr>
+        <td class='info-block'>
+          <span class='info-label'>Invoice No</span>
+          <span class='info-value'>{$invoiceNo}</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Booking No</span>
+          <span class='info-value'>#" . e((string) $booking->id) . "</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Guest</span>
+          <span class='info-value'>" . e($guestName) . "</span>
+        </td>
+        <td class='info-block'>
+          <span class='info-label'>Room</span>
+          <span class='info-value'>#" . e($roomNo) . " · " . e($roomType) . "</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Stay</span>
+          <span class='info-value'>" . e($checkIn->format('d M Y, h:i A')) . " → " . e($checkOut->format('d M Y, h:i A')) . "</span>
+          <div class='info-spacer'></div>
+          <span class='info-label'>Payment Status</span>
+          <span class='info-value'>" . e($paymentStatus) . "</span>
+        </td>
+      </tr>
+    </table>
+
+    <table class='totals-table'>
+      <tr>
+        <td class='label'>Total (Before Tax)</td>
+        <td class='amount'>INR " . number_format($subTotal, 2) . "</td>
+      </tr>
+      <tr>
+        <td class='label'>GST</td>
+        <td class='amount'>INR " . number_format($taxAmount, 2) . "</td>
+      </tr>
+      <tr>
+        <td class='label grand'>Grand Total</td>
+        <td class='amount grand'>INR " . number_format($grand, 2) . "</td>
+      </tr>
+      <tr>
+        <td class='label'>Total Paid</td>
+        <td class='amount'>INR " . number_format($paid, 2) . "</td>
+      </tr>
+      <tr>
+        <td class='label balance'>Balance Pending</td>
+        <td class='amount balance'>INR " . number_format($balance, 2) . "</td>
+      </tr>
+      <tr>
+        <td class='label'>Payment Method</td>
+        <td class='amount'>" . e($paymentMethod) . "</td>
+      </tr>
+    </table>
+
+    <p class='muted'>Thank you for staying with us. This is a system-generated bill.</p>
   </div>
 </body>
 </html>";
@@ -1323,10 +1378,10 @@ class BookingController extends Controller
 
         $rooms = Room::with('roomType')
             ->where('is_active', true)
-            ->when($excludeRoomId, function($q) use ($excludeRoomId) {
+            ->when($excludeRoomId, function ($q) use ($excludeRoomId) {
                 $q->where('id', '!=', $excludeRoomId);
             })
-            ->when($typeId, function($q) use ($typeId) {
+            ->when($typeId, function ($q) use ($typeId) {
                 $q->where('room_type_id', $typeId);
             })
             // Room type active is optional; keeping as extra safety
@@ -1334,19 +1389,19 @@ class BookingController extends Controller
                 $q->where('is_active', true);
             })
             // IMPORTANT: use segments so split-stays are respected
-            ->whereDoesntHave('segments', function($q) use ($checkInAt, $checkOutAt, $excludeId) {
+            ->whereDoesntHave('segments', function ($q) use ($checkInAt, $checkOutAt, $excludeId) {
                 $q->where('status', '!=', 'cancelled')
-                  ->where('check_in_at', '<', $checkOutAt)
-                  ->where('check_out_at', '>', $checkInAt)
-                  ->when($excludeId, function($sq) use ($excludeId) {
-                      $sq->where('booking_id', '!=', $excludeId);
-                  });
+                    ->where('check_in_at', '<', $checkOutAt)
+                    ->where('check_out_at', '>', $checkInAt)
+                    ->when($excludeId, function ($sq) use ($excludeId) {
+                        $sq->where('booking_id', '!=', $excludeId);
+                    });
             })
             // Exclude rooms blocked by maintenance/dirty/cleaning ranges
             ->whereDoesntHave('statusBlocks', function ($q) use ($checkInDate, $checkOutDateExclusive) {
                 $q->where('is_active', true)
-                  ->where('start_date', '<', $checkOutDateExclusive)
-                  ->where('end_date', '>', $checkInDate);
+                    ->where('start_date', '<', $checkOutDateExclusive)
+                    ->where('end_date', '>', $checkInDate);
             })
             ->get();
 
