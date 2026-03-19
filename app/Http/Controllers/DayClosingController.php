@@ -68,14 +68,15 @@ class DayClosingController extends Controller
             }
 
             $existing->update([
-                'closed_at'         => now(),
-                'closed_by'         => auth()->id(),
-                'opening_balance'   => $validated['opening_balance'] ?? $existing->opening_balance,
-                'closing_balance'   => $validated['closing_balance'] ?? $existing->closing_balance,
-                'total_sales'       => $summary['total_sales'],
-                'total_discount'    => $summary['total_discount'],
-                'total_tax'         => $summary['total_tax'],
-                'total_paid'        => $summary['total_paid'],
+                'closed_at'              => now(),
+                'closed_by'              => auth()->id(),
+                'opening_balance'        => $validated['opening_balance'] ?? $existing->opening_balance,
+                'closing_balance'        => $validated['closing_balance'] ?? $existing->closing_balance,
+                'total_sales'            => $summary['total_sales'],
+                'total_discount'         => $summary['total_discount'],
+                'total_tax'              => $summary['total_tax'],
+                'total_service_charge'   => $summary['total_service_charge'],
+                'total_paid'             => $summary['total_paid'],
                 'cash_total'        => $summary['cash_total'],
                 'card_total'        => $summary['card_total'],
                 'upi_total'         => $summary['upi_total'],
@@ -92,16 +93,17 @@ class DayClosingController extends Controller
         }
 
         $closing = PosDayClosing::create([
-            'restaurant_id'     => $restaurantId,
-            'closed_date'       => $closedDate,
-            'closed_at'         => now(),
-            'closed_by'         => auth()->id(),
-            'opening_balance'   => $validated['opening_balance'] ?? null,
-            'closing_balance'   => $validated['closing_balance'] ?? null,
-            'total_sales'       => $summary['total_sales'],
-            'total_discount'    => $summary['total_discount'],
-            'total_tax'         => $summary['total_tax'],
-            'total_paid'        => $summary['total_paid'],
+            'restaurant_id'          => $restaurantId,
+            'closed_date'            => $closedDate,
+            'closed_at'              => now(),
+            'closed_by'              => auth()->id(),
+            'opening_balance'        => $validated['opening_balance'] ?? null,
+            'closing_balance'        => $validated['closing_balance'] ?? null,
+            'total_sales'            => $summary['total_sales'],
+            'total_discount'         => $summary['total_discount'],
+            'total_tax'              => $summary['total_tax'],
+            'total_service_charge'   => $summary['total_service_charge'],
+            'total_paid'             => $summary['total_paid'],
             'cash_total'        => $summary['cash_total'],
             'card_total'        => $summary['card_total'],
             'upi_total'         => $summary['upi_total'],
@@ -167,6 +169,7 @@ class DayClosingController extends Controller
             'COALESCE(SUM(subtotal), 0) as total_sales,
              COALESCE(SUM(discount_amount), 0) as total_discount,
              COALESCE(SUM(tax_amount), 0) as total_tax,
+             COALESCE(SUM(service_charge_amount), 0) as total_service_charge,
              COALESCE(SUM(total_amount), 0) as total_paid'
         )->first();
 
@@ -178,18 +181,29 @@ class DayClosingController extends Controller
             ->groupBy('method')
             ->pluck('total', 'method');
 
+        $refundsByMethod = \App\Models\PosOrderRefund::whereIn('order_id', $orderIds)
+            ->selectRaw('method, COALESCE(SUM(amount), 0) as total')
+            ->groupBy('method')
+            ->pluck('total', 'method');
+
         $orderCount = (clone $paidOrders)->count();
         $voidCount  = (clone $voidOrders)->count();
 
+        $cashTotal        = (float) (($paymentsByMethod->get('cash', 0) ?? 0) - ($refundsByMethod->get('cash', 0) ?? 0));
+        $cardTotal        = (float) (($paymentsByMethod->get('card', 0) ?? 0) - ($refundsByMethod->get('card', 0) ?? 0));
+        $upiTotal         = (float) (($paymentsByMethod->get('upi', 0) ?? 0) - ($refundsByMethod->get('upi', 0) ?? 0));
+        $roomChargeTotal  = (float) (($paymentsByMethod->get('room_charge', 0) ?? 0) - ($refundsByMethod->get('room_charge', 0) ?? 0));
+
         return [
-            'total_sales'       => (float) ($totals->total_sales ?? 0),
-            'total_discount'    => (float) ($totals->total_discount ?? 0),
-            'total_tax'         => (float) ($totals->total_tax ?? 0),
-            'total_paid'        => (float) (($totals->total_paid ?? 0) - $totalRefunded),
-            'cash_total'        => (float) ($paymentsByMethod->get('cash', 0)),
-            'card_total'        => (float) ($paymentsByMethod->get('card', 0)),
-            'upi_total'         => (float) ($paymentsByMethod->get('upi', 0)),
-            'room_charge_total' => (float) ($paymentsByMethod->get('room_charge', 0)),
+            'total_sales'            => (float) ($totals->total_sales ?? 0),
+            'total_discount'         => (float) ($totals->total_discount ?? 0),
+            'total_tax'              => (float) ($totals->total_tax ?? 0),
+            'total_service_charge'   => (float) ($totals->total_service_charge ?? 0),
+            'total_paid'             => (float) (($totals->total_paid ?? 0) - $totalRefunded),
+            'cash_total'        => max(0, $cashTotal),
+            'card_total'        => max(0, $cardTotal),
+            'upi_total'         => max(0, $upiTotal),
+            'room_charge_total' => max(0, $roomChargeTotal),
             'order_count'       => $orderCount,
             'void_count'        => $voidCount,
         ];

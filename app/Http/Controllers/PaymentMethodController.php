@@ -17,6 +17,7 @@ class PaymentMethodController extends Controller
     {
         $validated = $request->validate([
             'name'       => 'required|string|unique:payment_methods,name',
+            'code'       => 'nullable|string|in:cash,card,upi,room_charge',
             'is_active'  => 'boolean',
             'is_default' => 'boolean',
         ]);
@@ -33,6 +34,7 @@ class PaymentMethodController extends Controller
     {
         $validated = $request->validate([
             'name'       => 'required|string|unique:payment_methods,name,' . $paymentMethod->id,
+            'code'       => 'nullable|string|in:cash,card,upi,room_charge',
             'is_active'  => 'boolean',
             'is_default' => 'boolean',
         ]);

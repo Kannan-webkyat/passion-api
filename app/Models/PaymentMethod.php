@@ -6,5 +6,5 @@ use Illuminate\Database\Eloquent\Model;
 
 class PaymentMethod extends Model
 {
-    protected $fillable = ['name', 'is_active', 'is_default'];
+    protected $fillable = ['name', 'code', 'is_active', 'is_default'];
 }

@@ -15,12 +15,34 @@ use App\Models\InventoryTransaction;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
 use App\Models\RestaurantTable;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class PosController extends Controller
 {
     // ── Restaurants ──────────────────────────────────────────────────────────
+
+    // ── Waiters (for Change Waiter dropdown) ──────────────────────────────────
+
+    public function waiters(Request $request)
+    {
+        $users = User::role(['Waiter', 'Senior Waiter'])
+            ->orderBy('name')
+            ->get(['id', 'name'])
+            ->map(fn ($u) => ['id' => $u->id, 'name' => $u->name])
+            ->keyBy('id');
+
+        $currentId = $request->integer('current_waiter_id');
+        if ($currentId && !$users->has($currentId)) {
+            $current = User::find($currentId, ['id', 'name']);
+            if ($current) {
+                $users->put($current->id, ['id' => $current->id, 'name' => $current->name]);
+            }
+        }
+
+        return response()->json($users->values()->all());
+    }
 
     // ── Checked-in rooms for Room Service ────────────────────────────────────
 
@@ -139,10 +161,11 @@ class PosController extends Controller
             ->pluck('total', 'menu_item_id')
             ->map(fn($v) => (float) $v);
 
-        // Total portions already consumed in non-void orders
+        // Total portions already committed (active items in non-void orders)
         $sold = DB::table('pos_order_items')
             ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
             ->where('pos_orders.status', '!=', 'void')
+            ->where('pos_order_items.status', 'active')
             ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
             ->groupBy('pos_order_items.menu_item_id')
             ->pluck('total', 'menu_item_id')
@@ -206,6 +229,7 @@ class PosController extends Controller
             'covers'         => 'required|integer|min:1',
             'customer_name'  => 'nullable|string|max:191',
             'customer_phone' => 'nullable|string|max:30',
+            'tax_exempt'     => 'nullable|boolean',
         ];
 
         if ($orderType === 'dine_in') {
@@ -224,7 +248,7 @@ class PosController extends Controller
                 ->first();
 
             if ($existing) {
-                return response()->json($this->formatOrder($existing->load('items.menuItem.tax', 'payments', 'room')));
+                return response()->json($this->formatOrder($existing->load('items.menuItem.tax', 'payments', 'room', 'waiter', 'openedBy')));
             }
         }
 
@@ -238,6 +262,8 @@ class PosController extends Controller
                 'customer_name'  => $validated['customer_name'] ?? null,
                 'customer_phone' => $validated['customer_phone'] ?? null,
                 'waiter_id'      => auth()->id(),
+                'opened_by'      => auth()->id(),
+                'tax_exempt'     => (bool) ($validated['tax_exempt'] ?? false),
                 'covers'         => $validated['covers'],
                 'status'         => 'open',
                 'opened_at'      => now(),
@@ -251,7 +277,7 @@ class PosController extends Controller
             return $order;
         });
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room')), 201);
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'waiter', 'openedBy')), 201);
     }
 
     // ── Order history (paid orders for reprint) ─────────────────────────────────
@@ -260,8 +286,11 @@ class PosController extends Controller
     {
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'order_id'      => 'nullable|integer|min:1',
             'from'          => 'nullable|date',
             'to'            => 'nullable|date|after_or_equal:from',
+            'page'          => 'nullable|integer|min:1',
+            'per_page'      => 'nullable|integer|min:1|max:100',
         ]);
 
         $query = PosOrder::with(['room', 'table', 'refunds'])
@@ -269,14 +298,21 @@ class PosController extends Controller
             ->whereIn('status', ['paid', 'refunded'])
             ->orderByDesc('closed_at');
 
-        if (!empty($validated['from'])) {
-            $query->whereDate('closed_at', '>=', $validated['from']);
-        }
-        if (!empty($validated['to'])) {
-            $query->whereDate('closed_at', '<=', $validated['to']);
+        if (!empty($validated['order_id'])) {
+            $query->where('id', (int) $validated['order_id']);
+        } else {
+            if (!empty($validated['from'])) {
+                $query->whereDate('closed_at', '>=', $validated['from']);
+            }
+            if (!empty($validated['to'])) {
+                $query->whereDate('closed_at', '<=', $validated['to']);
+            }
         }
 
-        $orders = $query->limit(100)->get()->map(fn ($o) => [
+        $perPage = (int) ($validated['per_page'] ?? 20);
+        $paginated = $query->paginate($perPage);
+
+        $orders = $paginated->getCollection()->map(fn ($o) => [
             'id'              => $o->id,
             'order_type'      => $o->order_type,
             'customer_name'   => $o->customer_name,
@@ -288,14 +324,20 @@ class PosController extends Controller
             'closed_at'       => $o->closed_at,
         ]);
 
-        return response()->json($orders);
+        return response()->json([
+            'data'         => $orders->values()->all(),
+            'current_page' => $paginated->currentPage(),
+            'last_page'    => $paginated->lastPage(),
+            'per_page'     => $paginated->perPage(),
+            'total'        => $paginated->total(),
+        ]);
     }
 
     // ── Get a single order ────────────────────────────────────────────────────
 
     public function getOrder(PosOrder $order)
     {
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Update order details (customer, covers) ─────────────────────────────────
@@ -311,6 +353,8 @@ class PosController extends Controller
             'customer_phone' => 'nullable|string|max:30',
             'covers'         => 'nullable|integer|min:1',
             'notes'          => 'nullable|string|max:1000',
+            'waiter_id'      => 'nullable|exists:users,id',
+            'tax_exempt'     => 'nullable|boolean',
         ];
         $validated = $request->validate($rules);
 
@@ -327,14 +371,25 @@ class PosController extends Controller
         if (array_key_exists('notes', $validated)) {
             $updates['notes'] = $validated['notes'] ? trim($validated['notes']) : null;
         }
+        if (array_key_exists('waiter_id', $validated)) {
+            $updates['waiter_id'] = $validated['waiter_id'] ?: null;
+        }
+        if (array_key_exists('tax_exempt', $validated)) {
+            $updates['tax_exempt'] = (bool) $validated['tax_exempt'];
+        }
 
         if (empty($updates)) {
-            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table', 'waiter', 'openedBy')));
         }
 
         $order->update($updates);
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+        if (array_key_exists('tax_exempt', $updates)) {
+            $this->recalculate($order);
+            $order->refresh();
+        }
+
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Transfer order to another table (dine-in only) ────────────────────────
@@ -378,7 +433,7 @@ class PosController extends Controller
             RestaurantTable::where('id', $newTableId)->update(['status' => 'occupied']);
         });
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Sync order items (replace all) ────────────────────────────────────────
@@ -390,11 +445,48 @@ class PosController extends Controller
         }
 
         $validated = $request->validate([
-            'items'              => 'required|array',
+            'items'                => 'present|array',
             'items.*.menu_item_id' => 'required|exists:menu_items,id',
-            'items.*.quantity'   => 'required|integer|min:1',
-            'items.*.notes'      => 'nullable|string',
+            'items.*.quantity'     => 'required|integer|min:1',
+            'items.*.notes'        => 'nullable|string',
         ]);
+
+        // ── Availability check: prevent overselling produced items ─────────────
+        $produced = DB::table('recipes')
+            ->leftJoin('production_logs', 'recipes.id', '=', 'production_logs.recipe_id')
+            ->where('recipes.is_active', true)
+            ->where('recipes.requires_production', true)
+            ->select('recipes.menu_item_id', DB::raw('COALESCE(SUM(production_logs.quantity_produced), 0) as total'))
+            ->groupBy('recipes.menu_item_id')
+            ->pluck('total', 'menu_item_id')
+            ->map(fn ($v) => (float) $v);
+
+        $soldExcludingThis = DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->where('pos_orders.status', '!=', 'void')
+            ->where('pos_order_items.order_id', '!=', $order->id)
+            ->where('pos_order_items.status', 'active')
+            ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
+            ->groupBy('pos_order_items.menu_item_id')
+            ->pluck('total', 'menu_item_id')
+            ->map(fn ($v) => (float) $v);
+
+        $incomingByItem = collect($validated['items'])->groupBy('menu_item_id')
+            ->map(fn ($rows) => $rows->sum('quantity'));
+
+        foreach ($incomingByItem as $menuItemId => $incomingQty) {
+            if (!$produced->has($menuItemId)) {
+                continue;
+            }
+            $available = max(0, $produced[$menuItemId] - ($soldExcludingThis[$menuItemId] ?? 0));
+            if ($incomingQty > $available + 0.001) {
+                $item = MenuItem::find($menuItemId);
+                $name = $item ? $item->name : "Item #{$menuItemId}";
+                return response()->json([
+                    'message' => "Insufficient stock for \"{$name}\". Only {$available} available, requested {$incomingQty}.",
+                ], 422);
+            }
+        }
 
         DB::transaction(function () use ($order, $validated) {
             $currentActive = $order->items()->where('status', 'active')->get();
@@ -525,7 +617,7 @@ class PosController extends Controller
             $this->recalculate($order);
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room', 'waiter', 'openedBy')));
     }
 
     // ── Send KOT ──────────────────────────────────────────────────────────────
@@ -564,6 +656,11 @@ class PosController extends Controller
 
     public function settle(Request $request, PosOrder $order)
     {
+        $user = auth()->user();
+        if (!$user->hasRole('Admin') && !$user->can('pos-settle')) {
+            return response()->json(['message' => 'You do not have permission to settle payments.'], 403);
+        }
+
         if ($order->status === 'paid') {
             return response()->json(['message' => 'Order already paid.'], 422);
         }
@@ -571,17 +668,28 @@ class PosController extends Controller
         $validated = $request->validate([
             'discount_type'  => 'nullable|in:percent,flat',
             'discount_value' => 'nullable|numeric|min:0',
+            'service_charge_type'  => 'nullable|in:percent,flat',
+            'service_charge_value' => 'nullable|numeric|min:0',
+            'tax_exempt'     => 'nullable|boolean',
             'payments'       => 'required|array|min:1',
             'payments.*.method'       => 'required|in:cash,card,upi,room_charge',
             'payments.*.amount'       => 'required|numeric|min:0.01',
             'payments.*.reference_no' => 'nullable|string',
         ]);
 
+        $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
+        if ($hasRoomCharge && ($order->order_type !== 'room_service' || !$order->booking_id)) {
+            return response()->json(['message' => 'Room charge is only available for room service orders with a linked booking.'], 422);
+        }
+
         DB::transaction(function () use ($order, $validated) {
-            // Apply discount
+            // Apply discount, service charge, tax exempt
             $order->update([
                 'discount_type'  => $validated['discount_type']  ?? null,
                 'discount_value' => $validated['discount_value'] ?? 0,
+                'service_charge_type'  => $validated['service_charge_type']  ?? null,
+                'service_charge_value' => $validated['service_charge_value'] ?? 0,
+                'tax_exempt'     => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
             ]);
             $this->recalculate($order);
             $order->refresh();
@@ -611,9 +719,9 @@ class PosController extends Controller
             // Close order
             $order->update(['status' => 'paid', 'closed_at' => now()]);
 
-            // Free the table (dine-in only)
+            // Set table to cleaning (dine-in only) — staff will mark available when ready
             if ($order->table_id) {
-                RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
+                RestaurantTable::where('id', $order->table_id)->update(['status' => 'cleaning']);
             }
 
             // Post room_charge payments to the booking folio
@@ -627,7 +735,7 @@ class PosController extends Controller
             }
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room', 'waiter', 'openedBy')));
     }
 
     // ── Void ──────────────────────────────────────────────────────────────────
@@ -695,6 +803,10 @@ class PosController extends Controller
         $totalRefunded = (float) $order->refunds()->sum('amount');
         $refundable = (float) $order->total_amount - $totalRefunded;
 
+        if ($validated['method'] === 'room_charge' && !$order->booking_id) {
+            return response()->json(['message' => 'Room charge refund is only available for room service orders with a linked booking.'], 422);
+        }
+
         if ($amount > $refundable + 0.01) {
             return response()->json([
                 'message' => 'Refund amount (' . number_format($amount, 2) . ') exceeds refundable amount (' . number_format($refundable, 2) . ').',
@@ -723,19 +835,25 @@ class PosController extends Controller
             }
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'refunds', 'room', 'table')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'refunds', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Kitchen Display ───────────────────────────────────────────────────────
 
-    public function kitchenDisplay()
+    public function kitchenDisplay(Request $request)
     {
-        $orders = PosOrder::with(['items.menuItem.tax', 'table', 'restaurant', 'room'])
+        $restaurantId = $request->input('restaurant_id');
+
+        $query = PosOrder::with(['items.menuItem.tax', 'table', 'restaurant', 'room'])
             ->whereIn('status', ['open', 'billed'])
             ->where('kitchen_status', '!=', 'served')
-            ->whereHas('items', fn($q) => $q->where('kot_sent', true)->where('status', 'active'))
-            ->orderBy('opened_at')
-            ->get()
+            ->whereHas('items', fn($q) => $q->where('kot_sent', true)->where('status', 'active'));
+
+        if ($restaurantId) {
+            $query->where('restaurant_id', $restaurantId);
+        }
+
+        $orders = $query->orderBy('opened_at')->get()
             ->map(function ($order) {
                 $label = match($order->order_type ?? 'dine_in') {
                     'takeaway'     => 'Takeaway' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
@@ -898,7 +1016,14 @@ class PosController extends Controller
         // Only count active (non-cancelled) items in totals
         $activeItems = $order->items->where('status', 'active');
         $subtotal    = $activeItems->sum(fn($i) => floatval($i->line_total));
-        $taxAmount   = $activeItems->sum(fn($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
+        $taxAmount   = $order->tax_exempt ? 0 : $activeItems->sum(fn($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
+
+        $serviceChargeAmount = 0;
+        if ($order->service_charge_type === 'percent') {
+            $serviceChargeAmount = $subtotal * (floatval($order->service_charge_value ?? 0) / 100);
+        } elseif ($order->service_charge_type === 'flat') {
+            $serviceChargeAmount = floatval($order->service_charge_value ?? 0);
+        }
 
         $discountAmount = 0;
         if ($order->discount_type === 'percent') {
@@ -908,10 +1033,11 @@ class PosController extends Controller
         }
 
         $order->update([
-            'subtotal'        => $subtotal,
-            'tax_amount'      => $taxAmount,
-            'discount_amount' => $discountAmount,
-            'total_amount'    => max(0, $subtotal + $taxAmount - $discountAmount),
+            'subtotal'             => $subtotal,
+            'tax_amount'           => $taxAmount,
+            'service_charge_amount' => $serviceChargeAmount,
+            'discount_amount'      => $discountAmount,
+            'total_amount'         => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount),
             'status'          => in_array($order->status, ['open', 'billed']) ? 'billed' : $order->status,
         ]);
     }
@@ -930,10 +1056,17 @@ class PosController extends Controller
             'customer_name'   => $order->customer_name,
             'customer_phone'  => $order->customer_phone,
             'covers'          => $order->covers,
+            'waiter_id'       => $order->waiter_id,
+            'waiter'          => $order->waiter ? ['id' => $order->waiter->id, 'name' => $order->waiter->name] : null,
+            'opened_by'       => $order->opened_by,
+            'opened_by_user'  => $order->openedBy ? ['id' => $order->openedBy->id, 'name' => $order->openedBy->name] : null,
             'status'          => $order->status,
             'kitchen_status'  => $order->kitchen_status ?? 'pending',
             'discount_type'   => $order->discount_type,
             'discount_value'  => (float) $order->discount_value,
+            'service_charge_type'  => $order->service_charge_type,
+            'service_charge_value' => (float) ($order->service_charge_value ?? 0),
+            'service_charge_amount' => (float) ($order->service_charge_amount ?? 0),
             'subtotal'        => (float) $order->subtotal,
             'tax_amount'      => (float) $order->tax_amount,
             'discount_amount' => (float) $order->discount_amount,
@@ -941,6 +1074,7 @@ class PosController extends Controller
             'opened_at'       => $order->opened_at,
             'closed_at'       => $order->closed_at,
             'notes'           => $order->notes,
+            'tax_exempt'      => (bool) ($order->tax_exempt ?? false),
             'items'           => $order->items->where('status', 'active')->values()->map(fn($i) => [
                 'id'           => $i->id,
                 'menu_item_id' => $i->menu_item_id,

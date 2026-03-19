@@ -24,6 +24,7 @@ class DatabaseSeeder extends Seeder
             QuickItemsSeeder::class,
             KitchenStaffSeeder::class,
             ReceptionistSeeder::class,
+            WaiterSeeder::class,
             StoreManagerSeeder::class,
             UserDepartmentSeeder::class,
             RoomSeeder::class,
