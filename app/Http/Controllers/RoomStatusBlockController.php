@@ -47,10 +47,13 @@ class RoomStatusBlockController extends Controller
 
         // Do not allow blocking a room if it already has a reservation segment in this period.
         // Overlap uses the same convention as stays: [start_date, end_date)
+        $startAt = Carbon::parse($validated['start_date'])->startOfDay();
+        $endAt = Carbon::parse($validated['end_date'])->startOfDay();
         $hasReservation = BookingSegment::where('room_id', $validated['room_id'])
-            ->where('status', '!=', 'cancelled')
-            ->where('check_in', '<', $validated['end_date'])
-            ->where('check_out', '>', $validated['start_date'])
+            // Checked-out/completed segments should not block housekeeping transitions.
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+            ->where('check_in_at', '<', $endAt)
+            ->where('check_out_at', '>', $startAt)
             ->exists();
 
         if ($hasReservation) {

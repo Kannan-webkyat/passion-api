@@ -51,6 +51,13 @@ class RoomTypeController extends Controller
             'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
             'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
             'rate_plans.*.includes_breakfast' => 'nullable|boolean',
+            // Hourly package extensions (backward compatible)
+            'rate_plans.*.billing_unit' => 'nullable|in:day,hour_package',
+            'rate_plans.*.package_hours' => 'nullable|integer|min:1',
+            'rate_plans.*.package_price' => 'nullable|numeric|min:0',
+            'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
+            'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
+            'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
         ]);
 
         $this->validateCapacity($validated);
@@ -91,6 +98,13 @@ class RoomTypeController extends Controller
             'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
             'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
             'rate_plans.*.includes_breakfast' => 'nullable|boolean',
+            // Hourly package extensions (backward compatible)
+            'rate_plans.*.billing_unit' => 'nullable|in:day,hour_package',
+            'rate_plans.*.package_hours' => 'nullable|integer|min:1',
+            'rate_plans.*.package_price' => 'nullable|numeric|min:0',
+            'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
+            'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
+            'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
         ]);
 
         // Merge with existing values to handle partial updates
@@ -116,12 +130,24 @@ class RoomTypeController extends Controller
                         'name' => $planData['name'],
                         'base_price' => $planData['base_price'],
                         'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                        'billing_unit' => $planData['billing_unit'] ?? 'day',
+                        'package_hours' => $planData['package_hours'] ?? null,
+                        'package_price' => $planData['package_price'] ?? null,
+                        'grace_minutes' => $planData['grace_minutes'] ?? 0,
+                        'overtime_step_minutes' => $planData['overtime_step_minutes'] ?? 60,
+                        'overtime_hour_price' => $planData['overtime_hour_price'] ?? null,
                     ]);
                 } else {
                     $roomType->ratePlans()->create([
                         'name' => $planData['name'],
                         'base_price' => $planData['base_price'],
                         'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                        'billing_unit' => $planData['billing_unit'] ?? 'day',
+                        'package_hours' => $planData['package_hours'] ?? null,
+                        'package_price' => $planData['package_price'] ?? null,
+                        'grace_minutes' => $planData['grace_minutes'] ?? 0,
+                        'overtime_step_minutes' => $planData['overtime_step_minutes'] ?? 60,
+                        'overtime_hour_price' => $planData['overtime_hour_price'] ?? null,
                     ]);
                 }
             }
