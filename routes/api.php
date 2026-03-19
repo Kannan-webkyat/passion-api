@@ -22,6 +22,7 @@ use App\Http\Controllers\TableReservationController;
 use App\Http\Controllers\PosController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\QzSignController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -52,6 +53,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // F&B Module (Restaurant Master)
     Route::apiResource('restaurant-masters', RestaurantMasterController::class);
     Route::post('restaurant-masters/{restaurantMaster}/logo', [RestaurantMasterController::class, 'uploadLogo']);
+
+    // QZ Tray signing (for silent receipt printing)
+    Route::get('qz/sign', [QzSignController::class, 'sign']);
+    Route::get('qz/certificate', [QzSignController::class, 'certificate']);
 
     // Settings (receipt defaults)
     Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
