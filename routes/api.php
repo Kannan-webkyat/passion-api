@@ -85,6 +85,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('pos/orders/{order}/transfer-table', [PosController::class, 'transferTable']);
     Route::put('pos/orders/{order}/items',     [PosController::class, 'syncItems']);
     Route::post('pos/orders/{order}/kot',      [PosController::class, 'sendKot']);
+    Route::post('pos/orders/{order}/open-bill', [PosController::class, 'openBill']);
+    Route::post('pos/orders/{order}/reopen',   [PosController::class, 'reopen']);
     Route::post('pos/orders/{order}/settle',   [PosController::class, 'settle']);
     Route::post('pos/orders/{order}/void',     [PosController::class, 'void']);
     Route::post('pos/orders/{order}/refund',   [PosController::class, 'refund']);

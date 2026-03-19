@@ -472,8 +472,8 @@ class PosController extends Controller
 
     public function syncItems(Request $request, PosOrder $order)
     {
-        if (!in_array($order->status, ['open', 'billed'])) {
-            return response()->json(['message' => 'Order is not editable.'], 422);
+        if ($order->status !== 'open') {
+            return response()->json(['message' => 'Order is billed. Re-open to add or edit items.'], 422);
         }
 
         $validated = $request->validate([
@@ -656,6 +656,10 @@ class PosController extends Controller
 
     public function sendKot(PosOrder $order)
     {
+        if ($order->status !== 'open') {
+            return response()->json(['message' => 'Order is billed. Re-open to add items and send KOT.'], 422);
+        }
+
         $hasPending = $order->items()
             ->where('status', 'active')
             ->where('kot_sent', false)
@@ -682,6 +686,21 @@ class PosController extends Controller
             'kitchen_status' => $order->fresh()->kitchen_status,
             'kot_batch'      => $order->fresh()->current_kot_batch,
         ]);
+    }
+
+    // ── Open bill (set status to billed) ────────────────────────────────────────
+
+    public function openBill(PosOrder $order)
+    {
+        if ($order->status !== 'open') {
+            return response()->json([
+                'message' => 'Order must be open to generate bill.',
+            ], 422);
+        }
+
+        $order->update(['status' => 'billed']);
+
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Settle / Pay ──────────────────────────────────────────────────────────
@@ -768,6 +787,25 @@ class PosController extends Controller
         });
 
         return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room', 'waiter', 'openedBy')));
+    }
+
+    public function reopen(PosOrder $order)
+    {
+        if ($order->status !== 'billed') {
+            return response()->json([
+                'message' => 'Only billed (unpaid) orders can be re-opened.',
+            ], 422);
+        }
+
+        if ($order->payments()->exists()) {
+            return response()->json([
+                'message' => 'Cannot re-open: order has payments. Void or refund first.',
+            ], 422);
+        }
+
+        $order->update(['status' => 'open']);
+
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Void ──────────────────────────────────────────────────────────────────
@@ -1334,7 +1372,6 @@ class PosController extends Controller
             'service_charge_amount' => $serviceChargeAmount,
             'discount_amount'      => $discountAmount,
             'total_amount'         => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount),
-            'status'          => in_array($order->status, ['open', 'billed']) ? 'billed' : $order->status,
         ]);
     }
 
