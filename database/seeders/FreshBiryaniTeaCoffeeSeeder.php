@@ -1,0 +1,429 @@
+<?php
+
+namespace Database\Seeders;
+
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use App\Models\Vendor;
+use App\Models\InventoryUom;
+use App\Models\InventoryCategory;
+use App\Models\InventoryTax;
+use App\Models\InventoryItem;
+use App\Models\InventoryLocation;
+use App\Models\DietaryType;
+use App\Models\MenuCategory;
+use App\Models\MenuSubCategory;
+use App\Models\MenuItem;
+use App\Models\Recipe;
+use App\Models\RecipeIngredient;
+use App\Models\RestaurantMaster;
+use App\Models\RestaurantMenuItem;
+
+class FreshBiryaniTeaCoffeeSeeder extends Seeder
+{
+    public function run(): void
+    {
+        // ─── 0. Truncate (FK order) ─────────────────────────────────────────
+        DB::statement('SET FOREIGN_KEY_CHECKS=0');
+
+        $tables = [
+            'pos_payments', 'pos_order_items', 'pos_orders',
+            'recipe_ingredients', 'recipes', 'production_logs',
+            'restaurant_menu_items', 'menu_items', 'menu_sub_categories', 'menu_categories',
+            'dietary_types',
+            'inventory_item_locations', 'inventory_transactions', 'grns',
+            'purchase_order_items', 'purchase_orders', 'inventory_items',
+        ];
+
+        foreach ($tables as $t) {
+            if (Schema::hasTable($t)) {
+                DB::table($t)->truncate();
+            }
+        }
+
+        // Truncate inventory_categories (parent_id self-ref) and rebuild
+        if (Schema::hasTable('inventory_categories')) {
+            DB::table('inventory_categories')->update(['parent_id' => null]);
+            DB::table('inventory_categories')->truncate();
+        }
+        if (Schema::hasTable('inventory_uoms')) {
+            DB::table('inventory_uoms')->truncate();
+        }
+        if (Schema::hasTable('vendors')) {
+            DB::table('vendors')->truncate();
+        }
+
+        DB::statement('SET FOREIGN_KEY_CHECKS=1');
+
+        // ─── 1. Vendors ────────────────────────────────────────────────────
+        $vendors = [
+            ['name' => 'Fresh F&B Supplies', 'contact_person' => 'Raj Kumar', 'phone' => '9876543210', 'email' => 'raj@freshfbsupplies.com', 'address' => 'Industrial Area, Chennai'],
+            ['name' => 'Spice & Grain Co', 'contact_person' => 'Priya Sharma', 'phone' => '9123456789', 'email' => 'orders@spicegrain.co', 'address' => 'Wholesale Market, Coimbatore'],
+            ['name' => 'Dairy Fresh Ltd', 'contact_person' => 'Suresh Nair', 'phone' => '9988776655', 'email' => 'supply@dairyfresh.in', 'address' => 'Milk Colony, Madurai'],
+        ];
+        $vendorMap = [];
+        foreach ($vendors as $v) {
+            $vendor = Vendor::create($v);
+            $vendorMap[$v['name']] = $vendor;
+        }
+
+        // ─── 2. UOMs ────────────────────────────────────────────────────────
+        $uoms = [
+            ['Kg', 'Kilogram'],
+            ['Gm', 'Gram'],
+            ['Ltr', 'Litre'],
+            ['Ml', 'Millilitre'],
+            ['Pcs', 'Piece'],
+            ['Cup', 'Cup'],
+        ];
+        $uomMap = [];
+        foreach ($uoms as [$short, $name]) {
+            $uomMap[$short] = InventoryUom::create(['short_name' => $short, 'name' => $name]);
+        }
+
+        // ─── 3. Inventory categories ───────────────────────────────────────
+        $fb = InventoryCategory::create(['name' => 'F&B', 'parent_id' => null, 'description' => 'Food & Beverage']);
+        $catDry = InventoryCategory::create(['name' => 'Dry Provisions', 'parent_id' => $fb->id, 'description' => 'Rice, flour, sugar, spices']);
+        $catDairy = InventoryCategory::create(['name' => 'Dairy & Eggs', 'parent_id' => $fb->id, 'description' => 'Milk, cream, curd, eggs']);
+        $catVeg = InventoryCategory::create(['name' => 'Vegetables', 'parent_id' => $fb->id, 'description' => 'Fresh vegetables and herbs']);
+        $catMeat = InventoryCategory::create(['name' => 'Meat & Seafood', 'parent_id' => $fb->id, 'description' => 'Chicken, mutton, fish']);
+        $catOils = InventoryCategory::create(['name' => 'Oils & Fats', 'parent_id' => $fb->id, 'description' => 'Cooking oils and ghee']);
+        $catBev = InventoryCategory::create(['name' => 'Beverages', 'parent_id' => $fb->id, 'description' => 'Tea, coffee, soft drinks']);
+
+        // ─── 4. Tax ────────────────────────────────────────────────────────
+        $gst5 = InventoryTax::where('rate', 5)->first();
+        if (!$gst5) {
+            $gst5 = InventoryTax::create(['name' => 'GST 5% (Local)', 'rate' => 5, 'type' => 'local']);
+        }
+
+        // ─── 5. Inventory items ─────────────────────────────────────────────
+        $v1 = $vendorMap['Fresh F&B Supplies'];
+        $v2 = $vendorMap['Spice & Grain Co'];
+        $v3 = $vendorMap['Dairy Fresh Ltd'];
+
+        $itemDefs = [
+            // [name, sku, category, vendor, pur_uom, issue_uom, conv, cost, reorder]
+            ['Chicken (Bone-in)', 'FB-MT-CH1', $catMeat, $v1, 'Kg', 'Gm', 1000, 220, 2],
+            ['Mutton', 'FB-MT-MU1', $catMeat, $v1, 'Kg', 'Gm', 1000, 450, 1],
+            ['Basmati Rice', 'FB-DP-RI1', $catDry, $v2, 'Kg', 'Gm', 1000, 90, 3],
+            ['Onion', 'FB-VG-ON1', $catVeg, $v1, 'Kg', 'Gm', 1000, 30, 2],
+            ['Tomato', 'FB-VG-TM1', $catVeg, $v1, 'Kg', 'Gm', 1000, 25, 2],
+            ['Mint Leaves', 'FB-VG-MN1', $catVeg, $v1, 'Kg', 'Gm', 1000, 80, 1],
+            ['Coriander Leaves', 'FB-VG-CR1', $catVeg, $v1, 'Kg', 'Gm', 1000, 60, 1],
+            ['Curd (Yogurt)', 'FB-DE-CU1', $catDairy, $v3, 'Kg', 'Gm', 1000, 65, 2],
+            ['Desi Ghee', 'FB-OF-GH1', $catOils, $v2, 'Kg', 'Gm', 1000, 500, 1],
+            ['Sunflower Oil', 'FB-OF-OI1', $catOils, $v2, 'Ltr', 'Ml', 1000, 120, 2],
+            ['Ginger-Garlic Paste', 'FB-DP-GG1', $catDry, $v2, 'Kg', 'Gm', 1000, 80, 1],
+            ['Biryani Masala', 'FB-DP-BM1', $catDry, $v2, 'Kg', 'Gm', 1000, 400, 1],
+            ['Red Chilli Powder', 'FB-DP-RC1', $catDry, $v2, 'Kg', 'Gm', 1000, 200, 1],
+            ['Turmeric Powder', 'FB-DP-TU1', $catDry, $v2, 'Kg', 'Gm', 1000, 180, 1],
+            ['Garam Masala', 'FB-DP-GM1', $catDry, $v2, 'Kg', 'Gm', 1000, 320, 1],
+            ['Salt', 'FB-DP-SA1', $catDry, $v2, 'Kg', 'Gm', 1000, 20, 1],
+            ['Saffron', 'FB-DP-SF1', $catDry, $v2, 'Kg', 'Gm', 1000, 50000, 1],
+            ['Tea Leaves', 'FB-BV-TL1', $catBev, $v2, 'Kg', 'Gm', 1000, 300, 1],
+            ['Coffee Powder', 'FB-BV-CP1', $catBev, $v2, 'Kg', 'Gm', 1000, 600, 1],
+            ['Milk', 'FB-DE-MK1', $catDairy, $v3, 'Ltr', 'Ml', 1000, 60, 5],
+            ['Sugar', 'FB-DP-SG1', $catDry, $v2, 'Kg', 'Gm', 1000, 45, 2],
+            ['Cardamom', 'FB-DP-CD1', $catDry, $v2, 'Kg', 'Gm', 1000, 1200, 1],
+            ['Cinnamon', 'FB-DP-CN1', $catDry, $v2, 'Kg', 'Gm', 1000, 800, 1],
+            ['Ginger', 'FB-VG-GI1', $catVeg, $v1, 'Kg', 'Gm', 1000, 100, 1],
+            ['Potato', 'FB-VG-PT1', $catVeg, $v1, 'Kg', 'Gm', 1000, 35, 2],
+            ['Eggs', 'FB-DE-EG1', $catDairy, $v3, 'Pcs', 'Pcs', 1, 8, 2],
+            ['Butter', 'FB-OF-BT1', $catOils, $v3, 'Kg', 'Gm', 1000, 480, 1],
+            ['Green Chilli', 'FB-VG-GC1', $catVeg, $v1, 'Kg', 'Gm', 1000, 60, 1],
+        ];
+
+        $itemMap = [];
+        foreach ($itemDefs as [$name, $sku, $cat, $vendor, $pu, $iu, $conv, $cost, $reorder]) {
+            $itemMap[$name] = InventoryItem::create([
+                'name' => $name,
+                'sku' => $sku,
+                'category_id' => $cat->id,
+                'vendor_id' => $vendor->id,
+                'purchase_uom_id' => $uomMap[$pu]->id,
+                'issue_uom_id' => $uomMap[$iu]->id,
+                'conversion_factor' => $conv,
+                'cost_price' => $cost,
+                'reorder_level' => $reorder,
+                'current_stock' => $reorder * 20,
+                'tax_id' => $gst5->id,
+            ]);
+        }
+
+        // ─── 6. Stock in locations ──────────────────────────────────────────
+        $mainStore = InventoryLocation::where('name', 'Main Store')->first();
+        $kitchenStore = InventoryLocation::where('name', 'Kitchen Store')->first();
+
+        $stockQty = [];
+        foreach ($itemMap as $name => $item) {
+            $stockQty[$name] = $item->reorder_level * 15;
+        }
+
+        foreach (array_filter([$mainStore, $kitchenStore]) as $loc) {
+            foreach ($stockQty as $itemName => $qty) {
+                DB::table('inventory_item_locations')->insert([
+                    'inventory_item_id' => $itemMap[$itemName]->id,
+                    'inventory_location_id' => $loc->id,
+                    'quantity' => $qty,
+                    'reorder_level' => 0,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        }
+
+        // ─── 7. Dietary types ──────────────────────────────────────────────
+        DietaryType::create(['name' => 'Veg', 'is_active' => true]);
+        DietaryType::create(['name' => 'Non-Veg', 'is_active' => true]);
+        DietaryType::create(['name' => 'Egg', 'is_active' => true]);
+
+        // ─── 8. Menu categories & subcategories ────────────────────────────
+        $catBiryani = MenuCategory::create(['name' => 'Biryani', 'is_active' => true]);
+        $catBeverages = MenuCategory::create(['name' => 'Beverages', 'is_active' => true]);
+
+        $subChicken = MenuSubCategory::create(['menu_category_id' => $catBiryani->id, 'name' => 'Chicken', 'description' => 'Chicken biryanis', 'is_active' => true]);
+        $subMutton = MenuSubCategory::create(['menu_category_id' => $catBiryani->id, 'name' => 'Mutton', 'description' => 'Mutton biryanis', 'is_active' => true]);
+        $subVeg = MenuSubCategory::create(['menu_category_id' => $catBiryani->id, 'name' => 'Veg', 'description' => 'Vegetarian biryanis', 'is_active' => true]);
+        $subHot = MenuSubCategory::create(['menu_category_id' => $catBeverages->id, 'name' => 'Hot Drinks', 'description' => 'Tea, coffee', 'is_active' => true]);
+        $subCold = MenuSubCategory::create(['menu_category_id' => $catBeverages->id, 'name' => 'Cold Drinks', 'description' => 'Iced beverages', 'is_active' => true]);
+
+        // ─── 9. Menu items ─────────────────────────────────────────────────
+        $pcs = $uomMap['Pcs'];
+
+        $menuItems = [
+            ['Chicken Biryani', 'MENU-CB-001', $catBiryani, $subChicken, 350, 'non-veg', 15],
+            ['Mutton Biryani', 'MENU-MB-001', $catBiryani, $subMutton, 450, 'non-veg', 20],
+            ['Veg Biryani', 'MENU-VB-001', $catBiryani, $subVeg, 250, 'veg', 12],
+            ['Tea', 'MENU-TE-001', $catBeverages, $subHot, 30, 'veg', 5],
+            ['Coffee', 'MENU-CF-001', $catBeverages, $subHot, 40, 'veg', 5],
+            ['Masala Chai', 'MENU-MC-001', $catBeverages, $subHot, 35, 'veg', 6],
+            ['Cold Coffee', 'MENU-CC-001', $catBeverages, $subCold, 50, 'veg', 5],
+            ['Iced Tea', 'MENU-IT-001', $catBeverages, $subCold, 45, 'veg', 5],
+        ];
+
+        $menuItemMap = [];
+        foreach ($menuItems as [$name, $code, $cat, $sub, $price, $type, $ept]) {
+            $menuItemMap[$name] = MenuItem::create([
+                'item_code' => $code,
+                'name' => $name,
+                'menu_category_id' => $cat->id,
+                'menu_sub_category_id' => $sub->id,
+                'price' => $price,
+                'tax_id' => $gst5->id,
+                'fixed_ept' => $ept,
+                'type' => $type,
+                'is_active' => true,
+            ]);
+        }
+
+        // ─── 10. Recipes & ingredients ───────────────────────────────────────
+
+        // Chicken Biryani
+        $cb = $menuItemMap['Chicken Biryani'];
+        $r1 = Recipe::create([
+            'menu_item_id' => $cb->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 30,
+            'notes' => 'Classic Hyderabadi chicken biryani',
+            'is_active' => true,
+            'requires_production' => true,
+        ]);
+        foreach ([
+            ['Chicken (Bone-in)', 200, 75], ['Basmati Rice', 120, 100], ['Onion', 80, 85],
+            ['Tomato', 50, 90], ['Ginger-Garlic Paste', 15, 100], ['Curd (Yogurt)', 40, 100],
+            ['Desi Ghee', 10, 100], ['Sunflower Oil', 15, 100], ['Biryani Masala', 5, 100],
+            ['Red Chilli Powder', 3, 100], ['Turmeric Powder', 1, 100], ['Garam Masala', 2, 100],
+            ['Salt', 3, 100], ['Saffron', 0.1, 100], ['Mint Leaves', 10, 80], ['Coriander Leaves', 10, 80],
+        ] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r1->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Veg Biryani (simplified)
+        $vb = $menuItemMap['Veg Biryani'];
+        $r2 = Recipe::create([
+            'menu_item_id' => $vb->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 25,
+            'notes' => 'Vegetarian biryani with potato and vegetables',
+            'is_active' => true,
+            'requires_production' => true,
+        ]);
+        foreach ([
+            ['Basmati Rice', 150, 100], ['Potato', 80, 90], ['Onion', 60, 85],
+            ['Tomato', 40, 90], ['Ginger-Garlic Paste', 10, 100], ['Sunflower Oil', 20, 100],
+            ['Biryani Masala', 5, 100], ['Salt', 3, 100], ['Mint Leaves', 8, 80], ['Coriander Leaves', 8, 80],
+        ] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r2->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Tea
+        $tea = $menuItemMap['Tea'];
+        $r3 = Recipe::create([
+            'menu_item_id' => $tea->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 40,
+            'notes' => 'Standard milk tea',
+            'is_active' => true,
+            'requires_production' => false,
+        ]);
+        foreach ([['Tea Leaves', 3, 100], ['Milk', 100, 100], ['Sugar', 10, 100]] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r3->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Coffee
+        $coffee = $menuItemMap['Coffee'];
+        $r4 = Recipe::create([
+            'menu_item_id' => $coffee->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 35,
+            'notes' => 'South Indian filter coffee',
+            'is_active' => true,
+            'requires_production' => false,
+        ]);
+        foreach ([['Coffee Powder', 5, 100], ['Milk', 100, 100], ['Sugar', 10, 100]] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r4->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Masala Chai
+        $mc = $menuItemMap['Masala Chai'];
+        $r5 = Recipe::create([
+            'menu_item_id' => $mc->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 38,
+            'notes' => 'Spiced tea with cardamom and ginger',
+            'is_active' => true,
+            'requires_production' => false,
+        ]);
+        foreach ([
+            ['Tea Leaves', 3, 100], ['Milk', 100, 100], ['Sugar', 10, 100],
+            ['Cardamom', 1, 100], ['Ginger', 2, 100],
+        ] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r5->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Cold Coffee
+        $cc = $menuItemMap['Cold Coffee'];
+        $r6 = Recipe::create([
+            'menu_item_id' => $cc->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 35,
+            'notes' => 'Iced coffee with milk',
+            'is_active' => true,
+            'requires_production' => false,
+        ]);
+        foreach ([['Coffee Powder', 6, 100], ['Milk', 150, 100], ['Sugar', 15, 100]] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r6->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Iced Tea (simple)
+        $it = $menuItemMap['Iced Tea'];
+        $r7 = Recipe::create([
+            'menu_item_id' => $it->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 35,
+            'notes' => 'Chilled iced tea',
+            'is_active' => true,
+            'requires_production' => false,
+        ]);
+        foreach ([['Tea Leaves', 4, 100], ['Sugar', 15, 100]] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r7->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // Mutton Biryani
+        $mb = $menuItemMap['Mutton Biryani'];
+        $r8 = Recipe::create([
+            'menu_item_id' => $mb->id,
+            'yield_quantity' => 1,
+            'yield_uom_id' => $pcs->id,
+            'food_cost_target' => 32,
+            'notes' => 'Mutton biryani with tender mutton pieces',
+            'is_active' => true,
+            'requires_production' => true,
+        ]);
+        foreach ([
+            ['Mutton', 250, 70], ['Basmati Rice', 120, 100], ['Onion', 80, 85],
+            ['Tomato', 50, 90], ['Ginger-Garlic Paste', 15, 100], ['Curd (Yogurt)', 40, 100],
+            ['Desi Ghee', 10, 100], ['Sunflower Oil', 15, 100], ['Biryani Masala', 5, 100],
+            ['Red Chilli Powder', 3, 100], ['Salt', 3, 100], ['Mint Leaves', 10, 80], ['Coriander Leaves', 10, 80],
+        ] as [$n, $q, $y]) {
+            RecipeIngredient::create([
+                'recipe_id' => $r8->id,
+                'inventory_item_id' => $itemMap[$n]->id,
+                'uom_id' => $itemMap[$n]->issue_uom_id,
+                'quantity' => $q,
+                'yield_percentage' => $y,
+            ]);
+        }
+
+        // ─── 11. Restaurant menu items (link to all restaurants) ─────────────
+        $restaurants = RestaurantMaster::where('is_active', true)->get();
+        foreach ($restaurants as $rest) {
+            foreach ($menuItemMap as $name => $mi) {
+                RestaurantMenuItem::create([
+                    'menu_item_id' => $mi->id,
+                    'restaurant_master_id' => $rest->id,
+                    'price' => $mi->price,
+                    'fixed_ept' => $mi->fixed_ept,
+                    'is_active' => true,
+                ]);
+            }
+        }
+
+        $this->command->info('Fresh Biryani, Tea, Coffee seeder complete.');
+        $this->command->info('  Vendors: ' . count($vendorMap));
+        $this->command->info('  UOMs: ' . count($uomMap));
+        $this->command->info('  Inventory items: ' . count($itemMap));
+        $this->command->info('  Menu items: ' . count($menuItemMap));
+        $this->command->info('  Recipes: 8');
+    }
+}
