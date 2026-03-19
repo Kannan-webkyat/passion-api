@@ -79,14 +79,19 @@ class PosController extends Controller
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(function ($order) {
-                $itemCount = $order->items()->where('kot_sent', true)->sum('quantity');
-                $total     = $order->items()->where('kot_sent', true)->sum(DB::raw('quantity * unit_price'));
+                $kotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
+                $itemCount = $kotItems->sum('quantity');
+                $total     = $kotItems->sum(fn($i) => $i->quantity * $i->unit_price);
+                $readyBatches = $kotItems->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray();
+                $servedBatches = $kotItems->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray();
 
                 return [
                     'id'             => $order->id,
                     'order_type'     => $order->order_type,
                     'status'         => $order->status,
                     'kitchen_status' => $order->kitchen_status ?? 'pending',
+                    'ready_batches'  => $readyBatches,
+                    'served_batches' => $servedBatches,
                     'room_number'    => $order->room?->room_number,
                     'customer_name'  => $order->customer_name,
                     'customer_phone' => $order->customer_phone,
@@ -141,6 +146,13 @@ class PosController extends Controller
                     ->with('items')
                     ->first();
 
+                $readyBatches = $openOrder
+                    ? $openOrder->items->where('kot_sent', true)->where('status', 'active')->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray()
+                    : [];
+                $servedBatches = $openOrder
+                    ? $openOrder->items->where('kot_sent', true)->where('status', 'active')->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray()
+                    : [];
+
                 return [
                     'id'           => $table->id,
                     'table_number' => $table->table_number,
@@ -152,6 +164,8 @@ class PosController extends Controller
                         'id'             => $openOrder->id,
                         'status'         => $openOrder->status,
                         'kitchen_status' => $openOrder->kitchen_status ?? 'pending',
+                        'ready_batches'  => $readyBatches,
+                        'served_batches' => $servedBatches,
                         'covers'         => $openOrder->covers,
                         'item_count'     => $openOrder->items->sum('quantity'),
                         'total'          => $openOrder->total_amount,
@@ -879,19 +893,25 @@ class PosController extends Controller
                     default        => 'Table ' . ($order->table?->table_number ?? '?'),
                 };
 
-                // Active items sent to kitchen, grouped by batch
-                $activeKotItems = $order->items
-                    ->where('status', 'active')
-                    ->where('kot_sent', true)
-                    ->values();
+                $allKotItems = $order->items->where('status', 'active')->where('kot_sent', true);
+                // Only include items from batches not yet delivered (per-KOT: delivered KOTs disappear)
+                $activeKotItems = $allKotItems->filter(function ($item) use ($allKotItems) {
+                    $batch = $item->kot_batch ?? 1;
+                    $batchItems = $allKotItems->where('kot_batch', $batch);
+                    return !$batchItems->every(fn($i) => $i->kitchen_served_at);
+                })->values();
 
-                // Cancelled items that were previously sent — visible cancellation notices
+                // Cancelled items for batches we're still showing
+                $shownBatches = $activeKotItems->pluck('kot_batch')->unique();
                 $cancelledItems = $order->items
                     ->where('status', 'cancelled')
                     ->where('kot_sent', true)
+                    ->filter(fn($i) => $shownBatches->contains($i->kot_batch))
                     ->values();
 
                 $maxBatch = $activeKotItems->max('kot_batch') ?? 1;
+                $readyBatches = $activeKotItems->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->toArray();
+                $startedBatches = $activeKotItems->filter(fn($i) => $i->kot_started_at)->pluck('kot_batch')->unique()->sort()->values()->toArray();
 
                 return [
                     'id'              => $order->id,
@@ -905,15 +925,18 @@ class PosController extends Controller
                     'status'          => $order->status,
                     'kitchen_status'  => $order->kitchen_status ?? 'pending',
                     'current_batch'   => $maxBatch,
+                    'ready_batches'   => array_values(array_map('intval', $readyBatches)),
+                    'started_batches' => array_values(array_map('intval', $startedBatches)),
                     'opened_at'       => $order->opened_at,
                     'items'           => $activeKotItems->map(fn($i) => [
-                        'id'        => $i->id,
-                        'name'      => $i->menuItem?->name ?? 'Unknown',
-                        'type'      => $i->menuItem?->type ?? null,
-                        'quantity'  => $i->quantity,
-                        'notes'     => $i->notes,
-                        'kot_batch' => $i->kot_batch ?? 1,
-                        'is_addl'   => ($i->kot_batch ?? 1) > 1,
+                        'id'               => $i->id,
+                        'name'             => $i->menuItem?->name ?? 'Unknown',
+                        'type'             => $i->menuItem?->type ?? null,
+                        'quantity'         => $i->quantity,
+                        'notes'            => $i->notes,
+                        'kot_batch'        => $i->kot_batch ?? 1,
+                        'is_addl'          => ($i->kot_batch ?? 1) > 1,
+                        'kitchen_ready_at' => $i->kitchen_ready_at?->toIso8601String(),
                     ]),
                     'cancellations'   => $cancelledItems->map(fn($i) => [
                         'id'        => $i->id,
@@ -922,9 +945,252 @@ class PosController extends Controller
                         'kot_batch' => $i->kot_batch ?? 1,
                     ]),
                 ];
-            });
+            })
+            ->filter(fn($o) => count($o['items']) > 0)
+            ->values()
+            ->all();
 
         return response()->json($orders);
+    }
+
+    public function startKotPrep(Request $request, PosOrder $order)
+    {
+        $validated = $request->validate([
+            'batch' => 'required|integer|min:1',
+        ]);
+        $batch = (int) $validated['batch'];
+
+        $batchItems = $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->get();
+
+        if ($batchItems->isEmpty()) {
+            return response()->json(['message' => 'No items in batch.'], 422);
+        }
+
+        if ($batchItems->every(fn($i) => $i->kot_started_at)) {
+            return response()->json(['message' => 'KOT already started.']);
+        }
+
+        $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->update(['kot_started_at' => now()]);
+
+        if ($order->kitchen_status === 'pending') {
+            $order->update(['kitchen_status' => 'preparing']);
+        }
+
+        return response()->json([
+            'id'             => $order->id,
+            'kitchen_status' => $order->fresh()->kitchen_status,
+        ]);
+    }
+
+    // ── Mark Batch Ready (per-batch kitchen status) ───────────────────────────
+
+    public function markBatchReady(Request $request, PosOrder $order)
+    {
+        $validated = $request->validate([
+            'batch' => 'required|integer|min:1',
+        ]);
+        $batch = (int) $validated['batch'];
+
+        $batchItems = $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->get();
+
+        if ($batchItems->isEmpty()) {
+            return response()->json(['message' => 'No items in batch.'], 422);
+        }
+
+        // Already marked?
+        if ($batchItems->every(fn($i) => $i->kitchen_ready_at)) {
+            return response()->json([
+                'id'             => $order->id,
+                'kitchen_status' => $order->fresh()->kitchen_status,
+                'ready_batches'  => $this->getReadyBatches($order),
+            ]);
+        }
+
+        // Mark batch ready
+        $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->update(['kitchen_ready_at' => now()]);
+
+        // Deduct inventory for this batch only
+        $this->deductBatchIngredients($order, $batch);
+
+        // If all batches are now ready, set order kitchen_status
+        $order->refresh();
+        // All KOT items in this order
+        $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
+        $allReady = $allKotItems->every(fn($i) => $i->kitchen_ready_at);
+        if ($allReady) {
+            $order->update(['kitchen_status' => 'ready']);
+        }
+
+        return response()->json([
+            'id'             => $order->id,
+            'kitchen_status' => $order->fresh()->kitchen_status,
+            'ready_batches'  => $this->getReadyBatches($order),
+        ]);
+    }
+
+    private function getReadyBatches(PosOrder $order): array
+    {
+        return $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->whereNotNull('kitchen_ready_at')
+            ->distinct()
+            ->pluck('kot_batch')
+            ->filter()
+            ->sort()
+            ->values()
+            ->toArray();
+    }
+
+    private function getServedBatches(PosOrder $order): array
+    {
+        return $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->whereNotNull('kitchen_served_at')
+            ->distinct()
+            ->pluck('kot_batch')
+            ->filter()
+            ->sort()
+            ->values()
+            ->toArray();
+    }
+
+    public function markBatchDelivered(Request $request, PosOrder $order)
+    {
+        $validated = $request->validate([
+            'batch' => 'required|integer|min:1',
+        ]);
+        $batch = (int) $validated['batch'];
+
+        $batchItems = $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->get();
+
+        if ($batchItems->isEmpty()) {
+            return response()->json(['message' => 'No items in batch.'], 422);
+        }
+
+        // Must be ready before delivered
+        if ($batchItems->contains(fn($i) => !$i->kitchen_ready_at)) {
+            return response()->json(['message' => 'Batch must be ready before marking delivered.'], 422);
+        }
+
+        // Already marked delivered?
+        if ($batchItems->every(fn($i) => $i->kitchen_served_at)) {
+            return response()->json([
+                'id'              => $order->id,
+                'kitchen_status'  => $order->fresh()->kitchen_status,
+                'ready_batches'   => $this->getReadyBatches($order),
+                'served_batches'  => $this->getServedBatches($order),
+            ]);
+        }
+
+        $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->update(['kitchen_served_at' => now()]);
+
+        $order->refresh();
+        $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
+        $allServed = $allKotItems->isNotEmpty() && $allKotItems->every(fn($i) => $i->kitchen_served_at);
+        if ($allServed) {
+            $order->update(['kitchen_status' => 'served']);
+        }
+
+        return response()->json([
+            'id'             => $order->id,
+            'kitchen_status' => $order->fresh()->kitchen_status,
+            'ready_batches'  => $this->getReadyBatches($order),
+            'served_batches' => $this->getServedBatches($order),
+        ]);
+    }
+
+    private function deductBatchIngredients(PosOrder $order, int $batch): void
+    {
+        $kitchenStore = InventoryLocation::where('name', 'Kitchen Store')->first();
+        if (!$kitchenStore) return;
+
+        $refId = $order->id . '-' . $batch;
+        $alreadyDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
+            ->where('reference_id', $refId)
+            ->exists();
+        if ($alreadyDeducted) return;
+
+        $batchItems = $order->items()
+            ->with('menuItem')
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('kot_batch', $batch)
+            ->get();
+
+        DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId) {
+            foreach ($batchItems as $orderItem) {
+                $recipe = Recipe::with('ingredients.inventoryItem')
+                    ->where('menu_item_id', $orderItem->menu_item_id)
+                    ->where('is_active', true)
+                    ->first();
+
+                if (!$recipe) continue;
+                if ($recipe->requires_production ?? true) continue;
+
+                $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+
+                foreach ($recipe->ingredients as $ing) {
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+
+                    $currentStock = DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $ing->inventory_item_id)
+                        ->where('inventory_location_id', $kitchenStore->id)
+                        ->lockForUpdate()
+                        ->value('quantity') ?? 0;
+
+                    $deduct = min($rawQty, max(0, (float) $currentStock));
+                    if ($deduct <= 0) continue;
+
+                    DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $ing->inventory_item_id)
+                        ->where('inventory_location_id', $kitchenStore->id)
+                        ->decrement('quantity', $deduct);
+
+                    $item = $ing->inventoryItem;
+                    $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
+
+                    InventoryTransaction::create([
+                        'inventory_item_id'     => $ing->inventory_item_id,
+                        'inventory_location_id' => $kitchenStore->id,
+                        'type'                  => 'out',
+                        'quantity'              => $deduct,
+                        'unit_cost'             => $unitCostAtTime,
+                        'total_cost'            => round($deduct * $unitCostAtTime, 2),
+                        'reason'                => 'POS Order',
+                        'notes'                 => 'Order #' . $order->id . ' Batch ' . $batch . ' — ' . ($orderItem->menuItem?->name ?? 'item') . ' ×' . $orderItem->quantity,
+                        'user_id'               => auth()->id(),
+                        'reference_type'        => 'pos_order_batch',
+                        'reference_id'          => $refId,
+                    ]);
+                }
+            }
+        });
     }
 
     // ── Update Kitchen Status ─────────────────────────────────────────────────
@@ -940,14 +1206,26 @@ class PosController extends Controller
 
         $order->update(['kitchen_status' => $newStatus]);
 
+        // When marking served, set kitchen_served_at for all KOT items
+        if ($newStatus === 'served') {
+            $order->items()
+                ->where('kot_sent', true)
+                ->where('status', 'active')
+                ->whereNull('kitchen_served_at')
+                ->update(['kitchen_served_at' => now()]);
+        }
+
         // ── Deduct ingredients when kitchen marks the order Ready ─────────────
-        // Only deduct once — skip if already deducted (idempotent).
+        // Skip if using per-batch (already deducted via markBatchReady).
         if ($newStatus === 'ready' && $previousStatus !== 'ready') {
-            $alreadyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
+            $perBatchDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
+                ->where('reference_id', 'like', (string) $order->id . '-%')
+                ->exists();
+            $legacyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
                 ->where('reference_id', (string) $order->id)
                 ->exists();
 
-            if (!$alreadyDeducted) {
+            if (!$perBatchDeducted && !$legacyDeducted) {
                 $this->deductOrderIngredients($order);
             }
         }
@@ -1080,6 +1358,8 @@ class PosController extends Controller
             'opened_by_user'  => $order->openedBy ? ['id' => $order->openedBy->id, 'name' => $order->openedBy->name] : null,
             'status'          => $order->status,
             'kitchen_status'  => $order->kitchen_status ?? 'pending',
+            'ready_batches'   => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray(),
+            'served_batches'  => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray(),
             'discount_type'   => $order->discount_type,
             'discount_value'  => (float) $order->discount_value,
             'service_charge_type'  => $order->service_charge_type,
@@ -1106,6 +1386,7 @@ class PosController extends Controller
                 'line_total'   => (float) $i->line_total,
                 'kot_sent'     => $i->kot_sent,
                 'kot_batch'    => $i->kot_batch,
+                'kitchen_ready_at' => $i->kitchen_ready_at?->toIso8601String(),
                 'notes'        => $i->notes,
             ]),
             'cancellations'   => $order->items->where('status', 'cancelled')->values()->map(fn($i) => [

@@ -97,6 +97,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Kitchen Display
     Route::get('kitchen/display',                          [PosController::class, 'kitchenDisplay']);
     Route::patch('pos/orders/{order}/kitchen-status',      [PosController::class, 'updateKitchenStatus']);
+    Route::post('pos/orders/{order}/start-kot-prep',       [PosController::class, 'startKotPrep']);
+    Route::post('pos/orders/{order}/mark-batch-ready',     [PosController::class, 'markBatchReady']);
+    Route::post('pos/orders/{order}/mark-batch-delivered', [PosController::class, 'markBatchDelivered']);
 
     // F&B Module (Menu Configuration)
     Route::apiResource('menu-categories', MenuCategoryController::class);
