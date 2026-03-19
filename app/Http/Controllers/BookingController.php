@@ -7,7 +7,6 @@ use App\Models\Room;
 use App\Models\BookingSegment;
 use App\Models\BookingGroup;
 use App\Models\RoomStatusBlock;
-use App\Models\RatePlan;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
