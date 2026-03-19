@@ -14,6 +14,7 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
+use App\Models\Setting;
 use App\Models\RestaurantTable;
 use App\Models\User;
 use Illuminate\Http\Request;
@@ -105,6 +106,23 @@ class PosController extends Controller
             ->get();
 
         return response()->json($restaurants);
+    }
+
+    public function receiptConfig(RestaurantMaster $restaurant)
+    {
+        $defaults = Setting::getReceiptDefaults();
+        $config = [
+            'restaurant_name' => $restaurant->name,
+            'address'         => $restaurant->address ?: ($defaults['address'] ?? ''),
+            'email'           => $restaurant->email ?: ($defaults['email'] ?? ''),
+            'phone'           => $restaurant->phone ?: ($defaults['phone'] ?? ''),
+            'gstin'           => $restaurant->gstin ?: '',
+            'fssai'           => $restaurant->fssai ?: '',
+            'logo_url'        => $restaurant->logo_path
+                ? asset('storage/' . $restaurant->logo_path)
+                : ($defaults['logo_url'] ?? null),
+        ];
+        return response()->json($config);
     }
 
     // ── Tables with live order status ─────────────────────────────────────────

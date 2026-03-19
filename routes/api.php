@@ -21,6 +21,7 @@ use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
 use App\Http\Controllers\PosController;
 use App\Http\Controllers\DayClosingController;
+use App\Http\Controllers\SettingController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -50,6 +51,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // F&B Module (Restaurant Master)
     Route::apiResource('restaurant-masters', RestaurantMasterController::class);
+    Route::post('restaurant-masters/{restaurantMaster}/logo', [RestaurantMasterController::class, 'uploadLogo']);
+
+    // Settings (receipt defaults)
+    Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
+    Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);
@@ -61,6 +67,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // POS Module
     Route::get('pos/restaurants',              [PosController::class, 'restaurants']);
+    Route::get('pos/receipt-config/{restaurant}', [PosController::class, 'receiptConfig']);
     Route::get('pos/waiters',                  [PosController::class, 'waiters']);
     Route::get('pos/tables',                   [PosController::class, 'tables']);
     Route::get('pos/rooms',                    [PosController::class, 'rooms']);

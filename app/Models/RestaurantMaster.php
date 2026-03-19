@@ -6,7 +6,10 @@ use Illuminate\Database\Eloquent\Model;
 
 class RestaurantMaster extends Model
 {
-    protected $fillable = ['name', 'floor', 'description', 'is_active'];
+    protected $fillable = [
+        'name', 'floor', 'description', 'is_active',
+        'address', 'email', 'phone', 'gstin', 'fssai', 'logo_path',
+    ];
 
     protected $casts = [
         'is_active' => 'boolean',
