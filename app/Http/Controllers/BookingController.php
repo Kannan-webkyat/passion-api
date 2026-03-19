@@ -74,6 +74,34 @@ class BookingController extends Controller
         return ['ok' => true, 'total' => round($total, 2), 'package_end' => $packageEnd];
     }
 
+    private function effectiveBookingGrand(Booking $booking): float
+    {
+        $booking->loadMissing(['room.roomType.tax', 'room.roomType.ratePlans']);
+
+        // Keep hourly as stored value (includes overtime logic already computed server-side).
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return (float) ($booking->total_price ?? 0);
+        }
+
+        $roomType = $booking->room?->roomType;
+        $plan = $roomType?->ratePlans?->firstWhere('id', $booking->rate_plan_id);
+        if (!$plan) {
+            return (float) ($booking->total_price ?? 0);
+        }
+
+        $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
+        $checkOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
+        $nights = max(1, $checkInAt->copy()->startOfDay()->diffInDays($checkOutAt->copy()->startOfDay()));
+
+        $basePerNight = (float) ($plan->base_price ?? 0);
+        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
+        $extraBedCost = (float) ($roomType?->extra_bed_cost ?? 0);
+        $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
+        $taxRate = (float) ($roomType?->tax?->rate ?? 0);
+
+        return round($beforeTax * (1 + ($taxRate / 100)), 2);
+    }
+
     public function index(Request $request)
     {
         return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
@@ -381,6 +409,23 @@ class BookingController extends Controller
                     return response()->json(['message' => $calc['message']], 422);
                 }
                 $totalPrice = (float) $calc['total'];
+            } else {
+                // For multi-room bookings, compute per-room day total server-side so
+                // each booking holds only its own room price (prevents grouped over/under totals).
+                if (count($roomIds) > 1) {
+                    $planId = (int) ($bookingData['rate_plan_id'] ?? 0);
+                    $plan = $room->roomType?->ratePlans?->firstWhere('id', $planId);
+                    if ($plan) {
+                        $effectiveCheckOutAt = $finalCheckOutAt ? $finalCheckOutAt->copy() : $finalCheckInAt->copy()->addDay();
+                        $nights = max(1, $finalCheckInAt->copy()->startOfDay()->diffInDays($effectiveCheckOutAt->startOfDay()));
+                        $basePerNight = (float) ($plan->base_price ?? 0);
+                        $extraBeds = (int) ($bookingData['extra_beds_count'] ?? 0);
+                        $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
+                        $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
+                        $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
+                        $totalPrice = round($beforeTax * (1 + ($taxRate / 100)), 2);
+                    }
+                }
             }
 
             // Sync legacy date columns for compatibility
@@ -503,7 +548,21 @@ class BookingController extends Controller
         // Checkout validation: must be paid
         if (isset($validated['status']) && $validated['status'] === 'checked_out' && $booking->status !== 'checked_out') {
             $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
-            if ($currentPaymentStatus !== 'paid') {
+            $isPaid = ($currentPaymentStatus === 'paid');
+
+            // Group-aware checkout rule:
+            // if this booking belongs to a group, allow checkout when the group is fully paid
+            // even if this single room booking still has pending/partial status.
+            if (!$isPaid && !empty($booking->booking_group_id)) {
+                $groupBookings = Booking::where('booking_group_id', $booking->booking_group_id)
+                    ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
+                    ->get();
+                $groupGrand = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
+                $groupPaid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
+                $isPaid = $groupPaid >= $groupGrand;
+            }
+
+            if (!$isPaid) {
                 return response()->json(['message' => 'Checkout not allowed until payment is fully paid'], 422);
             }
 
@@ -1389,7 +1448,7 @@ class BookingController extends Controller
             })
             // IMPORTANT: use segments so split-stays are respected
             ->whereDoesntHave('segments', function ($q) use ($checkInAt, $checkOutAt, $excludeId) {
-                $q->where('status', '!=', 'cancelled')
+                $q->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
                     ->where('check_in_at', '<', $checkOutAt)
                     ->where('check_out_at', '>', $checkInAt)
                     ->when($excludeId, function ($sq) use ($excludeId) {
