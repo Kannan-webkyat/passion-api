@@ -126,15 +126,12 @@ class RestaurantTableSeeder extends Seeder
             );
         }
 
-        // Map outlets to kitchens (multi-kitchen)
-        $rooftopKitchen = InventoryLocation::where('name', 'Rooftop Kitchen')->first();
-        $poolBarKitchen = InventoryLocation::where('name', 'Pool Bar Kitchen')->first();
-        if ($rooftopKitchen) {
-            $mainDining->update(['kitchen_location_id' => $rooftopKitchen->id]);
-            $rooftop->update(['kitchen_location_id' => $rooftopKitchen->id]);
-        }
-        if ($poolBarKitchen) {
-            $poolside->update(['kitchen_location_id' => $poolBarKitchen->id]);
+        // Map all outlets to kitchen
+        $kitchen = InventoryLocation::where('name', 'Kitchen')->first();
+        if ($kitchen) {
+            $mainDining->update(['kitchen_location_id' => $kitchen->id]);
+            $rooftop->update(['kitchen_location_id' => $kitchen->id]);
+            $poolside->update(['kitchen_location_id' => $kitchen->id]);
         }
 
         $this->command->info('Restaurant & Table seeder completed.');

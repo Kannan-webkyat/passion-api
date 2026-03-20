@@ -170,9 +170,9 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
 
         // ─── 6. Stock in locations (quantities in issue UOM: Gm, Ml, or Pcs) ─
         $mainStore = InventoryLocation::where('name', 'Main Store')->first();
-        $rooftopKitchen = InventoryLocation::where('name', 'Rooftop Kitchen')->first();
+        $kitchen = InventoryLocation::where('name', 'Kitchen')->first();
 
-        // Stock per item: Main Store + Rooftop Kitchen (each gets same qty in issue UOM)
+        // Stock per item: Main Store + Kitchen (each gets same qty in issue UOM)
         // Gm items: 20000 = 20 kg, 10000 = 10 kg, etc. | Ml: 20000 = 20 Ltr | Pcs: 120 = 10 dozen
         $stockQty = [
             'Chicken (Bone-in)'   => 20000,  // 20 kg
@@ -205,7 +205,7 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             'Green Chilli'         => 2000,   // 2 kg
         ];
 
-        foreach (array_filter([$mainStore, $rooftopKitchen]) as $loc) {
+        foreach (array_filter([$mainStore, $kitchen]) as $loc) {
             foreach ($stockQty as $itemName => $qty) {
                 if (!isset($itemMap[$itemName])) continue;
                 DB::table('inventory_item_locations')->insert([

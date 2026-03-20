@@ -11,7 +11,7 @@ class StoreManagerSeeder extends Seeder
     public function run(): void
     {
         $user = User::firstOrCreate(
-            ['email' => 'storemanger@gmail.com'],
+            ['email' => 'storemanager@gmail.com'],
             [
                 'name' => 'Store Manager',
                 'password' => bcrypt('password'),

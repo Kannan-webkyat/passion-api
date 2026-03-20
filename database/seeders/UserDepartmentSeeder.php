@@ -35,9 +35,16 @@ class UserDepartmentSeeder extends Seeder
         }
 
         // 4. Store Manager
-        $storeManager = User::where('email', 'storemanger@gmail.com')->first();
+        $storeManager = User::where('email', 'storemanager@gmail.com')->first();
         if ($storeManager) {
             $storeManager->departments()->sync(Department::all()->pluck('id'));
+        }
+
+        // 5. Waiters (F&B department)
+        $fnb = Department::where('code', 'FNB')->first();
+        if ($fnb) {
+            User::whereIn('email', ['waiter1@gmail.com', 'waiter2@gmail.com'])
+                ->each(fn ($u) => $u->departments()->sync([$fnb->id]));
         }
     }
 }

@@ -22,6 +22,8 @@ class RolePermissionSeeder extends Seeder
             'reservation',
             'manage-inventory',
             'manage-restaurant',
+            'manage-restaurants',
+            'manage-tables',
             'manage-bar',
             'view-reports',
             'manage-users',
@@ -47,7 +49,7 @@ class RolePermissionSeeder extends Seeder
         $inventoryManager->syncPermissions(['manage-inventory']);
 
         $restaurantStaff = Role::firstOrCreate(['name' => 'Restaurant Staff']);
-        $restaurantStaff->syncPermissions(['manage-restaurant', 'pos-order', 'pos-settle', 'create-requisition']);
+        $restaurantStaff->syncPermissions(['manage-restaurant', 'manage-restaurants', 'manage-tables', 'pos-order', 'pos-settle', 'create-requisition']);
 
         $cashier = Role::firstOrCreate(['name' => 'Cashier']);
         $cashier->syncPermissions(['pos-order', 'pos-settle']);

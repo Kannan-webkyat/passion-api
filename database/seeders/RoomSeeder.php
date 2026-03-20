@@ -17,7 +17,9 @@ class RoomSeeder extends Seeder
             [
                 'description' => 'A comfortable standard room with essential amenities.',
                 'base_price' => 2500,
+                'base_occupancy' => 2,
                 'capacity' => 2,
+                'is_active' => true,
                 'amenities' => ['Wifi', 'AC', 'TV', 'Mini Bar']
             ]
         );
@@ -27,7 +29,9 @@ class RoomSeeder extends Seeder
             [
                 'description' => 'Spacious suite with a balcony and premium furnishings.',
                 'base_price' => 5000,
+                'base_occupancy' => 4,
                 'capacity' => 4,
+                'is_active' => true,
                 'amenities' => ['Wifi', 'AC', 'TV', 'Mini Bar', 'Bathtub', 'Balcony']
             ]
         );
@@ -39,7 +43,8 @@ class RoomSeeder extends Seeder
                 [
                     'room_type_id' => $deluxe->id,
                     'floor' => '1st Floor',
-                    'status' => 'available'
+                    'status' => 'available',
+                    'is_active' => true
                 ]
             );
         }
@@ -51,7 +56,8 @@ class RoomSeeder extends Seeder
                 [
                     'room_type_id' => $suite->id,
                     'floor' => '2nd Floor',
-                    'status' => 'available'
+                    'status' => 'available',
+                    'is_active' => true
                 ]
             );
         }
