@@ -11,9 +11,18 @@ class InventoryController extends Controller
 {
     public function index()
     {
-        return response()->json(
-            InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get()
-        );
+        $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get();
+        $sums = DB::table('inventory_item_locations')
+            ->whereIn('inventory_item_id', $items->pluck('id'))
+            ->groupBy('inventory_item_id')
+            ->selectRaw('inventory_item_id, COALESCE(SUM(quantity), 0) as total')
+            ->pluck('total', 'inventory_item_id');
+
+        foreach ($items as $item) {
+            $item->setAttribute('current_stock', (int) round((float) ($sums[$item->id] ?? 0)));
+        }
+
+        return response()->json($items);
     }
 
     public function store(Request $request)
@@ -43,23 +52,32 @@ class InventoryController extends Controller
                     ['quantity' => $item->current_stock, 'reorder_level' => $item->reorder_level, 'updated_at' => now(), 'created_at' => now()]
                 );
 
+                $cf = floatval($item->conversion_factor ?: 1);
+                $unitCost = $cf > 0 ? (floatval($item->cost_price ?? 0) / $cf) : 0;
                 InventoryTransaction::create([
                     'inventory_item_id' => $item->id,
                     'inventory_location_id' => $mainStore->id,
                     'type' => 'in',
                     'quantity' => $item->current_stock,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($item->current_stock * $unitCost, 2),
                     'reason' => 'Initial Stock',
                     'user_id' => auth()->id(),
                 ]);
             }
         }
 
+        InventoryItem::syncStoredCurrentStockFromLocations($item->id);
+        $item->refresh();
+
         return response()->json($item->load('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations'), 201);
     }
 
     public function show(InventoryItem $item)
     {
-        return response()->json($item->load('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'transactions'));
+        $item->load('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'transactions');
+        $item->setAttribute('current_stock', (int) round(InventoryItem::sumQuantityAcrossLocations($item->id)));
+        return response()->json($item);
     }
 
     public function update(Request $request, InventoryItem $item)
@@ -91,17 +109,24 @@ class InventoryController extends Controller
                     ['quantity' => $item->current_stock, 'updated_at' => now()]
                 );
 
+                $qtyDelta = abs($item->current_stock - $oldStock);
+                $cf = floatval($item->conversion_factor ?: 1);
+                $unitCost = $cf > 0 ? (floatval($item->cost_price ?? 0) / $cf) : 0;
                 InventoryTransaction::create([
                     'inventory_item_id' => $item->id,
                     'inventory_location_id' => $mainStore->id,
                     'type' => $item->current_stock > $oldStock ? 'in' : 'out',
-                    'quantity' => abs($item->current_stock - $oldStock),
+                    'quantity' => $qtyDelta,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($qtyDelta * $unitCost, 2),
                     'reason' => 'Manual Adjustment',
                     'notes' => 'Stock edited via Item Master',
                     'user_id' => auth()->id(),
                 ]);
             }
         }
+
+        InventoryItem::syncStoredCurrentStockFromLocations($item->id);
 
         return response()->json($item->load('category', 'vendor', 'purchaseUom', 'issueUom', 'tax'));
     }
@@ -115,9 +140,16 @@ class InventoryController extends Controller
     public function stats()
     {
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom')->get();
+        $sums = DB::table('inventory_item_locations')
+            ->whereIn('inventory_item_id', $items->pluck('id'))
+            ->groupBy('inventory_item_id')
+            ->selectRaw('inventory_item_id, COALESCE(SUM(quantity), 0) as total')
+            ->pluck('total', 'inventory_item_id');
 
-        $totalValue      = $items->sum(fn($i) => $i->current_stock * ($i->cost_price / ($i->conversion_factor ?: 1)));
-        $lowStockCount   = $items->filter(fn($i) => $i->current_stock <= $i->reorder_level)->count();
+        $qty = fn (InventoryItem $i) => (float) ($sums[$i->id] ?? 0);
+
+        $totalValue    = $items->sum(fn ($i) => $qty($i) * ($i->cost_price / ($i->conversion_factor ?: 1)));
+        $lowStockCount = $items->filter(fn ($i) => $qty($i) <= (float) $i->reorder_level)->count();
         $recentTx        = InventoryTransaction::with(['item', 'location'])->latest()->take(10)->get();
 
         return response()->json([
@@ -153,27 +185,31 @@ class InventoryController extends Controller
 
         DB::beginTransaction();
         try {
-            // 1. Decrement Global Stock
-            $item->decrement('current_stock', $validated['quantity']);
-
-            // 2. Decrement Location Stock
+            // 1. Decrement Location Stock (source of truth)
             DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $item->id)
                 ->where('inventory_location_id', $validated['location_id'])
                 ->decrement('quantity', $validated['quantity']);
 
-            // 3. Log Transaction
+            // 3. Log Transaction (with unit_cost for auditing)
+            $cf = floatval($item->conversion_factor ?: 1);
+            $unitCost = $cf > 0 ? (floatval($item->cost_price ?? 0) / $cf) : 0;
+            $qty = (float) $validated['quantity'];
             $tx = \App\Models\InventoryTransaction::create([
                 'inventory_item_id' => $item->id,
                 'inventory_location_id' => $validated['location_id'],
                 'department_id'     => $dept->id,
                 'type'              => 'out',
-                'quantity'          => $validated['quantity'],
+                'quantity'          => $qty,
+                'unit_cost'         => round($unitCost, 4),
+                'total_cost'        => round($qty * $unitCost, 2),
                 'department'        => $dept->name, // Keep for legacy
                 'reason'            => 'Consumption',
                 'notes'             => ($validated['notes'] ?? '') . ' (Consumed from ' . \App\Models\InventoryLocation::find($validated['location_id'])->name . ')',
                 'user_id'           => auth()->id(),
             ]);
+
+            InventoryItem::syncStoredCurrentStockFromLocations($item->id);
 
             DB::commit();
             return response()->json($tx->load('item'), 201);

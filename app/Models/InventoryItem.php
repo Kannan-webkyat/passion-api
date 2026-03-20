@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\DB;
 
 class InventoryItem extends Model
 {
@@ -55,5 +56,32 @@ class InventoryItem extends Model
         return $this->belongsToMany(InventoryLocation::class, 'inventory_item_locations')
                     ->withPivot('quantity', 'reorder_level')
                     ->withTimestamps();
+    }
+
+    /**
+     * Source of truth for on-hand quantity: sum of all location rows (Option B).
+     */
+    public static function sumQuantityAcrossLocations(int $inventoryItemId): float
+    {
+        return (float) DB::table('inventory_item_locations')
+            ->where('inventory_item_id', $inventoryItemId)
+            ->sum('quantity');
+    }
+
+    /**
+     * Persist inventory_items.current_stock to match sum of locations (keeps legacy column aligned).
+     */
+    public static function syncStoredCurrentStockFromLocations(int $inventoryItemId): void
+    {
+        $sum = self::sumQuantityAcrossLocations($inventoryItemId);
+        self::where('id', $inventoryItemId)->update([
+            'current_stock' => (int) round($sum),
+        ]);
+    }
+
+    public function refreshStoredStockFromLocations(): void
+    {
+        self::syncStoredCurrentStockFromLocations($this->id);
+        $this->refresh();
     }
 }

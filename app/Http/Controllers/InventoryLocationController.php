@@ -16,7 +16,7 @@ class InventoryLocationController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name',
-            'type' => 'required|string|in:main_store,sub_store,satellite',
+            'type' => 'required|string|in:main_store,kitchen_store,sub_store,satellite',
             'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean'
         ]);
@@ -34,13 +34,13 @@ class InventoryLocationController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name,' . $location->id,
-            'type' => 'required|string|in:main_store,sub_store,satellite',
+            'type' => 'required|string|in:main_store,kitchen_store,sub_store,satellite',
             'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean'
         ]);
 
-        if ($location->type === 'main_store' && isset($validated['is_active']) && $validated['is_active'] == false) {
-            return response()->json(['message' => 'The Main Store cannot be blocked.'], 422);
+        if (in_array($location->type, ['main_store', 'kitchen_store']) && isset($validated['is_active']) && $validated['is_active'] == false) {
+            return response()->json(['message' => 'The ' . ($location->type === 'main_store' ? 'Main' : 'Kitchen') . ' Store cannot be blocked.'], 422);
         }
 
         $location->update($validated);
@@ -49,8 +49,8 @@ class InventoryLocationController extends Controller
 
     public function destroy(InventoryLocation $location)
     {
-        if ($location->type === 'main_store') {
-            return response()->json(['message' => 'The Main Store cannot be deleted.'], 422);
+        if (in_array($location->type, ['main_store', 'kitchen_store'])) {
+            return response()->json(['message' => 'The ' . ($location->type === 'main_store' ? 'Main' : 'Kitchen') . ' Store cannot be deleted.'], 422);
         }
         $location->delete();
         return response()->json(null, 204);

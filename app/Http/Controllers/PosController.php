@@ -10,6 +10,7 @@ use App\Models\PosOrderItem;
 use App\Models\PosOrderRefund;
 use App\Models\PosPayment;
 use App\Models\Recipe;
+use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\RestaurantMaster;
@@ -823,17 +824,23 @@ class PosController extends Controller
                 RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
             }
 
-            // ── Reverse ingredient deductions if kitchen had already marked Ready ──
-            $deductions = InventoryTransaction::where('reference_type', 'pos_order')
-                ->where('reference_id', (string) $order->id)
+            // ── Reverse ingredient deductions (pos_order and pos_order_batch) ──
+            $deductions = InventoryTransaction::whereIn('reference_type', ['pos_order', 'pos_order_batch'])
+                ->where(function ($q) use ($order) {
+                    $q->where('reference_id', (string) $order->id)
+                        ->orWhere('reference_id', 'like', (string) $order->id . '-%');
+                })
                 ->where('type', 'out')
                 ->get();
 
+            $affectedItemIds = [];
             foreach ($deductions as $tx) {
                 DB::table('inventory_item_locations')
                     ->where('inventory_item_id',     $tx->inventory_item_id)
                     ->where('inventory_location_id', $tx->inventory_location_id)
                     ->increment('quantity', $tx->quantity);
+
+                $affectedItemIds[$tx->inventory_item_id] = true;
 
                 InventoryTransaction::create([
                     'inventory_item_id'     => $tx->inventory_item_id,
@@ -848,6 +855,9 @@ class PosController extends Controller
                     'reference_type'        => 'pos_order_void',
                     'reference_id'          => (string) $order->id,
                 ]);
+            }
+            foreach (array_keys($affectedItemIds) as $itemId) {
+                InventoryItem::syncStoredCurrentStockFromLocations($itemId);
             }
         });
 
@@ -1165,7 +1175,7 @@ class PosController extends Controller
 
     private function deductBatchIngredients(PosOrder $order, int $batch): void
     {
-        $kitchenStore = InventoryLocation::where('name', 'Kitchen Store')->first();
+        $kitchenStore = InventoryLocation::where('type', 'kitchen_store')->first();
         if (!$kitchenStore) return;
 
         $refId = $order->id . '-' . $batch;
@@ -1181,7 +1191,8 @@ class PosController extends Controller
             ->where('kot_batch', $batch)
             ->get();
 
-        DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId) {
+        $affectedItemIds = [];
+        DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId, &$affectedItemIds) {
             foreach ($batchItems as $orderItem) {
                 $recipe = Recipe::with('ingredients.inventoryItem')
                     ->where('menu_item_id', $orderItem->menu_item_id)
@@ -1210,6 +1221,8 @@ class PosController extends Controller
                         ->where('inventory_location_id', $kitchenStore->id)
                         ->decrement('quantity', $deduct);
 
+                    $affectedItemIds[$ing->inventory_item_id] = true;
+
                     $item = $ing->inventoryItem;
                     $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
 
@@ -1229,6 +1242,9 @@ class PosController extends Controller
                 }
             }
         });
+        foreach (array_keys($affectedItemIds) as $itemId) {
+            InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+        }
     }
 
     // ── Update Kitchen Status ─────────────────────────────────────────────────
@@ -1280,12 +1296,13 @@ class PosController extends Controller
      */
     private function deductOrderIngredients(PosOrder $order): void
     {
-        $kitchenStore = InventoryLocation::where('name', 'Kitchen Store')->first();
+        $kitchenStore = InventoryLocation::where('type', 'kitchen_store')->first();
         if (!$kitchenStore) return;
 
         $kotItems = $order->items()->with('menuItem')->where('kot_sent', true)->get();
+        $affectedItemIds = [];
 
-        DB::transaction(function () use ($order, $kotItems, $kitchenStore) {
+        DB::transaction(function () use ($order, $kotItems, $kitchenStore, &$affectedItemIds) {
             foreach ($kotItems as $orderItem) {
                 $recipe = Recipe::with('ingredients.inventoryItem')
                     ->where('menu_item_id', $orderItem->menu_item_id)
@@ -1321,6 +1338,8 @@ class PosController extends Controller
                         ->where('inventory_location_id', $kitchenStore->id)
                         ->decrement('quantity', $deduct);
 
+                    $affectedItemIds[$ing->inventory_item_id] = true;
+
                     $item           = $ing->inventoryItem;
                     $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
 
@@ -1340,6 +1359,9 @@ class PosController extends Controller
                 }
             }
         });
+        foreach (array_keys($affectedItemIds) as $itemId) {
+            InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

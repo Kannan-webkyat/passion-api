@@ -228,6 +228,10 @@ class RecipeController extends Controller
                 ]);
             });
 
+            foreach ($recipe->ingredients as $ing) {
+                \App\Models\InventoryItem::syncStoredCurrentStockFromLocations($ing->inventory_item_id);
+            }
+
         } catch (\RuntimeException $e) {
             if ($e->getMessage() === 'INSUFFICIENT_STOCK') {
                 return response()->json([

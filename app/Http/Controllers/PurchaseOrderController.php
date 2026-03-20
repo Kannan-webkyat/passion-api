@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\InventoryItem;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use Illuminate\Http\Request;
@@ -199,11 +200,21 @@ class PurchaseOrderController extends Controller
                     // Convert quantity based on conversion factor (e.g., 1 KG -> 1000 Grams)
                     $conversionFactor = floatval($item->conversion_factor ?? 1);
                     $convertedQuantity = $poItem->quantity_ordered * $conversionFactor;
+                    $poUnitPrice = floatval($poItem->unit_price ?? 0);
 
-                    // 1. Update Global Total Stock
-                    $item->increment('current_stock', $convertedQuantity);
+                    // Unit cost for this transaction (per issue unit) — for auditing
+                    $unitCostPerIssue = $conversionFactor > 0 ? $poUnitPrice / $conversionFactor : $poUnitPrice;
+                    $totalCost = round($poItem->quantity_ordered * $poUnitPrice, 2);
 
-                    // 2. Update Location Specific Stock
+                    // WAC uses sum of locations as on-hand qty (source of truth), not inventory_items.current_stock
+                    $stockBefore = InventoryItem::sumQuantityAcrossLocations($item->id);
+                    $currentCost = (float) ($item->cost_price ?? 0);
+                    $denominator = $stockBefore + $convertedQuantity;
+                    $newCostPrice = $denominator > 0
+                        ? (($stockBefore * $currentCost) + ($convertedQuantity * $poUnitPrice)) / $denominator
+                        : $poUnitPrice;
+
+                    // 1. Update Location Stock (source of truth)
                     DB::table('inventory_item_locations')->updateOrInsert(
                         [
                             'inventory_item_id' => $item->id,
@@ -216,15 +227,21 @@ class PurchaseOrderController extends Controller
                         ]
                     );
 
-                    // 3. Create Transaction log
+                    $item->update(['cost_price' => round($newCostPrice, 4)]);
+                    InventoryItem::syncStoredCurrentStockFromLocations($item->id);
+
                     \App\Models\InventoryTransaction::create([
                         'inventory_item_id' => $item->id,
                         'inventory_location_id' => $locationId,
                         'type' => 'in',
                         'quantity' => $convertedQuantity,
+                        'unit_cost' => round($unitCostPerIssue, 4),
+                        'total_cost' => $totalCost,
                         'reason' => 'Purchase Receipt',
                         'notes' => 'From PO: ' . $purchaseOrder->po_number . ' at ' . \App\Models\InventoryLocation::find($locationId)->name . ' (Ordered: ' . $poItem->quantity_ordered . ' ' . ($item->purchaseUom->short_name ?? '') . ')',
                         'user_id' => auth()->id(),
+                        'reference_type' => 'purchase_order',
+                        'reference_id' => (string) $purchaseOrder->id,
                     ]);
                 }
             }
