@@ -77,7 +77,7 @@ class PosController extends Controller
 
         $orders = PosOrder::with(['room'])
             ->where('restaurant_id', $request->restaurant_id)
-            ->whereIn('order_type', ['takeaway', 'room_service'])
+            ->whereIn('order_type', ['takeaway', 'room_service', 'delivery', 'walk_in'])
             ->whereIn('status', ['open', 'billed'])
             ->orderBy('created_at', 'desc')
             ->get()
@@ -95,9 +95,11 @@ class PosController extends Controller
                     'kitchen_status' => $order->kitchen_status ?? 'pending',
                     'ready_batches'  => $readyBatches,
                     'served_batches' => $servedBatches,
-                    'room_number'    => $order->room?->room_number,
-                    'customer_name'  => $order->customer_name,
-                    'customer_phone' => $order->customer_phone,
+                    'room_number'       => $order->room?->room_number,
+                    'customer_name'     => $order->customer_name,
+                    'customer_phone'    => $order->customer_phone,
+                    'delivery_address'  => $order->delivery_address,
+                    'delivery_channel'  => $order->delivery_channel,
                     'item_count'     => (int) $itemCount,
                     'total'          => (float) $total,
                     'opened_at'      => $order->created_at,
@@ -322,7 +324,7 @@ class PosController extends Controller
         $orderType = $request->input('order_type', 'dine_in');
 
         $rules = [
-            'order_type'     => 'nullable|in:dine_in,takeaway,room_service',
+            'order_type'     => 'nullable|in:dine_in,takeaway,room_service,delivery,walk_in',
             'restaurant_id'  => 'required|exists:restaurant_masters,id',
             'covers'         => 'required|integer|min:1',
             'customer_name'  => 'nullable|string|max:191',
@@ -335,6 +337,9 @@ class PosController extends Controller
         } elseif ($orderType === 'room_service') {
             $rules['room_id']    = 'required|exists:rooms,id';
             $rules['booking_id'] = 'nullable|exists:bookings,id';
+        } elseif ($orderType === 'delivery') {
+            $rules['delivery_address'] = 'required|string|max:500';
+            $rules['delivery_channel'] = 'nullable|string|in:own_driver,swiggy,zomato,dunzo,other';
         }
 
         $validated = $request->validate($rules);
@@ -357,9 +362,11 @@ class PosController extends Controller
                 'restaurant_id'  => $validated['restaurant_id'],
                 'room_id'        => $validated['room_id'] ?? null,
                 'booking_id'     => $validated['booking_id'] ?? null,
-                'customer_name'  => $validated['customer_name'] ?? null,
-                'customer_phone' => $validated['customer_phone'] ?? null,
-                'waiter_id'      => auth()->id(),
+                'customer_name'     => $validated['customer_name'] ?? null,
+                'customer_phone'    => $validated['customer_phone'] ?? null,
+                'delivery_address'  => $validated['delivery_address'] ?? null,
+                'delivery_channel'  => $validated['delivery_channel'] ?? null,
+                'waiter_id'         => auth()->id(),
                 'opened_by'      => auth()->id(),
                 'tax_exempt'     => (bool) ($validated['tax_exempt'] ?? false),
                 'covers'         => $validated['covers'],
@@ -447,12 +454,14 @@ class PosController extends Controller
         }
 
         $rules = [
-            'customer_name'  => 'nullable|string|max:191',
-            'customer_phone' => 'nullable|string|max:30',
-            'covers'         => 'nullable|integer|min:1',
-            'notes'          => 'nullable|string|max:1000',
-            'waiter_id'      => 'nullable|exists:users,id',
-            'tax_exempt'     => 'nullable|boolean',
+            'customer_name'     => 'nullable|string|max:191',
+            'customer_phone'    => 'nullable|string|max:30',
+            'delivery_address'  => 'nullable|string|max:500',
+            'delivery_channel'  => 'nullable|string|in:own_driver,swiggy,zomato,dunzo,other',
+            'covers'            => 'nullable|integer|min:1',
+            'notes'             => 'nullable|string|max:1000',
+            'waiter_id'         => 'nullable|exists:users,id',
+            'tax_exempt'        => 'nullable|boolean',
         ];
         $validated = $request->validate($rules);
 
@@ -462,6 +471,12 @@ class PosController extends Controller
         }
         if (array_key_exists('customer_phone', $validated)) {
             $updates['customer_phone'] = $validated['customer_phone'] ?: null;
+        }
+        if (array_key_exists('delivery_address', $validated)) {
+            $updates['delivery_address'] = $validated['delivery_address'] ?: null;
+        }
+        if (array_key_exists('delivery_channel', $validated)) {
+            $updates['delivery_channel'] = $validated['delivery_channel'] ?: null;
         }
         if (array_key_exists('covers', $validated) && $validated['covers'] !== null) {
             $updates['covers'] = (int) $validated['covers'];
@@ -835,6 +850,7 @@ class PosController extends Controller
             'service_charge_value' => 'nullable|numeric|min:0',
             'tax_exempt'     => 'nullable|boolean',
             'tip_amount'     => 'nullable|numeric|min:0',
+            'delivery_charge' => 'nullable|numeric|min:0',
             'payments'       => 'required|array|min:1',
             'payments.*.method'       => 'required|in:cash,card,upi,room_charge',
             'payments.*.amount'       => 'required|numeric|min:0.01',
@@ -847,7 +863,11 @@ class PosController extends Controller
         }
 
         DB::transaction(function () use ($order, $validated) {
-            // Apply discount, service charge, tax exempt
+            // Apply discount, service charge, tax exempt, delivery charge
+            $deliveryCharge = (float) ($validated['delivery_charge'] ?? 0);
+            if ($order->order_type !== 'delivery') {
+                $deliveryCharge = 0;
+            }
             $order->update([
                 'discount_type'  => $validated['discount_type']  ?? null,
                 'discount_value' => $validated['discount_value'] ?? 0,
@@ -855,6 +875,7 @@ class PosController extends Controller
                 'service_charge_value' => $validated['service_charge_value'] ?? 0,
                 'tax_exempt'     => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
                 'tip_amount'     => (float) ($validated['tip_amount'] ?? 0),
+                'delivery_charge' => $deliveryCharge,
             ]);
             $this->recalculate($order);
             $order->refresh();
@@ -1050,7 +1071,9 @@ class PosController extends Controller
             ->map(function ($order) {
                 $label = match($order->order_type ?? 'dine_in') {
                     'takeaway'     => 'Takeaway' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
+                    'walk_in'      => 'Walk-in' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
                     'room_service' => 'Room ' . ($order->room?->room_number ?? $order->room_id),
+                    'delivery'     => 'Delivery' . ($order->customer_name ? ' — ' . $order->customer_name : '') . ($order->delivery_channel ? ' (' . str_replace('_', ' ', ucfirst($order->delivery_channel)) . ')' : ''),
                     default        => 'Table ' . ($order->table?->table_number ?? '?'),
                 };
 
@@ -1663,12 +1686,13 @@ class PosController extends Controller
         }
 
         $tipAmount = (float) ($order->tip_amount ?? 0);
+        $deliveryCharge = $order->order_type === 'delivery' ? (float) ($order->delivery_charge ?? 0) : 0;
         $order->update([
             'subtotal'             => $subtotal,
             'tax_amount'           => $taxAmount,
             'service_charge_amount' => $serviceChargeAmount,
             'discount_amount'      => $discountAmount,
-            'total_amount'         => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount),
+            'total_amount'         => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount + $deliveryCharge),
         ]);
     }
 
@@ -1683,9 +1707,11 @@ class PosController extends Controller
             'room_number'     => $order->room?->room_number ?? null,
             'table_number'    => $order->table?->table_number ?? null,
             'booking_id'      => $order->booking_id,
-            'customer_name'   => $order->customer_name,
-            'customer_phone'  => $order->customer_phone,
-            'covers'          => $order->covers,
+            'customer_name'    => $order->customer_name,
+            'customer_phone'   => $order->customer_phone,
+            'delivery_address' => $order->delivery_address,
+            'delivery_channel' => $order->delivery_channel,
+            'covers'           => $order->covers,
             'waiter_id'       => $order->waiter_id,
             'waiter'          => $order->waiter ? ['id' => $order->waiter->id, 'name' => $order->waiter->name] : null,
             'opened_by'       => $order->opened_by,
@@ -1703,6 +1729,7 @@ class PosController extends Controller
             'tax_amount'      => (float) $order->tax_amount,
             'discount_amount' => (float) $order->discount_amount,
             'tip_amount'      => (float) ($order->tip_amount ?? 0),
+            'delivery_charge' => (float) ($order->delivery_charge ?? 0),
             'total_amount'    => (float) $order->total_amount,
             'opened_at'       => $order->opened_at,
             'closed_at'       => $order->closed_at,
