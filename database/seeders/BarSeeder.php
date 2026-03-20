@@ -128,7 +128,25 @@ class BarSeeder extends Seeder
             $item->update(['current_stock' => (int) round($total)]);
         }
 
-        // ─── 5. Bar menu category & subcategories ──────────────────────────
+        // ─── 5. Bar outlet (create if missing) ───────────────────────────────
+        $barOutlet = RestaurantMaster::firstOrCreate(
+            ['name' => 'BAR'],
+            [
+                'floor'       => null,
+                'description' => 'Champions',
+                'is_active'   => true,
+                'address'     => 'EDATHUVA - CHAMPAKKULAM ROAD NEAR EDATHUA POLIC STATION',
+                'email'       => 'passionshotel@gmail.com',
+                'phone'       => '9496428888',
+                'gstin'       => '32AQOPP9995P2ZG',
+                'fssai'       => '00111111111',
+            ]
+        );
+        if ($barStore) {
+            $barOutlet->update(['kitchen_location_id' => $barStore->id]);
+        }
+
+        // ─── 6. Bar menu category & subcategories ──────────────────────────
         $catBarMenu = MenuCategory::firstOrCreate(
             ['name' => 'Bar'],
             ['is_active' => true]
@@ -142,14 +160,10 @@ class BarSeeder extends Seeder
             ['description' => 'Beer & lager', 'is_active' => true]
         );
 
-        // ─── 6. Bar menu items ──────────────────────────────────────────────
+        // ─── 7. Bar menu items ──────────────────────────────────────────────
         // Spirits: variants (30ml, 60ml, Bottle). Beer: no variants, single price per bottle.
-        $restaurants = RestaurantMaster::where('is_active', true)->get();
-        $priceMultiplier = fn (RestaurantMaster $r, float $base): float => match (true) {
-            str_contains(strtolower($r->name ?? ''), 'rooftop') => (int) round($base * 1.10),
-            str_contains(strtolower($r->name ?? ''), 'poolside') => (int) round($base * 0.95),
-            default => (int) round($base),
-        };
+        // Bar items are assigned only to the Bar outlet.
+        $priceMultiplier = fn (RestaurantMaster $r, float $base): float => (int) round($base);
 
         // Spirits with variants: [name, code, sub, type, invItem, variants or null]
         $spiritMenuItems = [
@@ -184,22 +198,20 @@ class BarSeeder extends Seeder
             );
             $mi->update(['is_direct_sale' => true, 'inventory_item_id' => $invItem?->id]);
 
-            foreach ($restaurants as $rest) {
-                $rmi = RestaurantMenuItem::firstOrCreate(
-                    ['menu_item_id' => $mi->id, 'restaurant_master_id' => $rest->id],
-                    ['price' => 0, 'fixed_ept' => 0, 'is_active' => true]
+            $rmi = RestaurantMenuItem::firstOrCreate(
+                ['menu_item_id' => $mi->id, 'restaurant_master_id' => $barOutlet->id],
+                ['price' => 0, 'fixed_ept' => 0, 'is_active' => true]
+            );
+            foreach ($variants as $i => [$label, $basePrice, $mlQty]) {
+                $v = MenuItemVariant::updateOrCreate(
+                    ['menu_item_id' => $mi->id, 'size_label' => $label],
+                    ['price' => $basePrice, 'ml_quantity' => (float) $mlQty, 'sort_order' => $i]
                 );
-                foreach ($variants as $i => [$label, $basePrice, $mlQty]) {
-                    $v = MenuItemVariant::updateOrCreate(
-                        ['menu_item_id' => $mi->id, 'size_label' => $label],
-                        ['price' => $basePrice, 'ml_quantity' => (float) $mlQty, 'sort_order' => $i]
-                    );
-                    $restPrice = $priceMultiplier($rest, (float) $basePrice);
-                    RestaurantMenuItemVariant::firstOrCreate(
-                        ['restaurant_menu_item_id' => $rmi->id, 'menu_item_variant_id' => $v->id],
-                        ['price' => $restPrice]
-                    );
-                }
+                $restPrice = $priceMultiplier($barOutlet, (float) $basePrice);
+                RestaurantMenuItemVariant::firstOrCreate(
+                    ['restaurant_menu_item_id' => $rmi->id, 'menu_item_variant_id' => $v->id],
+                    ['price' => $restPrice]
+                );
             }
         }
 
@@ -234,13 +246,11 @@ class BarSeeder extends Seeder
                 $v->delete();
             });
 
-            foreach ($restaurants as $rest) {
-                $restPrice = $priceMultiplier($rest, (float) $basePrice);
-                RestaurantMenuItem::updateOrCreate(
-                    ['menu_item_id' => $mi->id, 'restaurant_master_id' => $rest->id],
-                    ['price' => $restPrice, 'fixed_ept' => 0, 'is_active' => true]
-                );
-            }
+            $restPrice = $priceMultiplier($barOutlet, (float) $basePrice);
+            RestaurantMenuItem::updateOrCreate(
+                ['menu_item_id' => $mi->id, 'restaurant_master_id' => $barOutlet->id],
+                ['price' => $restPrice, 'fixed_ept' => 0, 'is_active' => true]
+            );
         }
 
         $this->command->info('Bar seeder complete.');

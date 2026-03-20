@@ -10,7 +10,7 @@ class RestaurantMasterController extends Controller
 {
     public function index(Request $request)
     {
-        $query = RestaurantMaster::with('kitchenLocation');
+        $query = RestaurantMaster::with(['kitchenLocation', 'department']);
         if (!$request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
@@ -49,6 +49,7 @@ class RestaurantMasterController extends Controller
             'floor'                => 'nullable|string|max:255',
             'description'          => 'nullable|string',
             'is_active'            => 'boolean',
+            'department_id'        => 'nullable|exists:departments,id',
             'kitchen_location_id'  => 'nullable|exists:inventory_locations,id',
             'address'              => 'nullable|string|max:1000',
             'email'                => 'nullable|email|max:255',

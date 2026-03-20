@@ -46,5 +46,12 @@ class UserDepartmentSeeder extends Seeder
             User::whereIn('email', ['waiter1@gmail.com', 'waiter2@gmail.com'])
                 ->each(fn ($u) => $u->departments()->sync([$fnb->id]));
         }
+
+        // 6. Bar Cashier & Bar Waiter (Bar & Lounge department)
+        $barDept = Department::where('code', 'BAR')->first();
+        if ($barDept) {
+            User::whereIn('email', ['bar_cashier@gmail.com', 'bar_waiter@gmail.com'])
+                ->each(fn ($u) => $u->departments()->sync([$barDept->id]));
+        }
     }
 }

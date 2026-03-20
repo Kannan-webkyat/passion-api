@@ -452,8 +452,8 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ]);
         }
 
-        // ─── 11. Restaurant menu items (link to all restaurants) ─────────────
-        $restaurants = RestaurantMaster::where('is_active', true)->get();
+        // ─── 11. Restaurant menu items (link to OTTAAL only; BAR has its own items) ─
+        $restaurants = RestaurantMaster::where('is_active', true)->where('name', 'OTTAAL')->get();
         foreach ($restaurants as $rest) {
             foreach ($menuItemMap as $name => $mi) {
                 RestaurantMenuItem::create([

@@ -114,6 +114,7 @@ class PosController extends Controller
     public function restaurants()
     {
         $restaurants = RestaurantMaster::where('is_active', true)
+            ->with(['department'])
             ->withCount('tables')
             ->get();
 
