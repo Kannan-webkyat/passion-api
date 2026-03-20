@@ -16,7 +16,7 @@ class StoreRequestController extends Controller
     public function index()
     {
         return response()->json(
-            StoreRequest::with(['department', 'fromLocation', 'toLocation', 'requester', 'items.item'])
+            StoreRequest::with(['department', 'fromLocation.department', 'toLocation', 'requester', 'items.item'])
                         ->latest()
                         ->get()
         );
@@ -100,6 +100,33 @@ class StoreRequestController extends Controller
         $storeRequest->update([
             'status' => 'rejected',
             'notes' => $storeRequest->notes . ' (Rejected by ' . auth()->user()->name . ')',
+        ]);
+
+        return response()->json($storeRequest);
+    }
+
+    /**
+     * Cancel a requisition (requesting department only).
+     * Only pending requests can be cancelled; only by requester or same department.
+     */
+    public function cancel(StoreRequest $storeRequest)
+    {
+        if ($storeRequest->status !== 'pending') {
+            return response()->json(['message' => 'Only pending requests can be cancelled'], 422);
+        }
+
+        $user = auth()->user();
+        $isRequester = $storeRequest->requested_by === $user->id;
+        $userDeptIds = $user->departments()->pluck('departments.id')->toArray();
+        $isSameDept = $storeRequest->department_id && in_array($storeRequest->department_id, $userDeptIds);
+
+        if (!$isRequester && !$isSameDept && !$user->hasRole('Admin')) {
+            return response()->json(['message' => 'Only the requesting department can cancel this requisition'], 403);
+        }
+
+        $storeRequest->update([
+            'status' => 'cancelled',
+            'notes' => ($storeRequest->notes ? $storeRequest->notes . ' ' : '') . '(Cancelled by ' . $user->name . ')',
         ]);
 
         return response()->json($storeRequest);

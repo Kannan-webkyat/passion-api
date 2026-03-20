@@ -21,4 +21,9 @@ class Combo extends Model
     {
         return $this->belongsToMany(MenuItem::class, 'combo_items', 'combo_id', 'menu_item_id')->withTimestamps();
     }
+
+    public function restaurantCombos()
+    {
+        return $this->hasMany(RestaurantCombo::class);
+    }
 }

@@ -76,6 +76,7 @@ class DayClosingController extends Controller
                 'total_discount'         => $summary['total_discount'],
                 'total_tax'              => $summary['total_tax'],
                 'total_service_charge'   => $summary['total_service_charge'],
+                'total_tip'              => $summary['total_tip'],
                 'total_paid'             => $summary['total_paid'],
                 'cash_total'        => $summary['cash_total'],
                 'card_total'        => $summary['card_total'],
@@ -102,8 +103,9 @@ class DayClosingController extends Controller
             'total_sales'            => $summary['total_sales'],
             'total_discount'         => $summary['total_discount'],
             'total_tax'              => $summary['total_tax'],
-            'total_service_charge'   => $summary['total_service_charge'],
-            'total_paid'             => $summary['total_paid'],
+                'total_service_charge'   => $summary['total_service_charge'],
+                'total_tip'              => $summary['total_tip'],
+                'total_paid'             => $summary['total_paid'],
             'cash_total'        => $summary['cash_total'],
             'card_total'        => $summary['card_total'],
             'upi_total'         => $summary['upi_total'],
@@ -170,6 +172,7 @@ class DayClosingController extends Controller
              COALESCE(SUM(discount_amount), 0) as total_discount,
              COALESCE(SUM(tax_amount), 0) as total_tax,
              COALESCE(SUM(service_charge_amount), 0) as total_service_charge,
+             COALESCE(SUM(tip_amount), 0) as total_tip,
              COALESCE(SUM(total_amount), 0) as total_paid'
         )->first();
 
@@ -199,6 +202,7 @@ class DayClosingController extends Controller
             'total_discount'         => (float) ($totals->total_discount ?? 0),
             'total_tax'              => (float) ($totals->total_tax ?? 0),
             'total_service_charge'   => (float) ($totals->total_service_charge ?? 0),
+            'total_tip'              => (float) ($totals->total_tip ?? 0),
             'total_paid'             => (float) (($totals->total_paid ?? 0) - $totalRefunded),
             'cash_total'        => max(0, $cashTotal),
             'card_total'        => max(0, $cardTotal),

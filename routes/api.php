@@ -138,6 +138,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('inventory/store-requests/{storeRequest}/approve', [\App\Http\Controllers\StoreRequestController::class, 'approve']);
     Route::post('inventory/store-requests/{storeRequest}/issue',   [\App\Http\Controllers\StoreRequestController::class, 'issue']);
     Route::post('inventory/store-requests/{storeRequest}/reject',  [\App\Http\Controllers\StoreRequestController::class, 'reject']);
+    Route::post('inventory/store-requests/{storeRequest}/cancel',  [\App\Http\Controllers\StoreRequestController::class, 'cancel']);
 
     Route::apiResource('inventory/purchase-orders', \App\Http\Controllers\PurchaseOrderController::class);
     Route::post('inventory/purchase-orders/{purchaseOrder}/receive', [\App\Http\Controllers\PurchaseOrderController::class, 'receive']);

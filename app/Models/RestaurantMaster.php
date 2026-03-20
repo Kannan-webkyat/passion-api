@@ -25,6 +25,11 @@ class RestaurantMaster extends Model
         return $this->hasMany(RestaurantMenuItem::class, 'restaurant_master_id');
     }
 
+    public function restaurantCombos()
+    {
+        return $this->hasMany(RestaurantCombo::class, 'restaurant_master_id');
+    }
+
     public function menuItems()
     {
         return $this->belongsToMany(MenuItem::class, 'restaurant_menu_items', 'restaurant_master_id', 'menu_item_id')

@@ -11,7 +11,7 @@ class PosOrder extends Model
         'room_id', 'booking_id', 'customer_name', 'customer_phone',
         'covers', 'status', 'kitchen_status', 'current_kot_batch',
         'discount_type', 'discount_value', 'service_charge_type', 'service_charge_value', 'service_charge_amount',
-        'subtotal', 'tax_amount', 'discount_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt',
+        'subtotal', 'tax_amount', 'discount_amount', 'tip_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt',
     ];
 
     protected $casts = [
@@ -23,6 +23,7 @@ class PosOrder extends Model
         'subtotal'        => 'decimal:2',
         'tax_amount'      => 'decimal:2',
         'discount_amount' => 'decimal:2',
+        'tip_amount'      => 'decimal:2',
         'total_amount'    => 'decimal:2',
         'tax_exempt'      => 'boolean',
     ];
