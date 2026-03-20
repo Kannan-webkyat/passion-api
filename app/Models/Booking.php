@@ -6,6 +6,10 @@ use Illuminate\Database\Eloquent\Model;
 
 class Booking extends Model
 {
+    public function segments()
+    {
+        return $this->hasMany(BookingSegment::class);
+    }
     protected $fillable = [
         'room_id',
         'first_name',
@@ -22,6 +26,9 @@ class Booking extends Model
         'extra_beds_count',
         'check_in',
         'check_out',
+        'check_in_at',
+        'check_out_at',
+        'booking_unit',
         'early_checkin_time',
         'late_checkout_time',
         'estimated_arrival_time',
@@ -37,7 +44,8 @@ class Booking extends Model
         'booking_group_id',
         'created_by',
         'adult_breakfast_count',
-        'child_breakfast_count'
+        'child_breakfast_count',
+        'rate_plan_id'
     ];
 
     public function bookingGroup()
@@ -67,5 +75,7 @@ class Booking extends Model
     protected $casts = [
         'guest_identities' => 'array',
         'guest_identity_types' => 'array',
+        'check_in_at' => 'datetime',
+        'check_out_at' => 'datetime',
     ];
 }

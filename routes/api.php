@@ -23,6 +23,7 @@ use App\Http\Controllers\PosController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\SettingController;
 use App\Http\Controllers\QzSignController;
+use App\Http\Controllers\RoomStatusBlockController;
 
 Route::post('/login', [AuthController::class, 'login']);
 
@@ -35,6 +36,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Rooms
     Route::apiResource('rooms', RoomController::class);
+    Route::apiResource('room-status-blocks', RoomStatusBlockController::class);
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);
@@ -48,6 +50,12 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/early-checkin',  [BookingController::class, 'earlyCheckin']);
     Route::post('bookings/{booking}/late-checkout',  [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend',         [BookingController::class, 'extendReservation']);
+    Route::post('bookings/{booking}/extend-hours',   [BookingController::class, 'extendHourlyReservation']);
+    Route::get('bookings/{booking}/voucher',         [BookingController::class, 'reservationVoucher']);
+    Route::get('bookings/{booking}/billing',         [BookingController::class, 'reservationBilling']);
+    Route::post('bookings/{booking}/split-stay',     [BookingController::class, 'splitStay']);
+    Route::get('bookings/available-rooms',           [BookingController::class, 'getAvailableRooms']);
+    Route::post('booking-groups',                    [BookingController::class, 'storeGroup']);
     Route::apiResource('bookings', BookingController::class);
 
     // F&B Module (Restaurant Master)

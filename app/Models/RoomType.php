@@ -9,6 +9,7 @@ class RoomType extends Model
     protected $fillable = [
         'name', 
         'description', 
+        'is_active',
         'base_price', 
         'breakfast_price',
         'child_breakfast_price',
@@ -24,6 +25,7 @@ class RoomType extends Model
 
     protected $casts = [
         'amenities' => 'array',
+        'is_active' => 'boolean',
         'breakfast_price' => 'decimal:2',
         'child_breakfast_price' => 'decimal:2',
     ];
@@ -36,5 +38,10 @@ class RoomType extends Model
     public function tax()
     {
         return $this->belongsTo(InventoryTax::class, 'tax_id');
+    }
+
+    public function ratePlans()
+    {
+        return $this->hasMany(RatePlan::class);
     }
 }

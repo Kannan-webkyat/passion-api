@@ -10,7 +10,7 @@ class RoomTypeController extends Controller
 {
     public function index()
     {
-        return RoomType::with('tax')->get();
+        return RoomType::with(['tax', 'ratePlans'])->get();
     }
 
     /**
@@ -35,6 +35,7 @@ class RoomTypeController extends Controller
         $validated = $request->validate([
             'name'                  => 'required|string|max:255',
             'description'           => 'nullable|string',
+            'is_active'             => 'nullable|boolean',
             'base_price'            => 'required|numeric|min:0',
             'breakfast_price'       => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
@@ -46,18 +47,33 @@ class RoomTypeController extends Controller
             'bed_config'            => 'nullable|string|max:255',
             'amenities'             => 'nullable|array',
             'tax_id'                => 'nullable|exists:inventory_taxes,id',
+            'rate_plans'            => 'nullable|array',
+            'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
+            'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
+            'rate_plans.*.includes_breakfast' => 'nullable|boolean',
+            // Hourly package extensions (backward compatible)
+            'rate_plans.*.billing_unit' => 'nullable|in:day,hour_package',
+            'rate_plans.*.package_hours' => 'nullable|integer|min:1',
+            'rate_plans.*.package_price' => 'nullable|numeric|min:0',
+            'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
+            'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
+            'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
         ]);
 
         $this->validateCapacity($validated);
 
         $roomType = RoomType::create($validated);
 
-        return response()->json($roomType->load('tax'), 201);
+        if (!empty($validated['rate_plans'])) {
+            $roomType->ratePlans()->createMany($validated['rate_plans']);
+        }
+
+        return response()->json($roomType->load(['tax', 'ratePlans']), 201);
     }
 
     public function show(RoomType $roomType)
     {
-        return $roomType->load('tax');
+        return $roomType->load(['tax', 'ratePlans']);
     }
 
     public function update(Request $request, RoomType $roomType)
@@ -65,6 +81,7 @@ class RoomTypeController extends Controller
         $validated = $request->validate([
             'name'                  => 'string|max:255',
             'description'           => 'nullable|string',
+            'is_active'             => 'nullable|boolean',
             'base_price'            => 'numeric|min:0',
             'breakfast_price'       => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
@@ -76,6 +93,18 @@ class RoomTypeController extends Controller
             'bed_config'            => 'nullable|string|max:255',
             'amenities'             => 'nullable|array',
             'tax_id'                => 'nullable|exists:inventory_taxes,id',
+            'rate_plans'            => 'nullable|array',
+            'rate_plans.*.id'       => 'nullable|exists:rate_plans,id',
+            'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
+            'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
+            'rate_plans.*.includes_breakfast' => 'nullable|boolean',
+            // Hourly package extensions (backward compatible)
+            'rate_plans.*.billing_unit' => 'nullable|in:day,hour_package',
+            'rate_plans.*.package_hours' => 'nullable|integer|min:1',
+            'rate_plans.*.package_price' => 'nullable|numeric|min:0',
+            'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
+            'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
+            'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
         ]);
 
         // Merge with existing values to handle partial updates
@@ -90,7 +119,41 @@ class RoomTypeController extends Controller
 
         $roomType->update($validated);
 
-        return response()->json($roomType->load('tax'));
+        if (array_key_exists('rate_plans', $validated)) {
+            $incomingPlans = $validated['rate_plans'] ?? [];
+            $incomingIds = collect($incomingPlans)->pluck('id')->filter()->toArray();
+            $roomType->ratePlans()->whereNotIn('id', $incomingIds)->delete();
+
+            foreach ($incomingPlans as $planData) {
+                if (!empty($planData['id'])) {
+                    $roomType->ratePlans()->where('id', $planData['id'])->update([
+                        'name' => $planData['name'],
+                        'base_price' => $planData['base_price'],
+                        'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                        'billing_unit' => $planData['billing_unit'] ?? 'day',
+                        'package_hours' => $planData['package_hours'] ?? null,
+                        'package_price' => $planData['package_price'] ?? null,
+                        'grace_minutes' => $planData['grace_minutes'] ?? 0,
+                        'overtime_step_minutes' => $planData['overtime_step_minutes'] ?? 60,
+                        'overtime_hour_price' => $planData['overtime_hour_price'] ?? null,
+                    ]);
+                } else {
+                    $roomType->ratePlans()->create([
+                        'name' => $planData['name'],
+                        'base_price' => $planData['base_price'],
+                        'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                        'billing_unit' => $planData['billing_unit'] ?? 'day',
+                        'package_hours' => $planData['package_hours'] ?? null,
+                        'package_price' => $planData['package_price'] ?? null,
+                        'grace_minutes' => $planData['grace_minutes'] ?? 0,
+                        'overtime_step_minutes' => $planData['overtime_step_minutes'] ?? 60,
+                        'overtime_hour_price' => $planData['overtime_hour_price'] ?? null,
+                    ]);
+                }
+            }
+        }
+
+        return response()->json($roomType->load(['tax', 'ratePlans']));
     }
 
     public function destroy(RoomType $roomType)

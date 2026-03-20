@@ -17,6 +17,7 @@ class RoomController extends Controller
         $validated = $request->validate([
             'room_number' => 'required|string|unique:rooms,room_number',
             'room_type_id' => 'required|exists:room_types,id',
+            'is_active' => 'nullable|boolean',
             'status' => 'required|in:available,occupied,maintenance,dirty,cleaning',
             'floor' => 'nullable|string',
             'notes' => 'nullable|string',
@@ -37,6 +38,7 @@ class RoomController extends Controller
         $validated = $request->validate([
             'room_number' => 'string|unique:rooms,room_number,' . $room->id,
             'room_type_id' => 'exists:room_types,id',
+            'is_active' => 'nullable|boolean',
             'status' => 'in:available,occupied,maintenance,dirty,cleaning',
             'floor' => 'nullable|string',
             'notes' => 'nullable|string',
