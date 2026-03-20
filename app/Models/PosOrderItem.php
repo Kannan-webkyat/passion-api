@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class PosOrderItem extends Model
 {
     protected $fillable = [
-        'order_id', 'menu_item_id', 'combo_id', 'quantity', 'unit_price',
+        'order_id', 'menu_item_id', 'menu_item_variant_id', 'combo_id', 'quantity', 'unit_price',
         'tax_rate', 'line_total', 'kot_sent', 'status', 'kot_batch', 'kot_started_at', 'kitchen_ready_at', 'kitchen_served_at', 'notes',
     ];
 
@@ -29,5 +29,10 @@ class PosOrderItem extends Model
     public function combo()
     {
         return $this->belongsTo(Combo::class);
+    }
+
+    public function variant()
+    {
+        return $this->belongsTo(MenuItemVariant::class, 'menu_item_variant_id');
     }
 }

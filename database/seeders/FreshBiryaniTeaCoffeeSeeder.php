@@ -47,6 +47,7 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             'recipe_ingredients',
             'recipes',
             'production_logs',
+            'restaurant_menu_item_variants', 'menu_item_variants',
             'restaurant_menu_items', 'menu_items', 'menu_sub_categories', 'menu_categories',
             'dietary_types',
             'inventory_item_locations', 'inventory_transactions', 'grns',

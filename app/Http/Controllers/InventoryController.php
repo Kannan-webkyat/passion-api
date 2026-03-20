@@ -39,9 +39,11 @@ class InventoryController extends Controller
             'cost_price'        => 'nullable|numeric|min:0',
             'reorder_level'     => 'nullable|integer|min:0',
             'current_stock'     => 'nullable|integer|min:0',
+            'is_direct_sale'    => 'nullable|boolean',
             'description'       => 'nullable|string',
         ]);
 
+        $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $item = InventoryItem::create($validated);
 
         if ($item->current_stock > 0) {
@@ -94,6 +96,7 @@ class InventoryController extends Controller
             'cost_price'        => 'nullable|numeric|min:0',
             'reorder_level'     => 'nullable|integer|min:0',
             'current_stock'     => 'nullable|integer|min:0',
+            'is_direct_sale'    => 'nullable|boolean',
             'description'       => 'nullable|string',
         ]);
 

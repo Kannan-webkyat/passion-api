@@ -16,16 +16,24 @@ class RecipeController extends Controller
 {
     /**
      * List all menu items with their recipe status.
+     * Query: ?requires_production=1 — only items with recipe.requires_production = true (for Kitchen Production).
      */
-    public function index()
+    public function index(Request $request)
     {
-        $items = MenuItem::with([
+        $query = MenuItem::where(fn ($q) => $q->where('is_direct_sale', false)->orWhereNull('is_direct_sale'))
+            ->with([
             'category',
             'subCategory',
             'recipe.ingredients.inventoryItem.issueUom',
             'recipe.yieldUom',
             'restaurantMenuItems.restaurant',
-        ])->get()->map(function ($item) {
+        ]);
+
+        if ($request->boolean('requires_production')) {
+            $query->whereHas('recipe', fn ($q) => $q->where('requires_production', true));
+        }
+
+        $items = $query->get()->map(function ($item) {
             $recipe = $item->recipe;
             $costPerPortion = $recipe ? round($recipe->cost_per_portion, 2) : null;
 
@@ -94,6 +102,13 @@ class RecipeController extends Controller
      */
     public function upsert(Request $request, $menuItemId)
     {
+        $menuItem = MenuItem::findOrFail($menuItemId);
+        if ($menuItem->is_direct_sale) {
+            return response()->json([
+                'message' => 'Cannot create or update recipe for direct-sale items.',
+            ], 422);
+        }
+
         $validated = $request->validate([
             'yield_quantity'       => 'required|numeric|min:0.001',
             'yield_uom_id'         => 'nullable|exists:inventory_uoms,id',

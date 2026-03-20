@@ -8,12 +8,14 @@ class MenuItem extends Model
 {
     protected $fillable = [
         'item_code', 'name', 'menu_category_id', 'menu_sub_category_id',
-        'price', 'tax_id', 'fixed_ept', 'type', 'is_active', 'image'
+        'price', 'tax_id', 'fixed_ept', 'type', 'is_active', 'is_direct_sale', 'image',
+        'inventory_item_id',
     ];
 
     protected $casts = [
-        'is_active' => 'boolean',
-        'price' => 'decimal:2',
+        'is_active'      => 'boolean',
+        'is_direct_sale' => 'boolean',
+        'price'          => 'decimal:2',
     ];
 
     public function tax()
@@ -39,6 +41,16 @@ class MenuItem extends Model
     public function restaurantMenuItems()
     {
         return $this->hasMany(RestaurantMenuItem::class);
+    }
+
+    public function variants()
+    {
+        return $this->hasMany(MenuItemVariant::class)->orderBy('sort_order');
+    }
+
+    public function inventoryItem()
+    {
+        return $this->belongsTo(\App\Models\InventoryItem::class, 'inventory_item_id');
     }
 
     public function restaurants()

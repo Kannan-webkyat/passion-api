@@ -28,4 +28,9 @@ class RestaurantMenuItem extends Model
     {
         return $this->belongsTo(RestaurantMaster::class, 'restaurant_master_id');
     }
+
+    public function variantOverrides()
+    {
+        return $this->hasMany(RestaurantMenuItemVariant::class, 'restaurant_menu_item_id');
+    }
 }

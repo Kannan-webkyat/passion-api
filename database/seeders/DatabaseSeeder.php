@@ -23,6 +23,7 @@ class DatabaseSeeder extends Seeder
             PaymentMethodSeeder::class,
             RestaurantTableSeeder::class,  // Must run before FreshBiryaniTeaCoffeeSeeder (creates restaurants)
             FreshBiryaniTeaCoffeeSeeder::class,
+            BarSeeder::class,
             KitchenStaffSeeder::class,
             ReceptionistSeeder::class,
             WaiterSeeder::class,

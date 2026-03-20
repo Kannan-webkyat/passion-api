@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\Combo;
 use App\Models\RestaurantCombo;
 use App\Models\MenuItem;
+use App\Models\MenuItemVariant;
 use App\Models\MenuCategory;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
@@ -17,6 +18,7 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
+use App\Models\RestaurantMenuItemVariant;
 use App\Models\Setting;
 use App\Models\RestaurantTable;
 use App\Models\User;
@@ -233,16 +235,32 @@ class PosController extends Controller
                 ->keyBy('menu_item_id');
 
             $categories = MenuCategory::with(['items' => function ($q) use ($restaurantId, $rmiByItem) {
-                $q->with('tax')->where('menu_items.is_active', true)
+                $q->with(['tax', 'variants'])->where('menu_items.is_active', true)
                     ->whereIn('menu_items.id', $rmiByItem->keys()->toArray())
                     ->orderBy('name');
             }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
 
-            $categories->each(function ($cat) use ($produced, $sold, $rmiByItem) {
-                $cat->items->each(function ($item) use ($produced, $sold, $rmiByItem) {
+            $rviByRmiAndVariant = RestaurantMenuItemVariant::whereIn('restaurant_menu_item_id', $rmiByItem->values()->pluck('id'))
+                ->get()
+                ->keyBy(fn ($rvi) => $rvi->restaurant_menu_item_id . '_' . $rvi->menu_item_variant_id);
+
+            $categories->each(function ($cat) use ($produced, $sold, $rmiByItem, $rviByRmiAndVariant) {
+                $cat->items->each(function ($item) use ($produced, $sold, $rmiByItem, $rviByRmiAndVariant) {
                     $rmi = $rmiByItem->get($item->id);
                     if ($rmi) {
                         $item->price = (string) $rmi->price;
+                    }
+                    if ($item->variants && $item->variants->isNotEmpty()) {
+                        $item->variants = $item->variants->map(function ($v) use ($rmi, $rviByRmiAndVariant) {
+                            $price = (float) $v->price;
+                            if ($rmi) {
+                                $rvi = $rviByRmiAndVariant->get($rmi->id . '_' . $v->id);
+                                if ($rvi) $price = (float) $rvi->price;
+                            }
+                            return ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $price];
+                        })->values();
+                    } else {
+                        $item->variants = [];
                     }
                     if ($produced->has($item->id)) {
                         $item->available_qty = max(0, $produced[$item->id] - ($sold[$item->id] ?? 0));
@@ -253,11 +271,16 @@ class PosController extends Controller
             });
         } else {
             $categories = MenuCategory::with(['items' => function ($q) {
-                $q->with('tax')->where('is_active', true)->orderBy('name');
+                $q->with(['tax', 'variants'])->where('is_active', true)->orderBy('name');
             }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
 
             $categories->each(function ($cat) use ($produced, $sold) {
                 $cat->items->each(function ($item) use ($produced, $sold) {
+                    if ($item->variants && $item->variants->isNotEmpty()) {
+                        $item->variants = $item->variants->map(fn ($v) => ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $v->price])->values();
+                    } else {
+                        $item->variants = [];
+                    }
                     if ($produced->has($item->id)) {
                         $item->available_qty = max(0, $produced[$item->id] - ($sold[$item->id] ?? 0));
                     } else {
@@ -351,7 +374,7 @@ class PosController extends Controller
                 ->first();
 
             if ($existing) {
-                return response()->json($this->formatOrder($existing->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'waiter', 'openedBy')));
+                return response()->json($this->formatOrder($existing->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')));
             }
         }
 
@@ -382,7 +405,7 @@ class PosController extends Controller
             return $order;
         });
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'waiter', 'openedBy')), 201);
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')), 201);
     }
 
     // ── Order history (paid orders for reprint) ─────────────────────────────────
@@ -442,7 +465,7 @@ class PosController extends Controller
 
     public function getOrder(PosOrder $order)
     {
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'table', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Update order details (customer, covers) ─────────────────────────────────
@@ -492,7 +515,7 @@ class PosController extends Controller
         }
 
         if (empty($updates)) {
-            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'table', 'waiter', 'openedBy')));
+            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
         }
 
         $order->update($updates);
@@ -502,7 +525,7 @@ class PosController extends Controller
             $order->refresh();
         }
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'table', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Transfer order to another table (dine-in only) ────────────────────────
@@ -546,7 +569,7 @@ class PosController extends Controller
             RestaurantTable::where('id', $newTableId)->update(['status' => 'occupied']);
         });
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'table', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Sync order items (replace all) ────────────────────────────────────────
@@ -560,6 +583,7 @@ class PosController extends Controller
         $validated = $request->validate([
             'items'                => 'present|array',
             'items.*.menu_item_id' => 'nullable|exists:menu_items,id',
+            'items.*.menu_item_variant_id' => 'nullable|exists:menu_item_variants,id',
             'items.*.combo_id'    => 'nullable|exists:combos,id',
             'items.*.quantity'     => 'required|integer|min:1',
             'items.*.notes'        => 'nullable|string',
@@ -572,6 +596,16 @@ class PosController extends Controller
                 return response()->json([
                     'message' => "Item at index {$i} must have exactly one of menu_item_id or combo_id.",
                 ], 422);
+            }
+            if ($hasMenu && !empty($row['menu_item_variant_id'])) {
+                $variant = \App\Models\MenuItemVariant::where('id', $row['menu_item_variant_id'])
+                    ->where('menu_item_id', $row['menu_item_id'])
+                    ->first();
+                if (!$variant) {
+                    return response()->json([
+                        'message' => "Item at index {$i}: variant does not belong to this menu item.",
+                    ], 422);
+                }
             }
         }
 
@@ -647,22 +681,23 @@ class PosController extends Controller
 
             $key = fn ($row) => (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '')
                 ? 'c_' . $row['combo_id'] . '|' . trim($row['notes'] ?? '')
-                : 'm_' . $row['menu_item_id'] . '|' . trim($row['notes'] ?? '');
+                : 'm_' . $row['menu_item_id'] . '_v_' . ($row['menu_item_variant_id'] ?? '0') . '|' . trim($row['notes'] ?? '');
             $incomingByKey = collect($validated['items'])
                 ->filter(fn ($row) => (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '')
                     || (array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== ''))
                 ->mapToGroups(function ($row) use ($key) {
                     return [$key($row) => $row];
                 })->map(fn ($rows) => [
-                'menu_item_id' => $rows->first()['menu_item_id'] ?? null,
-                'combo_id'     => $rows->first()['combo_id'] ?? null,
-                'quantity'     => $rows->sum('quantity'),
-                'notes'        => $rows->first()['notes'] ?? null,
+                'menu_item_id'        => $rows->first()['menu_item_id'] ?? null,
+                'menu_item_variant_id' => $rows->first()['menu_item_variant_id'] ?? null,
+                'combo_id'            => $rows->first()['combo_id'] ?? null,
+                'quantity'            => $rows->sum('quantity'),
+                'notes'               => $rows->first()['notes'] ?? null,
             ]);
 
             // ── Step 1: Cancel/remove items no longer in cart ───────────────────
             foreach ($currentActive as $item) {
-                $k = $item->combo_id ? 'c_' . $item->combo_id . '|' . trim($item->notes ?? '') : 'm_' . $item->menu_item_id . '|' . trim($item->notes ?? '');
+                $k = $item->combo_id ? 'c_' . $item->combo_id . '|' . trim($item->notes ?? '') : 'm_' . $item->menu_item_id . '_v_' . ($item->menu_item_variant_id ?? '0') . '|' . trim($item->notes ?? '');
                 if (!$incomingByKey->has($k)) {
                     if ($item->kot_sent) {
                         $item->update(['status' => 'cancelled']);
@@ -694,16 +729,32 @@ class PosController extends Controller
                             && trim($i->notes ?? '') === trim($notes ?? '')
                     );
                 } else {
-                    // Regular menu item
+                    // Regular menu item (with optional variant)
                     $menuItem  = MenuItem::with('tax')->find($row['menu_item_id']);
                     if (!$menuItem) continue;
-                    $rmi       = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
-                        ->where('restaurant_master_id', $order->restaurant_id)
-                        ->first();
-                    $unitPrice = $rmi ? floatval($rmi->price) : floatval($menuItem->price);
+                    $variantId = $row['menu_item_variant_id'] ?? null;
+                    if ($variantId) {
+                        $variant = \App\Models\MenuItemVariant::find($variantId);
+                        $rmi     = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
+                            ->where('restaurant_master_id', $order->restaurant_id)
+                            ->first();
+                        $unitPrice = (float) ($variant?->price ?? 0);
+                        if ($rmi && $variant) {
+                            $rvi = RestaurantMenuItemVariant::where('restaurant_menu_item_id', $rmi->id)
+                                ->where('menu_item_variant_id', $variant->id)
+                                ->first();
+                            if ($rvi) $unitPrice = (float) $rvi->price;
+                        }
+                    } else {
+                        $rmi       = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
+                            ->where('restaurant_master_id', $order->restaurant_id)
+                            ->first();
+                        $unitPrice = $rmi ? floatval($rmi->price) : floatval($menuItem->price);
+                    }
                     $taxRate   = floatval($menuItem->tax?->rate ?? 0);
                     $matching  = $currentActive->filter(
                         fn ($i) => $i->menu_item_id == $row['menu_item_id']
+                            && ($i->menu_item_variant_id ?? null) == $variantId
                             && trim($i->notes ?? '') === trim($notes ?? '')
                     );
                 }
@@ -714,10 +765,11 @@ class PosController extends Controller
                 }
 
                 $createAttrs = fn ($q, $u) => [
-                    'order_id'     => $order->id,
-                    'menu_item_id' => $row['menu_item_id'] ?? null,
-                    'combo_id'     => $row['combo_id'] ?? null,
-                    'quantity'     => $q,
+                    'order_id'              => $order->id,
+                    'menu_item_id'          => $row['menu_item_id'] ?? null,
+                    'menu_item_variant_id'  => $row['menu_item_variant_id'] ?? null,
+                    'combo_id'              => $row['combo_id'] ?? null,
+                    'quantity'              => $q,
                     'unit_price'   => $u,
                     'tax_rate'     => $taxRate,
                     'line_total'   => $u * $q,
@@ -776,7 +828,7 @@ class PosController extends Controller
             $this->recalculate($order);
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')));
     }
 
     // ── Send KOT ──────────────────────────────────────────────────────────────
@@ -787,19 +839,21 @@ class PosController extends Controller
             return response()->json(['message' => 'Order is billed. Re-open to add items and send KOT.'], 422);
         }
 
-        $hasPending = $order->items()
+        // Only items that need kitchen (not is_direct_sale) go to KOT
+        $directSaleIds = MenuItem::where('is_direct_sale', true)->pluck('id')->toArray();
+        $kotQuery = $order->items()
             ->where('status', 'active')
             ->where('kot_sent', false)
-            ->exists();
+            ->where(fn ($q) => $q->whereNull('menu_item_id')->orWhereNotIn('menu_item_id', $directSaleIds));
 
-        if ($hasPending) {
-            // Advance to the next batch
+        if ($kotQuery->exists()) {
             $order->increment('current_kot_batch');
             $batch = $order->fresh()->current_kot_batch;
 
             $order->items()
                 ->where('status', 'active')
                 ->where('kot_sent', false)
+                ->where(fn ($q) => $q->whereNull('menu_item_id')->orWhereNotIn('menu_item_id', $directSaleIds))
                 ->update(['kot_sent' => true, 'kot_batch' => $batch]);
         }
 
@@ -827,7 +881,7 @@ class PosController extends Controller
 
         $order->update(['status' => 'billed']);
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'table', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Settle / Pay ──────────────────────────────────────────────────────────
@@ -905,6 +959,9 @@ class PosController extends Controller
             // Close order
             $order->update(['status' => 'paid', 'closed_at' => now()]);
 
+            // Deduct direct sale (bar) items from inventory
+            $this->deductDirectSaleItems($order);
+
             // Set table to cleaning (dine-in only) — staff will mark available when ready
             if ($order->table_id) {
                 RestaurantTable::where('id', $order->table_id)->update(['status' => 'cleaning']);
@@ -921,7 +978,7 @@ class PosController extends Controller
             }
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')));
     }
 
     public function reopen(PosOrder $order)
@@ -940,7 +997,7 @@ class PosController extends Controller
 
         $order->update(['status' => 'open']);
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'payments', 'room', 'table', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Void ──────────────────────────────────────────────────────────────────
@@ -1049,7 +1106,7 @@ class PosController extends Controller
             }
         });
 
-        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'payments', 'refunds', 'room', 'table', 'waiter', 'openedBy')));
+        return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'refunds', 'room', 'table', 'waiter', 'openedBy')));
     }
 
     // ── Kitchen Display ───────────────────────────────────────────────────────
@@ -1058,7 +1115,7 @@ class PosController extends Controller
     {
         $restaurantId = $request->input('restaurant_id');
 
-        $query = PosOrder::with(['items.menuItem.tax', 'items.combo.menuItems', 'table', 'restaurant', 'room'])
+        $query = PosOrder::with(['items.menuItem.tax', 'items.combo.menuItems', 'items.variant', 'table', 'restaurant', 'room'])
             ->whereIn('status', ['open', 'billed'])
             ->where('kitchen_status', '!=', 'served')
             ->whereHas('items', fn($q) => $q->where('kot_sent', true)->where('status', 'active'));
@@ -1114,7 +1171,9 @@ class PosController extends Controller
                     'opened_at'       => $order->opened_at,
                     'items'           => $activeKotItems->map(fn($i) => [
                         'id'               => $i->id,
-                        'name'             => $i->combo_id ? ($i->combo?->name ?? 'Combo') : ($i->menuItem?->name ?? 'Unknown'),
+                        'name'             => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                            $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                        ),
                         'type'             => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
                         'combo_items'      => $i->combo_id && $i->combo ? $i->combo->menuItems->pluck('name')->toArray() : null,
                         'quantity'         => $i->quantity,
@@ -1125,7 +1184,9 @@ class PosController extends Controller
                     ]),
                     'cancellations'   => $cancelledItems->map(fn($i) => [
                         'id'        => $i->id,
-                        'name'      => $i->combo_id ? ($i->combo?->name ?? 'Combo') : ($i->menuItem?->name ?? 'Unknown'),
+                        'name'      => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                            $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                        ),
                         'quantity'  => $i->quantity,
                         'kot_batch' => $i->kot_batch ?? 1,
                     ]),
@@ -1661,6 +1722,77 @@ class PosController extends Controller
         }
     }
 
+    /**
+     * Deduct direct sale (bar) items from Bar Store when order is settled.
+     * Uses menu_item.inventory_item_id and variant.ml_quantity.
+     */
+    private function deductDirectSaleItems(PosOrder $order): void
+    {
+        $barStore = InventoryLocation::where('name', 'Bar Store')->first();
+        if (!$barStore) return;
+
+        $activeItems = $order->items()
+            ->with(['menuItem.inventoryItem', 'variant'])
+            ->where('status', 'active')
+            ->whereNotNull('menu_item_id')
+            ->get();
+
+        $affectedItemIds = [];
+        foreach ($activeItems as $orderItem) {
+            $menuItem = $orderItem->menuItem;
+            if (!$menuItem || !$menuItem->is_direct_sale || !$menuItem->inventory_item_id) continue;
+
+            $invItem = $menuItem->inventoryItem;
+            if (!$invItem) continue;
+
+            $deductQty = 0;
+            if ($orderItem->menu_item_variant_id && $orderItem->variant) {
+                $mlQty = (float) ($orderItem->variant->ml_quantity ?? 0);
+                if ($mlQty > 0) {
+                    $deductQty = $mlQty * $orderItem->quantity;
+                }
+            } else {
+                // No variant (beer): deduct 1 Pcs per bottle
+                $deductQty = $orderItem->quantity;
+            }
+            if ($deductQty <= 0) continue;
+            if ($deductQty <= 0) continue;
+
+            $currentStock = (float) (DB::table('inventory_item_locations')
+                ->where('inventory_item_id', $menuItem->inventory_item_id)
+                ->where('inventory_location_id', $barStore->id)
+                ->value('quantity') ?? 0);
+
+            $deduct = min($deductQty, max(0, $currentStock));
+            if ($deduct <= 0) continue;
+
+            DB::table('inventory_item_locations')
+                ->where('inventory_item_id', $menuItem->inventory_item_id)
+                ->where('inventory_location_id', $barStore->id)
+                ->decrement('quantity', $deduct);
+
+            $affectedItemIds[$menuItem->inventory_item_id] = true;
+
+            $unitCost = floatval($invItem->cost_price ?? 0) / floatval($invItem->conversion_factor ?? 1);
+            InventoryTransaction::create([
+                'inventory_item_id'     => $menuItem->inventory_item_id,
+                'inventory_location_id' => $barStore->id,
+                'type'                  => 'out',
+                'quantity'              => $deduct,
+                'unit_cost'             => round($unitCost, 4),
+                'total_cost'            => round($deduct * $unitCost, 2),
+                'reason'                => 'POS Order',
+                'notes'                 => 'Order #' . $order->id . ' — ' . ($menuItem->name ?? 'Bar item') . ' ×' . $orderItem->quantity,
+                'user_id'               => auth()->id(),
+                'reference_type'        => 'pos_order',
+                'reference_id'          => (string) $order->id,
+            ]);
+        }
+        foreach (array_keys($affectedItemIds) as $itemId) {
+            InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private function recalculate(PosOrder $order): void
@@ -1736,10 +1868,13 @@ class PosController extends Controller
             'notes'           => $order->notes,
             'tax_exempt'      => (bool) ($order->tax_exempt ?? false),
             'items'           => $order->items->where('status', 'active')->values()->map(fn($i) => [
-                'id'           => $i->id,
-                'menu_item_id' => $i->menu_item_id,
-                'combo_id'     => $i->combo_id,
-                'name'         => $i->combo_id ? ($i->combo?->name ?? 'Combo') : ($i->menuItem?->name ?? 'Unknown'),
+                'id'                    => $i->id,
+                'menu_item_id'          => $i->menu_item_id,
+                'menu_item_variant_id'  => $i->menu_item_variant_id,
+                'combo_id'              => $i->combo_id,
+                'name'                  => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                    $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                ),
                 'category'     => $i->menuItem?->category?->name ?? ($i->combo_id ? 'Combo' : null),
                 'type'         => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
                 'quantity'     => $i->quantity,
@@ -1749,6 +1884,7 @@ class PosController extends Controller
                 'line_total'   => (float) $i->line_total,
                 'kot_sent'     => $i->kot_sent,
                 'kot_batch'    => $i->kot_batch,
+                'is_direct_sale' => (bool) ($i->menuItem?->is_direct_sale ?? false),
                 'kitchen_ready_at' => $i->kitchen_ready_at?->toIso8601String(),
                 'notes'        => $i->notes,
             ]),
@@ -1756,7 +1892,9 @@ class PosController extends Controller
                 'id'           => $i->id,
                 'menu_item_id' => $i->menu_item_id,
                 'combo_id'     => $i->combo_id,
-                'name'         => $i->combo_id ? ($i->combo?->name ?? 'Combo') : ($i->menuItem?->name ?? 'Unknown'),
+                'name'         => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                    $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                ),
                 'quantity'     => $i->quantity,
                 'kot_batch'    => $i->kot_batch,
             ]),

@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\MenuItem;
+use App\Models\MenuItemVariant;
 use App\Models\RestaurantMenuItem;
+use App\Models\RestaurantMenuItemVariant;
 use Illuminate\Http\Request;
 
 class MenuItemController extends Controller
@@ -11,7 +13,7 @@ class MenuItemController extends Controller
     public function index()
     {
         return response()->json(
-            MenuItem::with(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant'])
+            MenuItem::with(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant', 'variants'])
                 ->orderBy('name')
                 ->get()
         );
@@ -30,12 +32,15 @@ class MenuItemController extends Controller
             'fixed_ept' => 'nullable|integer|min:0',
             'type' => 'nullable|string',
             'is_active' => 'boolean',
+            'is_direct_sale' => 'nullable|boolean',
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string', // JSON string for FormData
+            'variants' => 'nullable|string', // JSON: [{size_label, price, ml_quantity?}]
         ]);
 
         $restaurantLinks = $this->parseRestaurantLinks($request->input('restaurant_links'));
-        unset($validated['restaurant_links']);
+        $variants = $this->parseVariants($request->input('variants'));
+        unset($validated['restaurant_links'], $validated['variants']);
 
         if ($request->hasFile('image')) {
             $path = $request->file('image')->store('menu-items', 'public');
@@ -44,13 +49,20 @@ class MenuItemController extends Controller
 
         $item = MenuItem::create($validated);
         $this->syncRestaurantLinks($item, $restaurantLinks);
+        $item->load('restaurantMenuItems');
+        $this->syncVariants($item, $variants);
 
-        return response()->json($item->load(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant']), 201);
+        return response()->json($item->load(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant', 'variants']), 201);
     }
 
     public function show(MenuItem $menuItem)
     {
-        return response()->json($menuItem->load(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant']));
+        return response()->json($menuItem->load([
+            'category', 'subCategory', 'tax',
+            'restaurantMenuItems.restaurant',
+            'restaurantMenuItems.variantOverrides',
+            'variants',
+        ]));
     }
 
     public function update(Request $request, MenuItem $menuItem)
@@ -66,12 +78,15 @@ class MenuItemController extends Controller
             'fixed_ept' => 'nullable|integer|min:0',
             'type' => 'nullable|string',
             'is_active' => 'boolean',
+            'is_direct_sale' => 'nullable|boolean',
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string',
+            'variants' => 'nullable|string',
         ]);
 
         $restaurantLinks = $this->parseRestaurantLinks($request->input('restaurant_links'));
-        unset($validated['restaurant_links']);
+        $variants = $this->parseVariants($request->input('variants'));
+        unset($validated['restaurant_links'], $validated['variants']);
 
         if ($request->hasFile('image')) {
             $path = $request->file('image')->store('menu-items', 'public');
@@ -82,8 +97,11 @@ class MenuItemController extends Controller
         if ($restaurantLinks !== null) {
             $this->syncRestaurantLinks($menuItem, $restaurantLinks);
         }
+        if ($variants !== null) {
+            $this->syncVariants($menuItem, $variants);
+        }
 
-        return response()->json($menuItem->load(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant']));
+        return response()->json($menuItem->load(['category', 'subCategory', 'tax', 'restaurantMenuItems.restaurant', 'variants']));
     }
 
     public function destroy(MenuItem $menuItem)
@@ -99,6 +117,58 @@ class MenuItemController extends Controller
         }
         $decoded = json_decode($input, true);
         return is_array($decoded) ? $decoded : null;
+    }
+
+    private function parseVariants(?string $input): ?array
+    {
+        if ($input === null || $input === '') {
+            return null;
+        }
+        $decoded = json_decode($input, true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    private function syncVariants(MenuItem $menuItem, ?array $variants): void
+    {
+        if ($variants === null) {
+            return;
+        }
+
+        $validated = collect($variants)->map(fn ($row, $i) => [
+            'size_label' => trim($row['size_label'] ?? ''),
+            'price' => (float) ($row['price'] ?? 0),
+            'ml_quantity' => isset($row['ml_quantity']) && $row['ml_quantity'] !== '' ? (float) $row['ml_quantity'] : null,
+            'sort_order' => $i,
+            'restaurant_prices' => $row['restaurant_prices'] ?? [],
+        ])->filter(fn ($row) => $row['size_label'] !== '')->values();
+
+        $menuItem->variants()->delete();
+
+        foreach ($validated as $i => $row) {
+            $basePrice = (float) ($row['price'] ?? 0);
+            $v = MenuItemVariant::create([
+                'menu_item_id' => $menuItem->id,
+                'size_label' => $row['size_label'],
+                'price' => $basePrice,
+                'ml_quantity' => $row['ml_quantity'],
+                'sort_order' => $i,
+            ]);
+
+            foreach ($menuItem->restaurantMenuItems as $rmi) {
+                $price = $basePrice;
+                foreach ($row['restaurant_prices'] as $rp) {
+                    if ((int) ($rp['restaurant_master_id'] ?? 0) === (int) $rmi->restaurant_master_id) {
+                        $price = (float) ($rp['price'] ?? $basePrice);
+                        break;
+                    }
+                }
+                RestaurantMenuItemVariant::create([
+                    'restaurant_menu_item_id' => $rmi->id,
+                    'menu_item_variant_id' => $v->id,
+                    'price' => $price,
+                ]);
+            }
+        }
     }
 
     private function syncRestaurantLinks(MenuItem $menuItem, ?array $links): void
