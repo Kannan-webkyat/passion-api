@@ -7,9 +7,13 @@ use Illuminate\Http\Request;
 
 class RoomController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return Room::with('roomType')->get();
+        $query = Room::with('roomType');
+        if (!$request->boolean('include_inactive')) {
+            $query->where('is_active', true);
+        }
+        return response()->json($query->get());
     }
 
     public function store(Request $request)

@@ -7,9 +7,13 @@ use Illuminate\Http\Request;
 
 class InventoryLocationController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(InventoryLocation::with('department')->get());
+        $query = InventoryLocation::with('department');
+        if (!$request->boolean('include_inactive')) {
+            $query->where('is_active', true);
+        }
+        return response()->json($query->get());
     }
 
     public function store(Request $request)
@@ -39,8 +43,8 @@ class InventoryLocationController extends Controller
             'is_active' => 'boolean'
         ]);
 
-        if (in_array($location->type, ['main_store', 'kitchen_store']) && isset($validated['is_active']) && $validated['is_active'] == false) {
-            return response()->json(['message' => 'The ' . ($location->type === 'main_store' ? 'Main' : 'Kitchen') . ' Store cannot be blocked.'], 422);
+        if ($location->type === 'main_store' && isset($validated['is_active']) && $validated['is_active'] == false) {
+            return response()->json(['message' => 'The Main Store cannot be blocked.'], 422);
         }
 
         $location->update($validated);
@@ -49,8 +53,8 @@ class InventoryLocationController extends Controller
 
     public function destroy(InventoryLocation $location)
     {
-        if (in_array($location->type, ['main_store', 'kitchen_store'])) {
-            return response()->json(['message' => 'The ' . ($location->type === 'main_store' ? 'Main' : 'Kitchen') . ' Store cannot be deleted.'], 422);
+        if ($location->type === 'main_store') {
+            return response()->json(['message' => 'The Main Store cannot be deleted.'], 422);
         }
         $location->delete();
         return response()->json(null, 204);

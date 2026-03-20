@@ -1066,15 +1066,24 @@ class PosController extends Controller
             ]);
         }
 
+        // Deduct first (returns insufficient array if stock short); then mark ready
+        $insufficient = $this->deductBatchIngredients($order, $batch);
+        if ($insufficient !== null) {
+            $msg = collect($insufficient)->map(fn($e) =>
+                "{$e['menu_item']}: {$e['ingredient']} — {$e['available']} {$e['uom']} available, {$e['required']} required"
+            )->join('; ');
+            return response()->json([
+                'message' => 'Insufficient stock. ' . $msg,
+                'errors'  => $insufficient,
+            ], 422);
+        }
+
         // Mark batch ready
         $order->items()
             ->where('kot_sent', true)
             ->where('status', 'active')
             ->where('kot_batch', $batch)
             ->update(['kitchen_ready_at' => now()]);
-
-        // Deduct inventory for this batch only
-        $this->deductBatchIngredients($order, $batch);
 
         // If all batches are now ready, set order kitchen_status
         $order->refresh();
@@ -1173,16 +1182,73 @@ class PosController extends Controller
         ]);
     }
 
-    private function deductBatchIngredients(PosOrder $order, int $batch): void
+    private function getKitchenForOrder(PosOrder $order): ?InventoryLocation
     {
-        $kitchenStore = InventoryLocation::where('type', 'kitchen_store')->first();
-        if (!$kitchenStore) return;
+        $order->loadMissing('restaurant');
+        $restaurant = $order->restaurant;
+        if ($restaurant?->kitchen_location_id) {
+            $loc = InventoryLocation::find($restaurant->kitchen_location_id);
+            if ($loc) return $loc;
+        }
+        return InventoryLocation::where('type', 'kitchen_store')->first();
+    }
+
+    /**
+     * Check if kitchen has sufficient ingredients for made-to-order items.
+     * Returns array of insufficient items: [['menu_item' => 'Tea', 'ingredient' => 'Tea Leaves', 'required' => 3, 'available' => 0, 'uom' => 'Gm']]
+     */
+    private function checkMadeToOrderStock(PosOrder $order, $items): array
+    {
+        $kitchenStore = $this->getKitchenForOrder($order);
+        if (!$kitchenStore) return [];
+
+        $insufficient = [];
+        foreach ($items as $orderItem) {
+            $recipe = Recipe::with('ingredients.inventoryItem.issueUom')
+                ->where('menu_item_id', $orderItem->menu_item_id)
+                ->where('is_active', true)
+                ->first();
+
+            if (!$recipe || ($recipe->requires_production ?? true)) continue;
+
+            $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+            $menuName = $orderItem->menuItem?->name ?? 'Item #' . $orderItem->menu_item_id;
+
+            foreach ($recipe->ingredients as $ing) {
+                $rawQty = round($ing->raw_quantity * $multiplier, 3);
+                $currentStock = (float) (DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', $ing->inventory_item_id)
+                    ->where('inventory_location_id', $kitchenStore->id)
+                    ->value('quantity') ?? 0);
+
+                if ($currentStock < $rawQty) {
+                    $insufficient[] = [
+                        'menu_item'  => $menuName,
+                        'ingredient' => $ing->inventoryItem?->name ?? 'Unknown',
+                        'required'   => $rawQty,
+                        'available'  => $currentStock,
+                        'uom'        => $ing->inventoryItem?->issueUom?->short_name ?? $ing->uom?->short_name ?? 'unit',
+                    ];
+                }
+            }
+        }
+        return $insufficient;
+    }
+
+    /**
+     * Deduct ingredients for made-to-order items in a batch.
+     * Returns array of insufficient items if stock is short; null on success.
+     */
+    private function deductBatchIngredients(PosOrder $order, int $batch): ?array
+    {
+        $kitchenStore = $this->getKitchenForOrder($order);
+        if (!$kitchenStore) return null;
 
         $refId = $order->id . '-' . $batch;
         $alreadyDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
             ->where('reference_id', $refId)
             ->exists();
-        if ($alreadyDeducted) return;
+        if ($alreadyDeducted) return null;
 
         $batchItems = $order->items()
             ->with('menuItem')
@@ -1191,16 +1257,52 @@ class PosController extends Controller
             ->where('kot_batch', $batch)
             ->get();
 
-        $affectedItemIds = [];
-        DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId, &$affectedItemIds) {
+        $result = DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId) {
+            // Pass 1: Verify all made-to-order ingredients have sufficient stock (with lock)
+            $insufficient = [];
+            foreach ($batchItems as $orderItem) {
+                $recipe = Recipe::with('ingredients.inventoryItem.issueUom')
+                    ->where('menu_item_id', $orderItem->menu_item_id)
+                    ->where('is_active', true)
+                    ->first();
+
+                if (!$recipe || ($recipe->requires_production ?? true)) continue;
+
+                $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+                $menuName = $orderItem->menuItem?->name ?? 'Item #' . $orderItem->menu_item_id;
+
+                foreach ($recipe->ingredients as $ing) {
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+                    $currentStock = (float) (DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $ing->inventory_item_id)
+                        ->where('inventory_location_id', $kitchenStore->id)
+                        ->lockForUpdate()
+                        ->value('quantity') ?? 0);
+
+                    if ($currentStock < $rawQty) {
+                        $insufficient[] = [
+                            'menu_item'  => $menuName,
+                            'ingredient' => $ing->inventoryItem?->name ?? 'Unknown',
+                            'required'   => $rawQty,
+                            'available'  => $currentStock,
+                            'uom'        => $ing->inventoryItem?->issueUom?->short_name ?? $ing->uom?->short_name ?? 'unit',
+                        ];
+                    }
+                }
+            }
+            if (!empty($insufficient)) {
+                return ['insufficient' => $insufficient];
+            }
+
+            // Pass 2: Deduct
+            $affectedItemIds = [];
             foreach ($batchItems as $orderItem) {
                 $recipe = Recipe::with('ingredients.inventoryItem')
                     ->where('menu_item_id', $orderItem->menu_item_id)
                     ->where('is_active', true)
                     ->first();
 
-                if (!$recipe) continue;
-                if ($recipe->requires_production ?? true) continue;
+                if (!$recipe || ($recipe->requires_production ?? true)) continue;
 
                 $multiplier = $orderItem->quantity / $recipe->yield_quantity;
 
@@ -1241,10 +1343,16 @@ class PosController extends Controller
                     ]);
                 }
             }
+            return ['affected' => array_keys($affectedItemIds)];
         });
-        foreach (array_keys($affectedItemIds) as $itemId) {
+
+        if (isset($result['insufficient'])) {
+            return $result['insufficient'];
+        }
+        foreach ($result['affected'] ?? [] as $itemId) {
             InventoryItem::syncStoredCurrentStockFromLocations($itemId);
         }
+        return null;
     }
 
     // ── Update Kitchen Status ─────────────────────────────────────────────────
@@ -1257,6 +1365,30 @@ class PosController extends Controller
 
         $previousStatus = $order->kitchen_status;
         $newStatus      = $validated['kitchen_status'];
+
+        // When marking ready: check stock before updating (legacy flow - whole order at once)
+        if ($newStatus === 'ready' && $previousStatus !== 'ready') {
+            $perBatchDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
+                ->where('reference_id', 'like', (string) $order->id . '-%')
+                ->exists();
+            $legacyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
+                ->where('reference_id', (string) $order->id)
+                ->exists();
+
+            if (!$perBatchDeducted && !$legacyDeducted) {
+                $kotItems = $order->items()->with('menuItem')->where('kot_sent', true)->get();
+                $insufficient = $this->checkMadeToOrderStock($order, $kotItems);
+                if (!empty($insufficient)) {
+                    $msg = collect($insufficient)->map(fn($e) =>
+                        "{$e['menu_item']}: {$e['ingredient']} — {$e['available']} {$e['uom']} available, {$e['required']} required"
+                    )->join('; ');
+                    return response()->json([
+                        'message' => 'Insufficient stock. ' . $msg,
+                        'errors'  => $insufficient,
+                    ], 422);
+                }
+            }
+        }
 
         $order->update(['kitchen_status' => $newStatus]);
 
@@ -1296,7 +1428,7 @@ class PosController extends Controller
      */
     private function deductOrderIngredients(PosOrder $order): void
     {
-        $kitchenStore = InventoryLocation::where('type', 'kitchen_store')->first();
+        $kitchenStore = $this->getKitchenForOrder($order);
         if (!$kitchenStore) return;
 
         $kotItems = $order->items()->with('menuItem')->where('kot_sent', true)->get();

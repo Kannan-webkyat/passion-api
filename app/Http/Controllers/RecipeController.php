@@ -67,6 +67,7 @@ class RecipeController extends Controller
                     'food_cost_target'     => $recipe->food_cost_target,
                     'notes'                => $recipe->notes,
                     'is_active'            => $recipe->is_active,
+                    'requires_production'  => $recipe->requires_production ?? true,
                     'total_cost'           => round($recipe->total_cost, 2),
                     'cost_per_portion'     => $costPerPortion,
                     'food_cost_pct'        => $foodCostPct,
@@ -94,12 +95,13 @@ class RecipeController extends Controller
     public function upsert(Request $request, $menuItemId)
     {
         $validated = $request->validate([
-            'yield_quantity'   => 'required|numeric|min:0.001',
-            'yield_uom_id'     => 'nullable|exists:inventory_uoms,id',
-            'food_cost_target' => 'nullable|numeric|min:0|max:100',
-            'notes'            => 'nullable|string',
-            'is_active'        => 'boolean',
-            'ingredients'      => 'required|array|min:1',
+            'yield_quantity'       => 'required|numeric|min:0.001',
+            'yield_uom_id'         => 'nullable|exists:inventory_uoms,id',
+            'food_cost_target'     => 'nullable|numeric|min:0|max:100',
+            'notes'                => 'nullable|string',
+            'is_active'            => 'boolean',
+            'requires_production'  => 'boolean',
+            'ingredients'          => 'required|array|min:1',
             'ingredients.*.inventory_item_id' => 'required|exists:inventory_items,id',
             'ingredients.*.uom_id'            => 'nullable|exists:inventory_uoms,id',
             'ingredients.*.quantity'          => 'required|numeric|min:0.001',
@@ -111,11 +113,12 @@ class RecipeController extends Controller
             $recipe = Recipe::updateOrCreate(
                 ['menu_item_id' => $menuItemId],
                 [
-                    'yield_quantity'   => $validated['yield_quantity'],
-                    'yield_uom_id'     => $validated['yield_uom_id'] ?? null,
-                    'food_cost_target' => $validated['food_cost_target'] ?? null,
-                    'notes'            => $validated['notes'] ?? null,
-                    'is_active'        => $validated['is_active'] ?? true,
+                    'yield_quantity'       => $validated['yield_quantity'],
+                    'yield_uom_id'         => $validated['yield_uom_id'] ?? null,
+                    'food_cost_target'     => $validated['food_cost_target'] ?? null,
+                    'notes'                => $validated['notes'] ?? null,
+                    'is_active'            => $validated['is_active'] ?? true,
+                    'requires_production'  => $validated['requires_production'] ?? true,
                 ]
             );
 

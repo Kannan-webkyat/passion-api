@@ -7,9 +7,13 @@ use Illuminate\Http\Request;
 
 class DepartmentController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(Department::withCount('users', 'locations')->get());
+        $query = Department::withCount('users', 'locations');
+        if (!$request->boolean('include_inactive')) {
+            $query->where('is_active', true);
+        }
+        return response()->json($query->get());
     }
 
     public function store(Request $request)

@@ -6,6 +6,7 @@ use Illuminate\Database\Seeder;
 use App\Models\RestaurantMaster;
 use App\Models\TableCategory;
 use App\Models\RestaurantTable;
+use App\Models\InventoryLocation;
 
 class RestaurantTableSeeder extends Seeder
 {
@@ -123,6 +124,17 @@ class RestaurantTableSeeder extends Seeder
                     'location'    => $loc,
                 ]
             );
+        }
+
+        // Map outlets to kitchens (multi-kitchen)
+        $rooftopKitchen = InventoryLocation::where('name', 'Rooftop Kitchen')->first();
+        $poolBarKitchen = InventoryLocation::where('name', 'Pool Bar Kitchen')->first();
+        if ($rooftopKitchen) {
+            $mainDining->update(['kitchen_location_id' => $rooftopKitchen->id]);
+            $rooftop->update(['kitchen_location_id' => $rooftopKitchen->id]);
+        }
+        if ($poolBarKitchen) {
+            $poolside->update(['kitchen_location_id' => $poolBarKitchen->id]);
         }
 
         $this->command->info('Restaurant & Table seeder completed.');

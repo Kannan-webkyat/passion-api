@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class RestaurantMaster extends Model
 {
     protected $fillable = [
-        'name', 'floor', 'description', 'is_active',
+        'name', 'floor', 'description', 'is_active', 'kitchen_location_id',
         'address', 'email', 'phone', 'gstin', 'fssai', 'logo_path',
     ];
 
@@ -30,5 +30,10 @@ class RestaurantMaster extends Model
         return $this->belongsToMany(MenuItem::class, 'restaurant_menu_items', 'restaurant_master_id', 'menu_item_id')
             ->withPivot(['price', 'fixed_ept', 'is_active'])
             ->withTimestamps();
+    }
+
+    public function kitchenLocation()
+    {
+        return $this->belongsTo(\App\Models\InventoryLocation::class, 'kitchen_location_id');
     }
 }

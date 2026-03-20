@@ -8,9 +8,13 @@ use App\Models\PaymentMethod;
 
 class PaymentMethodController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(PaymentMethod::all());
+        $query = PaymentMethod::query();
+        if (!$request->boolean('include_inactive')) {
+            $query->where('is_active', true);
+        }
+        return response()->json($query->get());
     }
 
     public function store(Request $request)

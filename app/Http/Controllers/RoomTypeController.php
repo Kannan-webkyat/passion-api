@@ -8,9 +8,13 @@ use Illuminate\Validation\ValidationException;
 
 class RoomTypeController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return RoomType::with(['tax', 'ratePlans'])->get();
+        $query = RoomType::with(['tax', 'ratePlans']);
+        if (!$request->boolean('include_inactive')) {
+            $query->where('is_active', true);
+        }
+        return $query->get();
     }
 
     /**

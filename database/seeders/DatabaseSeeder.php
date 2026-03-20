@@ -16,19 +16,19 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $this->call([
-            InventoryTaxSeeder::class,
+            // InventoryTaxSeeder::class,
             RolePermissionSeeder::class,
             DepartmentSeeder::class,
             LocationSeeder::class,
             RestaurantTableSeeder::class,  // Must run before FreshBiryaniTeaCoffeeSeeder (creates restaurants)
-            FreshBiryaniTeaCoffeeSeeder::class,
+            // FreshBiryaniTeaCoffeeSeeder::class,
             KitchenStaffSeeder::class,
             ReceptionistSeeder::class,
             WaiterSeeder::class,
             StoreManagerSeeder::class,
             UserDepartmentSeeder::class,
             RoomSeeder::class,
-            BookingSeeder::class,
+            // BookingSeeder::class,
         ]);
 
         User::firstOrCreate(

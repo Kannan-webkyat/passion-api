@@ -8,9 +8,13 @@ use Illuminate\Support\Facades\Storage;
 
 class RestaurantMasterController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(RestaurantMaster::all());
+        $query = RestaurantMaster::with('kitchenLocation');
+        if (!$request->boolean('include_inactive')) {
+            $query->where('is_active', true);
+        }
+        return response()->json($query->get());
     }
 
     public function store(Request $request)
@@ -41,15 +45,16 @@ class RestaurantMasterController extends Controller
     private function validateRestaurant(Request $request): array
     {
         $rules = [
-            'name'        => 'required|string|max:255',
-            'floor'       => 'nullable|string|max:255',
-            'description' => 'nullable|string',
-            'is_active'   => 'boolean',
-            'address'     => 'nullable|string|max:1000',
-            'email'       => 'nullable|email|max:255',
-            'phone'       => 'nullable|string|max:50',
-            'gstin'       => 'nullable|string|max:50',
-            'fssai'       => 'nullable|string|max:50',
+            'name'                 => 'required|string|max:255',
+            'floor'                => 'nullable|string|max:255',
+            'description'          => 'nullable|string',
+            'is_active'            => 'boolean',
+            'kitchen_location_id'  => 'nullable|exists:inventory_locations,id',
+            'address'              => 'nullable|string|max:1000',
+            'email'                => 'nullable|email|max:255',
+            'phone'                => 'nullable|string|max:50',
+            'gstin'                => 'nullable|string|max:50',
+            'fssai'                => 'nullable|string|max:50',
         ];
         return $request->validate($rules);
     }

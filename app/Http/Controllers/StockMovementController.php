@@ -10,7 +10,7 @@ class StockMovementController extends Controller
     public function index()
     {
         return response()->json(
-            InventoryTransaction::with(['item', 'location', 'department'])
+            InventoryTransaction::with(['item.issueUom', 'location', 'department'])
                 ->latest()
                 ->get()
         );

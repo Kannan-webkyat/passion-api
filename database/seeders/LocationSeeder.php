@@ -16,10 +16,19 @@ class LocationSeeder extends Seeder
             ['type' => 'main_store', 'is_active' => true, 'department_id' => null]
         );
 
-        // 2. Kitchen Store (POS deductions, production) — type = kitchen_store
+        // 2. Kitchen stores (POS deductions, production) — one per outlet for multi-kitchen
+        $ktnDept = Department::where('code', 'KTN')->first();
         InventoryLocation::updateOrCreate(
-            ['name' => 'Kitchen Store'],
-            ['type' => 'kitchen_store', 'is_active' => true, 'department_id' => Department::where('code', 'KTN')->first()?->id]
+            ['name' => 'Rooftop Kitchen'],
+            ['type' => 'kitchen_store', 'is_active' => true, 'department_id' => $ktnDept?->id]
+        );
+        InventoryLocation::updateOrCreate(
+            ['name' => 'Pool Bar Kitchen'],
+            ['type' => 'kitchen_store', 'is_active' => true, 'department_id' => Department::where('code', 'BAR')->first()?->id]
+        );
+        InventoryLocation::updateOrCreate(
+            ['name' => 'Room Service Kitchen'],
+            ['type' => 'kitchen_store', 'is_active' => true, 'department_id' => $ktnDept?->id]
         );
 
         // 3. Sub-stores (linked to Departments)
