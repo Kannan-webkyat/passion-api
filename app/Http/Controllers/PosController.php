@@ -1850,6 +1850,7 @@ class PosController extends Controller
             'opened_by_user'  => $order->openedBy ? ['id' => $order->openedBy->id, 'name' => $order->openedBy->name] : null,
             'status'          => $order->status,
             'kitchen_status'  => $order->kitchen_status ?? 'pending',
+            'current_kot_batch' => (int) ($order->current_kot_batch ?? 0),
             'ready_batches'   => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray(),
             'served_batches'  => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray(),
             'discount_type'   => $order->discount_type,
