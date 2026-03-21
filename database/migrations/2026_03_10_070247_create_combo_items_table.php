@@ -11,7 +11,7 @@ return new class extends Migration
      */
     public function up(): void
     {
-        if (!Schema::hasTable('combo_items')) {
+        if (! Schema::hasTable('combo_items')) {
             Schema::create('combo_items', function (Blueprint $table) {
                 $table->id();
                 $table->foreignId('combo_id')->constrained('combos')->onDelete('cascade');

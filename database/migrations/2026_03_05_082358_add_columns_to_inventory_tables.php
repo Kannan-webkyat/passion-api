@@ -9,10 +9,10 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('inventory_categories', function (Blueprint $table) {
-            if (!Schema::hasColumn('inventory_categories', 'name')) {
+            if (! Schema::hasColumn('inventory_categories', 'name')) {
                 $table->string('name')->unique()->after('id');
             }
-            if (!Schema::hasColumn('inventory_categories', 'description')) {
+            if (! Schema::hasColumn('inventory_categories', 'description')) {
                 $table->text('description')->nullable()->after('name');
             }
         });

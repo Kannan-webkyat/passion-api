@@ -2,11 +2,11 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
 use App\Models\Booking;
 use App\Models\Room;
 use App\Models\User;
 use Carbon\Carbon;
+use Illuminate\Database\Seeder;
 
 class BookingSeeder extends Seeder
 {
@@ -35,7 +35,7 @@ class BookingSeeder extends Seeder
                     'payment_method' => 'card',
                     'status' => 'checked_in',
                     'booking_source' => 'website',
-                    'created_by' => $admin->id ?? null
+                    'created_by' => $admin->id ?? null,
                 ]
             );
 
@@ -55,7 +55,7 @@ class BookingSeeder extends Seeder
                     'payment_status' => 'pending',
                     'status' => 'confirmed',
                     'booking_source' => 'ota',
-                    'created_by' => $admin->id ?? null
+                    'created_by' => $admin->id ?? null,
                 ]
             );
 
@@ -75,10 +75,10 @@ class BookingSeeder extends Seeder
                     'payment_method' => 'cash',
                     'status' => 'checked_out',
                     'booking_source' => 'walk-in',
-                    'created_by' => $admin->id ?? null
+                    'created_by' => $admin->id ?? null,
                 ]
             );
-            
+
             // Update room statuses based on bookings
             $rooms->where('room_number', '101')->first()->update(['status' => 'occupied']);
             $rooms->where('room_number', '201')->first()->update(['status' => 'dirty']);

@@ -17,8 +17,8 @@ class SettingController extends Controller
     {
         $validated = $request->validate([
             'address' => 'nullable|string|max:1000',
-            'email'   => 'nullable|email|max:255',
-            'phone'   => 'nullable|string|max:50',
+            'email' => 'nullable|email|max:255',
+            'phone' => 'nullable|string|max:50',
         ]);
 
         foreach ($validated as $key => $value) {

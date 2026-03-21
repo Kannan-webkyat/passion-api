@@ -22,7 +22,7 @@ class TableReservation extends Model
 
     protected $casts = [
         'reservation_date' => 'date:Y-m-d',
-        'checked_in_at'    => 'datetime',
+        'checked_in_at' => 'datetime',
     ];
 
     public function table()

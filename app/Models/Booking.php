@@ -10,6 +10,7 @@ class Booking extends Model
     {
         return $this->hasMany(BookingSegment::class);
     }
+
     protected $fillable = [
         'room_id',
         'first_name',
@@ -45,7 +46,7 @@ class Booking extends Model
         'created_by',
         'adult_breakfast_count',
         'child_breakfast_count',
-        'rate_plan_id'
+        'rate_plan_id',
     ];
 
     public function bookingGroup()

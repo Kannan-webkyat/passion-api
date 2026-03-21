@@ -31,7 +31,7 @@ return new class extends Migration
      */
     public function down(): void
     {
-        if (!Schema::hasColumn('combos', 'menu_sub_category_id')) {
+        if (! Schema::hasColumn('combos', 'menu_sub_category_id')) {
             Schema::table('combos', function (Blueprint $table) {
                 $table->foreignId('menu_sub_category_id')->nullable()->constrained('menu_sub_categories')->onDelete('set null');
             });

@@ -17,16 +17,17 @@ class TableController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'table_number'         => 'required|string|max:255',
+            'table_number' => 'required|string|max:255',
             'restaurant_master_id' => 'required|exists:restaurant_masters,id',
-            'category_id'          => 'required|exists:table_categories,id',
-            'capacity'             => 'required|integer|min:1',
-            'status'               => 'in:available,occupied,reserved,cleaning,inactive',
-            'location'             => 'nullable|string|max:255',
-            'notes'                => 'nullable|string',
+            'category_id' => 'required|exists:table_categories,id',
+            'capacity' => 'required|integer|min:1',
+            'status' => 'in:available,occupied,reserved,cleaning,inactive',
+            'location' => 'nullable|string|max:255',
+            'notes' => 'nullable|string',
         ]);
 
         $table = RestaurantTable::create($validated);
+
         return response()->json($table->load(['category', 'restaurantMaster']), 201);
     }
 
@@ -38,22 +39,31 @@ class TableController extends Controller
     public function update(Request $request, RestaurantTable $table)
     {
         $validated = $request->validate([
-            'table_number'         => 'sometimes|required|string|max:255',
+            'table_number' => 'sometimes|required|string|max:255',
             'restaurant_master_id' => 'sometimes|required|exists:restaurant_masters,id',
-            'category_id'          => 'sometimes|required|exists:table_categories,id',
-            'capacity'             => 'sometimes|required|integer|min:1',
-            'status'               => 'in:available,occupied,reserved,cleaning,inactive',
-            'location'             => 'nullable|string|max:255',
-            'notes'                => 'nullable|string',
+            'category_id' => 'sometimes|required|exists:table_categories,id',
+            'capacity' => 'sometimes|required|integer|min:1',
+            'status' => 'in:available,occupied,reserved,cleaning,inactive',
+            'location' => 'nullable|string|max:255',
+            'notes' => 'nullable|string',
         ]);
 
         $table->update($validated);
+
         return response()->json($table->load(['category', 'restaurantMaster']));
     }
 
     public function destroy(RestaurantTable $table)
     {
-        $table->delete();
-        return response()->json(null, 204);
+        try {
+            $table->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete this table because it has a billing history in the POS. Please mark it as Inactive instead.'], 409);
+            }
+            throw $e;
+        }
     }
 }

@@ -14,12 +14,12 @@ class InventoryItem extends Model
     ];
 
     protected $casts = [
-        'cost_price'        => 'float',
-        'reorder_level'     => 'integer',
-        'current_stock'     => 'integer',
+        'cost_price' => 'float',
+        'reorder_level' => 'integer',
+        'current_stock' => 'integer',
         'conversion_factor' => 'float',
-        'tax_id'            => 'integer',
-        'is_direct_sale'    => 'boolean',
+        'tax_id' => 'integer',
+        'is_direct_sale' => 'boolean',
     ];
 
     public function tax()
@@ -55,8 +55,8 @@ class InventoryItem extends Model
     public function locations()
     {
         return $this->belongsToMany(InventoryLocation::class, 'inventory_item_locations')
-                    ->withPivot('quantity', 'reorder_level')
-                    ->withTimestamps();
+            ->withPivot('quantity', 'reorder_level')
+            ->withTimestamps();
     }
 
     /**

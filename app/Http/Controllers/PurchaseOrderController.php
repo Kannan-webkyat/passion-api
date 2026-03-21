@@ -20,28 +20,28 @@ class PurchaseOrderController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'vendor_id'                => 'required|exists:vendors,id',
-            'location_id'              => 'required|exists:inventory_locations,id',
-            'order_date'               => 'required|date',
-            'expected_delivery_date'   => 'nullable|date',
-            'notes'                    => 'nullable|string',
-            'items'                    => 'required|array|min:1',
-            'items.*.inventory_item_id'=> 'required|exists:inventory_items,id',
-            'items.*.quantity'         => 'required|integer|min:1',
-            'items.*.unit_price'       => 'required|numeric|min:0',
-            'items.*.tax_rate'         => 'nullable|numeric|min:0',
+            'vendor_id' => 'required|exists:vendors,id',
+            'location_id' => 'required|exists:inventory_locations,id',
+            'order_date' => 'required|date',
+            'expected_delivery_date' => 'nullable|date',
+            'notes' => 'nullable|string',
+            'items' => 'required|array|min:1',
+            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.tax_rate' => 'nullable|numeric|min:0',
         ]);
 
         DB::beginTransaction();
         try {
             $subtotal = 0;
             $taxAmount = 0;
-            
+
             foreach ($validated['items'] as &$line) {
                 $line['subtotal'] = $line['quantity'] * $line['unit_price'];
                 $line['tax_amount'] = ($line['subtotal'] * ($line['tax_rate'] ?? 0)) / 100;
                 $line['total_amount'] = $line['subtotal'] + $line['tax_amount'];
-                
+
                 $subtotal += $line['subtotal'];
                 $taxAmount += $line['tax_amount'];
             }
@@ -49,40 +49,42 @@ class PurchaseOrderController extends Controller
             // Generate PO Number: PO-YYYY-XXX
             $year = date('Y', strtotime($validated['order_date']));
             $lastPO = PurchaseOrder::whereYear('order_date', $year)->orderBy('id', 'desc')->first();
-            $nextNum = $lastPO ? ((int)explode('-', $lastPO->po_number)[2] + 1) : 1;
-            $poNumber = "PO-{$year}-" . str_pad($nextNum, 3, '0', STR_PAD_LEFT);
+            $nextNum = $lastPO ? ((int) explode('-', $lastPO->po_number)[2] + 1) : 1;
+            $poNumber = "PO-{$year}-".str_pad($nextNum, 3, '0', STR_PAD_LEFT);
 
             $po = PurchaseOrder::create([
-                'vendor_id'              => $validated['vendor_id'],
-                'location_id'            => $validated['location_id'],
-                'order_date'             => $validated['order_date'],
+                'vendor_id' => $validated['vendor_id'],
+                'location_id' => $validated['location_id'],
+                'order_date' => $validated['order_date'],
                 'expected_delivery_date' => $validated['expected_delivery_date'] ?? null,
-                'notes'                  => $validated['notes'] ?? null,
-                'status'                 => 'draft',
-                'subtotal'               => $subtotal,
-                'tax_amount'             => $taxAmount,
-                'total_amount'           => $subtotal + $taxAmount,
-                'created_by'             => auth()->id(),
-                'po_number'              => $poNumber,
+                'notes' => $validated['notes'] ?? null,
+                'status' => 'draft',
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'total_amount' => $subtotal + $taxAmount,
+                'created_by' => auth()->id(),
+                'po_number' => $poNumber,
             ]);
 
             foreach ($validated['items'] as $line) {
                 PurchaseOrderItem::create([
-                    'purchase_order_id'  => $po->id,
-                    'inventory_item_id'  => $line['inventory_item_id'],
-                    'quantity_ordered'   => $line['quantity'],
-                    'unit_price'         => $line['unit_price'],
-                    'subtotal'           => $line['subtotal'],
-                    'tax_rate'           => $line['tax_rate'] ?? 0,
-                    'tax_amount'         => $line['tax_amount'],
-                    'total_amount'       => $line['total_amount'],
+                    'purchase_order_id' => $po->id,
+                    'inventory_item_id' => $line['inventory_item_id'],
+                    'quantity_ordered' => $line['quantity'],
+                    'unit_price' => $line['unit_price'],
+                    'subtotal' => $line['subtotal'],
+                    'tax_rate' => $line['tax_rate'] ?? 0,
+                    'tax_amount' => $line['tax_amount'],
+                    'total_amount' => $line['total_amount'],
                 ]);
             }
 
             DB::commit();
+
             return response()->json($po->load('vendor', 'items.inventoryItem', 'location'), 201);
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -99,62 +101,64 @@ class PurchaseOrderController extends Controller
         }
 
         $validated = $request->validate([
-            'vendor_id'                => 'required|exists:vendors,id',
-            'location_id'              => 'required|exists:inventory_locations,id',
-            'order_date'               => 'required|date',
-            'expected_delivery_date'   => 'nullable|date',
-            'notes'                    => 'nullable|string',
-            'items'                    => 'required|array|min:1',
-            'items.*.inventory_item_id'=> 'required|exists:inventory_items,id',
-            'items.*.quantity'         => 'required|integer|min:1',
-            'items.*.unit_price'       => 'required|numeric|min:0',
-            'items.*.tax_rate'         => 'nullable|numeric|min:0',
+            'vendor_id' => 'required|exists:vendors,id',
+            'location_id' => 'required|exists:inventory_locations,id',
+            'order_date' => 'required|date',
+            'expected_delivery_date' => 'nullable|date',
+            'notes' => 'nullable|string',
+            'items' => 'required|array|min:1',
+            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.tax_rate' => 'nullable|numeric|min:0',
         ]);
 
         DB::beginTransaction();
         try {
             $subtotal = 0;
             $taxAmount = 0;
-            
+
             foreach ($validated['items'] as &$line) {
                 $line['subtotal'] = $line['quantity'] * $line['unit_price'];
                 $line['tax_amount'] = ($line['subtotal'] * ($line['tax_rate'] ?? 0)) / 100;
                 $line['total_amount'] = $line['subtotal'] + $line['tax_amount'];
-                
+
                 $subtotal += $line['subtotal'];
                 $taxAmount += $line['tax_amount'];
             }
 
             $purchaseOrder->update([
-                'vendor_id'              => $validated['vendor_id'],
-                'location_id'            => $validated['location_id'],
-                'order_date'             => $validated['order_date'],
+                'vendor_id' => $validated['vendor_id'],
+                'location_id' => $validated['location_id'],
+                'order_date' => $validated['order_date'],
                 'expected_delivery_date' => $validated['expected_delivery_date'] ?? null,
-                'notes'                  => $validated['notes'] ?? null,
-                'subtotal'               => $subtotal,
-                'tax_amount'             => $taxAmount,
-                'total_amount'           => $subtotal + $taxAmount,
+                'notes' => $validated['notes'] ?? null,
+                'subtotal' => $subtotal,
+                'tax_amount' => $taxAmount,
+                'total_amount' => $subtotal + $taxAmount,
             ]);
 
             // Replace items
             $purchaseOrder->items()->delete();
             foreach ($validated['items'] as $line) {
                 PurchaseOrderItem::create([
-                    'purchase_order_id'  => $purchaseOrder->id,
-                    'inventory_item_id'  => $line['inventory_item_id'],
-                    'quantity_ordered'   => $line['quantity'],
-                    'unit_price'         => $line['unit_price'],
-                    'subtotal'           => $line['subtotal'],
-                    'tax_rate'           => $line['tax_rate'] ?? 0,
-                    'tax_amount'         => $line['tax_amount'],
-                    'total_amount'       => $line['total_amount'],
+                    'purchase_order_id' => $purchaseOrder->id,
+                    'inventory_item_id' => $line['inventory_item_id'],
+                    'quantity_ordered' => $line['quantity'],
+                    'unit_price' => $line['unit_price'],
+                    'subtotal' => $line['subtotal'],
+                    'tax_rate' => $line['tax_rate'] ?? 0,
+                    'tax_amount' => $line['tax_amount'],
+                    'total_amount' => $line['total_amount'],
                 ]);
             }
 
             DB::commit();
+
             return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem', 'location'));
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -162,6 +166,7 @@ class PurchaseOrderController extends Controller
     public function destroy(PurchaseOrder $purchaseOrder)
     {
         $purchaseOrder->delete();
+
         return response()->json(null, 204);
     }
 
@@ -173,13 +178,13 @@ class PurchaseOrderController extends Controller
 
         $validated = $request->validate([
             'location_id' => 'nullable|exists:inventory_locations,id',
-            'document'    => 'nullable|file|max:4096'
+            'document' => 'nullable|file|max:4096',
         ]);
 
         // Default to Main Store if no location provided
         $locationId = $validated['location_id'] ?? \App\Models\InventoryLocation::where('type', 'main_store')->first()?->id;
 
-        if (!$locationId) {
+        if (! $locationId) {
             return response()->json(['message' => 'No target location available'], 422);
         }
 
@@ -211,21 +216,29 @@ class PurchaseOrderController extends Controller
                     $currentCost = (float) ($item->cost_price ?? 0);
                     $denominator = $stockBefore + $convertedQuantity;
                     $newCostPrice = $denominator > 0
-                        ? (($stockBefore * $currentCost) + ($convertedQuantity * $poUnitPrice)) / $denominator
-                        : $poUnitPrice;
+                        ? (($stockBefore * $currentCost) + ($poItem->quantity_ordered * $poUnitPrice)) / $denominator
+                        : $unitCostPerIssue;
 
                     // 1. Update Location Stock (source of truth)
-                    DB::table('inventory_item_locations')->updateOrInsert(
-                        [
+                    $existsInTarget = DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $item->id)
+                        ->where('inventory_location_id', $locationId)
+                        ->exists();
+
+                    if ($existsInTarget) {
+                        DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $locationId)
+                            ->increment('quantity', $convertedQuantity, ['updated_at' => now()]);
+                    } else {
+                        DB::table('inventory_item_locations')->insert([
                             'inventory_item_id' => $item->id,
-                            'inventory_location_id' => $locationId
-                        ],
-                        [
-                            'quantity' => DB::raw('quantity + ' . $convertedQuantity),
+                            'inventory_location_id' => $locationId,
+                            'quantity' => $convertedQuantity,
+                            'created_at' => now(),
                             'updated_at' => now(),
-                            'created_at' => now()
-                        ]
-                    );
+                        ]);
+                    }
 
                     $item->update(['cost_price' => round($newCostPrice, 4)]);
                     InventoryItem::syncStoredCurrentStockFromLocations($item->id);
@@ -238,7 +251,7 @@ class PurchaseOrderController extends Controller
                         'unit_cost' => round($unitCostPerIssue, 4),
                         'total_cost' => $totalCost,
                         'reason' => 'Purchase Receipt',
-                        'notes' => 'From PO: ' . $purchaseOrder->po_number . ' at ' . \App\Models\InventoryLocation::find($locationId)->name . ' (Ordered: ' . $poItem->quantity_ordered . ' ' . ($item->purchaseUom->short_name ?? '') . ')',
+                        'notes' => 'From PO: '.$purchaseOrder->po_number.' at '.\App\Models\InventoryLocation::find($locationId)->name.' (Ordered: '.$poItem->quantity_ordered.' '.($item->purchaseUom->short_name ?? '').')',
                         'user_id' => auth()->id(),
                         'reference_type' => 'purchase_order',
                         'reference_id' => (string) $purchaseOrder->id,
@@ -247,9 +260,11 @@ class PurchaseOrderController extends Controller
             }
 
             DB::commit();
+
             return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem'));
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -261,10 +276,10 @@ class PurchaseOrderController extends Controller
         }
 
         $validated = $request->validate([
-            'payment_method'    => 'required|string',
+            'payment_method' => 'required|string',
             'payment_reference' => 'nullable|string',
-            'paid_amount'       => 'required|numeric|min:0',
-            'invoice'           => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:4096'
+            'paid_amount' => 'required|numeric|min:0',
+            'invoice' => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:4096',
         ]);
 
         if ($request->hasFile('invoice')) {

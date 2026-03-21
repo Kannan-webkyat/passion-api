@@ -8,7 +8,7 @@ class Vendor extends Model
 {
     protected $fillable = [
         'name', 'contact_person', 'phone', 'email', 'address',
-        'gstin', 'pan', 'state', 'is_registered_dealer'
+        'gstin', 'pan', 'state', 'is_registered_dealer',
     ];
 
     protected $casts = [

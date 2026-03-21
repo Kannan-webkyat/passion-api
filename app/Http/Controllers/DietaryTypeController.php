@@ -16,10 +16,11 @@ class DietaryTypeController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
         ]);
-        
+
         $dietaryType = DietaryType::create($validated);
+
         return response()->json($dietaryType, 201);
     }
 
@@ -32,16 +33,18 @@ class DietaryTypeController extends Controller
     {
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
         ]);
 
         $dietaryType->update($validated);
+
         return response()->json($dietaryType);
     }
 
     public function destroy(DietaryType $dietaryType)
     {
         $dietaryType->delete();
+
         return response()->json(null, 204);
     }
 }

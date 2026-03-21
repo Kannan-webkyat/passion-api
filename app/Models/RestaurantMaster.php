@@ -7,7 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class RestaurantMaster extends Model
 {
     protected $fillable = [
-        'name', 'floor', 'description', 'is_active', 'department_id', 'kitchen_location_id',
+        'name', 'floor', 'description', 'is_active', 'department_id', 'kitchen_location_id', 'bar_location_id',
         'address', 'email', 'phone', 'gstin', 'fssai', 'logo_path',
     ];
 
@@ -45,5 +45,10 @@ class RestaurantMaster extends Model
     public function department()
     {
         return $this->belongsTo(\App\Models\Department::class, 'department_id');
+    }
+
+    public function barLocation()
+    {
+        return $this->belongsTo(\App\Models\InventoryLocation::class, 'bar_location_id');
     }
 }

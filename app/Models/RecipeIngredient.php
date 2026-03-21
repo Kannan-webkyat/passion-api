@@ -11,7 +11,7 @@ class RecipeIngredient extends Model
     ];
 
     protected $casts = [
-        'quantity'         => 'decimal:3',
+        'quantity' => 'decimal:3',
         'yield_percentage' => 'decimal:2',
     ];
 
@@ -45,7 +45,8 @@ class RecipeIngredient extends Model
      */
     public function getLineCostAttribute(): float
     {
-        $unitPrice = floatval($this->inventoryItem->cost_price ?? 0) / floatval($this->inventoryItem->conversion_factor ?? 1);
+        $unitPrice = floatval($this->inventoryItem->cost_price ?? 0);
+
         return $this->raw_quantity * $unitPrice;
     }
 }

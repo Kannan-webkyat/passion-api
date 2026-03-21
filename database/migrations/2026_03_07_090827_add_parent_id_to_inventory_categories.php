@@ -13,10 +13,10 @@ return new class extends Migration
     {
         Schema::table('inventory_categories', function (Blueprint $table) {
             $table->foreignId('parent_id')
-                  ->nullable()
-                  ->after('id')
-                  ->constrained('inventory_categories')
-                  ->onDelete('cascade');
+                ->nullable()
+                ->after('id')
+                ->constrained('inventory_categories')
+                ->onDelete('cascade');
         });
     }
 

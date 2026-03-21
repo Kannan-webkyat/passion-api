@@ -2,8 +2,8 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
@@ -24,7 +24,7 @@ return new class extends Migration
         }
 
         // Add Room Charge if not exists (for room service)
-        if (!DB::table('payment_methods')->where('name', 'Room Charge')->exists()) {
+        if (! DB::table('payment_methods')->where('name', 'Room Charge')->exists()) {
             DB::table('payment_methods')->insert([
                 'name' => 'Room Charge',
                 'code' => 'room_charge',

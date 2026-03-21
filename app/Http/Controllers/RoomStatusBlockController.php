@@ -2,11 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\BookingSegment;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
-use App\Models\BookingSegment;
-use Illuminate\Http\Request;
 use Carbon\Carbon;
+use Illuminate\Http\Request;
 
 class RoomStatusBlockController extends Controller
 {
@@ -24,9 +24,9 @@ class RoomStatusBlockController extends Controller
         $end = isset($validated['end']) ? Carbon::parse($validated['end'])->toDateString() : null;
 
         return RoomStatusBlock::with('room')
-            ->when(array_key_exists('is_active', $validated), fn($q) => $q->where('is_active', (bool)$validated['is_active']))
-            ->when($validated['room_id'] ?? null, fn($q, $roomId) => $q->where('room_id', $roomId))
-            ->when($validated['status'] ?? null, fn($q, $status) => $q->where('status', $status))
+            ->when(array_key_exists('is_active', $validated), fn ($q) => $q->where('is_active', (bool) $validated['is_active']))
+            ->when($validated['room_id'] ?? null, fn ($q, $roomId) => $q->where('room_id', $roomId))
+            ->when($validated['status'] ?? null, fn ($q, $status) => $q->where('status', $status))
             ->when($start && $end, function ($q) use ($start, $end) {
                 // overlap: start_date < end AND end_date > start
                 $q->where('start_date', '<', $end)->where('end_date', '>', $start);
@@ -58,6 +58,7 @@ class RoomStatusBlockController extends Controller
 
         if ($hasReservation) {
             $room = Room::find($validated['room_id']);
+
             return response()->json([
                 'message' => "Cannot mark Room #{$room?->room_number} as {$validated['status']} because it already has a reservation in this date range.",
             ], 422);
@@ -94,13 +95,14 @@ class RoomStatusBlockController extends Controller
         ]);
 
         $roomStatusBlock->update($validated);
+
         return response()->json($roomStatusBlock->load('room'));
     }
 
     public function destroy(RoomStatusBlock $roomStatusBlock)
     {
         $roomStatusBlock->delete();
+
         return response()->json(null, 204);
     }
 }
-

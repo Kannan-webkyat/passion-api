@@ -2,10 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\TableReservation;
 use App\Models\RestaurantTable;
-use Illuminate\Http\Request;
+use App\Models\TableReservation;
 use Carbon\Carbon;
+use Illuminate\Http\Request;
 
 class TableReservationController extends Controller
 {
@@ -23,18 +23,19 @@ class TableReservationController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'table_id'         => 'required|exists:restaurant_tables,id',
-            'guest_name'       => 'required|string|max:255',
-            'guest_phone'      => 'nullable|string|max:50',
-            'guest_email'      => 'nullable|email|max:255',
-            'party_size'       => 'required|integer|min:1',
+            'table_id' => 'required|exists:restaurant_tables,id',
+            'guest_name' => 'required|string|max:255',
+            'guest_phone' => 'nullable|string|max:50',
+            'guest_email' => 'nullable|email|max:255',
+            'party_size' => 'required|integer|min:1',
             'reservation_date' => 'required|date',
             'reservation_time' => 'required|date_format:H:i',
             'special_requests' => 'nullable|string|max:500',
-            'notes'            => 'nullable|string',
+            'notes' => 'nullable|string',
         ]);
 
         $reservation = TableReservation::create($validated);
+
         return response()->json($reservation->load('table'), 201);
     }
 
@@ -46,31 +47,33 @@ class TableReservationController extends Controller
     public function update(Request $request, TableReservation $tableReservation)
     {
         $validated = $request->validate([
-            'table_id'         => 'sometimes|required|exists:restaurant_tables,id',
-            'guest_name'       => 'sometimes|required|string|max:255',
-            'guest_phone'      => 'nullable|string|max:50',
-            'guest_email'      => 'nullable|email|max:255',
-            'party_size'       => 'sometimes|required|integer|min:1',
+            'table_id' => 'sometimes|required|exists:restaurant_tables,id',
+            'guest_name' => 'sometimes|required|string|max:255',
+            'guest_phone' => 'nullable|string|max:50',
+            'guest_email' => 'nullable|email|max:255',
+            'party_size' => 'sometimes|required|integer|min:1',
             'reservation_date' => 'sometimes|required|date',
             'reservation_time' => 'sometimes|required|date_format:H:i',
             'special_requests' => 'nullable|string|max:500',
-            'notes'            => 'nullable|string',
+            'notes' => 'nullable|string',
         ]);
 
         $tableReservation->update($validated);
+
         return response()->json($tableReservation->load('table'));
     }
 
     public function destroy(TableReservation $tableReservation)
     {
         $tableReservation->delete();
+
         return response()->json(null, 204);
     }
 
     public function checkIn(TableReservation $tableReservation)
     {
         $tableReservation->update([
-            'status'       => 'seated',
+            'status' => 'seated',
             'checked_in_at' => Carbon::now(),
         ]);
 

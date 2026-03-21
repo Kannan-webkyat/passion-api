@@ -33,6 +33,7 @@ class MenuItemController extends Controller
             'type' => 'nullable|string',
             'is_active' => 'boolean',
             'is_direct_sale' => 'nullable|boolean',
+            'inventory_item_id' => 'nullable|exists:inventory_items,id',
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string', // JSON string for FormData
             'variants' => 'nullable|string', // JSON: [{size_label, price, ml_quantity?}]
@@ -44,7 +45,7 @@ class MenuItemController extends Controller
 
         if ($request->hasFile('image')) {
             $path = $request->file('image')->store('menu-items', 'public');
-            $validated['image'] = url('storage/' . $path);
+            $validated['image'] = url('storage/'.$path);
         }
 
         $item = MenuItem::create($validated);
@@ -69,7 +70,7 @@ class MenuItemController extends Controller
     {
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
         $validated = $request->validate([
-            'item_code' => 'sometimes|required|string|unique:menu_items,item_code,' . $menuItem->id,
+            'item_code' => 'sometimes|required|string|unique:menu_items,item_code,'.$menuItem->id,
             'name' => 'sometimes|required|string|max:255',
             'menu_category_id' => 'sometimes|required|exists:menu_categories,id',
             'menu_sub_category_id' => 'nullable|exists:menu_sub_categories,id',
@@ -79,6 +80,7 @@ class MenuItemController extends Controller
             'type' => 'nullable|string',
             'is_active' => 'boolean',
             'is_direct_sale' => 'nullable|boolean',
+            'inventory_item_id' => 'nullable|exists:inventory_items,id',
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string',
             'variants' => 'nullable|string',
@@ -90,12 +92,13 @@ class MenuItemController extends Controller
 
         if ($request->hasFile('image')) {
             $path = $request->file('image')->store('menu-items', 'public');
-            $validated['image'] = url('storage/' . $path);
+            $validated['image'] = url('storage/'.$path);
         }
 
         $menuItem->update($validated);
         if ($restaurantLinks !== null) {
             $this->syncRestaurantLinks($menuItem, $restaurantLinks);
+            $menuItem->load('restaurantMenuItems');
         }
         if ($variants !== null) {
             $this->syncVariants($menuItem, $variants);
@@ -106,8 +109,16 @@ class MenuItemController extends Controller
 
     public function destroy(MenuItem $menuItem)
     {
-        $menuItem->delete();
-        return response()->json(null, 204);
+        try {
+            $menuItem->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete menu item because it is referenced in existing orders or recipes. Please disable it instead.'], 409);
+            }
+            throw $e;
+        }
     }
 
     private function parseRestaurantLinks(?string $input): ?array
@@ -116,6 +127,7 @@ class MenuItemController extends Controller
             return null;
         }
         $decoded = json_decode($input, true);
+
         return is_array($decoded) ? $decoded : null;
     }
 
@@ -125,6 +137,7 @@ class MenuItemController extends Controller
             return null;
         }
         $decoded = json_decode($input, true);
+
         return is_array($decoded) ? $decoded : null;
     }
 

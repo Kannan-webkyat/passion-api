@@ -15,19 +15,19 @@ class PosDayClosing extends Model
     ];
 
     protected $casts = [
-        'closed_date'      => 'date',
-        'closed_at'       => 'datetime',
-        'opening_balance'  => 'decimal:2',
-        'closing_balance'  => 'decimal:2',
-        'total_sales'            => 'decimal:2',
-        'total_discount'         => 'decimal:2',
-        'total_tax'              => 'decimal:2',
-        'total_service_charge'   => 'decimal:2',
-        'total_tip'              => 'decimal:2',
-        'total_paid'             => 'decimal:2',
-        'cash_total'       => 'decimal:2',
-        'card_total'       => 'decimal:2',
-        'upi_total'        => 'decimal:2',
+        'closed_date' => 'date',
+        'closed_at' => 'datetime',
+        'opening_balance' => 'decimal:2',
+        'closing_balance' => 'decimal:2',
+        'total_sales' => 'decimal:2',
+        'total_discount' => 'decimal:2',
+        'total_tax' => 'decimal:2',
+        'total_service_charge' => 'decimal:2',
+        'total_tip' => 'decimal:2',
+        'total_paid' => 'decimal:2',
+        'cash_total' => 'decimal:2',
+        'card_total' => 'decimal:2',
+        'upi_total' => 'decimal:2',
         'room_charge_total' => 'decimal:2',
     ];
 

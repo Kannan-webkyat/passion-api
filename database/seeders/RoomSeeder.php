@@ -2,7 +2,6 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 
 class RoomSeeder extends Seeder
@@ -20,7 +19,7 @@ class RoomSeeder extends Seeder
                 'base_occupancy' => 2,
                 'capacity' => 2,
                 'is_active' => true,
-                'amenities' => ['Wifi', 'AC', 'TV', 'Mini Bar']
+                'amenities' => ['Wifi', 'AC', 'TV', 'Mini Bar'],
             ]
         );
 
@@ -32,19 +31,19 @@ class RoomSeeder extends Seeder
                 'base_occupancy' => 4,
                 'capacity' => 4,
                 'is_active' => true,
-                'amenities' => ['Wifi', 'AC', 'TV', 'Mini Bar', 'Bathtub', 'Balcony']
+                'amenities' => ['Wifi', 'AC', 'TV', 'Mini Bar', 'Bathtub', 'Balcony'],
             ]
         );
 
         // Create Rooms for Deluxe
         for ($i = 101; $i <= 105; $i++) {
             \App\Models\Room::firstOrCreate(
-                ['room_number' => (string)$i],
+                ['room_number' => (string) $i],
                 [
                     'room_type_id' => $deluxe->id,
                     'floor' => '1st Floor',
                     'status' => 'available',
-                    'is_active' => true
+                    'is_active' => true,
                 ]
             );
         }
@@ -52,12 +51,12 @@ class RoomSeeder extends Seeder
         // Create Rooms for Suite
         for ($i = 201; $i <= 203; $i++) {
             \App\Models\Room::firstOrCreate(
-                ['room_number' => (string)$i],
+                ['room_number' => (string) $i],
                 [
                     'room_type_id' => $suite->id,
                     'floor' => '2nd Floor',
                     'status' => 'available',
-                    'is_active' => true
+                    'is_active' => true,
                 ]
             );
         }

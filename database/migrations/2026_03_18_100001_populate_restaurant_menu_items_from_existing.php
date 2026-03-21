@@ -22,7 +22,7 @@ return new class extends Migration
                     ->where('restaurant_master_id', $restaurantId)
                     ->exists();
 
-                if (!$exists) {
+                if (! $exists) {
                     DB::table('restaurant_menu_items')->insert([
                         'menu_item_id' => $item->id,
                         'restaurant_master_id' => $restaurantId,

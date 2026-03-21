@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\Combo;
 use App\Models\RestaurantCombo;
-use App\Models\RestaurantMaster;
 use Illuminate\Http\Request;
 
 class ComboController extends Controller
@@ -31,7 +30,7 @@ class ComboController extends Controller
         $combo = Combo::create($validated);
         $combo->menuItems()->sync($request->menu_item_ids);
 
-        if (!empty($validated['restaurant_prices'] ?? [])) {
+        if (! empty($validated['restaurant_prices'] ?? [])) {
             $this->syncRestaurantPrices($combo, $validated['restaurant_prices']);
         }
 
@@ -72,8 +71,16 @@ class ComboController extends Controller
 
     public function destroy(Combo $menuCombo)
     {
-        $menuCombo->delete();
-        return response()->json(null, 204);
+        try {
+            $menuCombo->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete combo because it is referenced in existing POS orders. Please mark it as Inactive.'], 409);
+            }
+            throw $e;
+        }
     }
 
     private function syncRestaurantPrices(Combo $combo, array $restaurantPrices): void
@@ -83,7 +90,9 @@ class ComboController extends Controller
         $combo->restaurantCombos()->whereNotIn('restaurant_master_id', $restaurantIds)->delete();
 
         foreach ($byRestaurant as $restaurantId => $rp) {
-            if ($restaurantId <= 0) continue;
+            if ($restaurantId <= 0) {
+                continue;
+            }
             RestaurantCombo::updateOrCreate(
                 [
                     'combo_id' => $combo->id,

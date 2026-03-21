@@ -13,7 +13,7 @@ class ProductionLog extends Model
 
     protected $casts = [
         'quantity_produced' => 'decimal:3',
-        'production_date'   => 'datetime',
+        'production_date' => 'datetime',
     ];
 
     public function recipe()

@@ -3,8 +3,8 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
-use Spatie\Permission\Models\Role;
 use Spatie\Permission\Models\Permission;
+use Spatie\Permission\Models\Role;
 
 class RoleController extends Controller
 {
@@ -42,7 +42,7 @@ class RoleController extends Controller
     public function update(Request $request, Role $role)
     {
         $validated = $request->validate([
-            'name' => 'string|unique:roles,name,' . $role->id,
+            'name' => 'string|unique:roles,name,'.$role->id,
             'permissions' => 'nullable|array',
         ]);
 
@@ -63,8 +63,9 @@ class RoleController extends Controller
         if ($role->name === 'Admin') {
             return response()->json(['message' => 'Cannot delete the Admin role.'], 403);
         }
-        
+
         $role->delete();
+
         return response()->json(null, 204);
     }
 }

@@ -19,7 +19,7 @@ class InventoryLocation extends Model
     public function items()
     {
         return $this->belongsToMany(InventoryItem::class, 'inventory_item_locations')
-                    ->withPivot('quantity', 'reorder_level')
-                    ->withTimestamps();
+            ->withPivot('quantity', 'reorder_level')
+            ->withTimestamps();
     }
 }

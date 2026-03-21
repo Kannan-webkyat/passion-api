@@ -10,9 +10,10 @@ class RoomController extends Controller
     public function index(Request $request)
     {
         $query = Room::with('roomType');
-        if (!$request->boolean('include_inactive')) {
+        if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
+
         return response()->json($query->get());
     }
 
@@ -40,7 +41,7 @@ class RoomController extends Controller
     public function update(Request $request, Room $room)
     {
         $validated = $request->validate([
-            'room_number' => 'string|unique:rooms,room_number,' . $room->id,
+            'room_number' => 'string|unique:rooms,room_number,'.$room->id,
             'room_type_id' => 'exists:room_types,id',
             'is_active' => 'nullable|boolean',
             'status' => 'in:available,occupied,maintenance,dirty,cleaning',
@@ -56,6 +57,7 @@ class RoomController extends Controller
     public function destroy(Room $room)
     {
         $room->delete();
+
         return response()->json(null, 204);
     }
 }

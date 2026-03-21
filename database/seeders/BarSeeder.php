@@ -2,37 +2,37 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\DB;
-use App\Models\Vendor;
 use App\Models\InventoryCategory;
-use App\Models\InventoryTax;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
+use App\Models\InventoryTax;
 use App\Models\InventoryUom;
 use App\Models\MenuCategory;
-use App\Models\MenuSubCategory;
 use App\Models\MenuItem;
+use App\Models\MenuItemVariant;
+use App\Models\MenuSubCategory;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
-use App\Models\MenuItemVariant;
 use App\Models\RestaurantMenuItemVariant;
+use App\Models\Vendor;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
 
 class BarSeeder extends Seeder
 {
     public function run(): void
     {
         $liquorVat = InventoryTax::where('name', 'Liquor VAT')->first();
-        if (!$liquorVat) {
+        if (! $liquorVat) {
             $liquorVat = InventoryTax::create(['name' => 'Liquor VAT', 'rate' => 22, 'type' => 'vat']);
         }
 
         $pcs = InventoryUom::where('short_name', 'Pcs')->first();
-        if (!$pcs) {
+        if (! $pcs) {
             $pcs = InventoryUom::create(['short_name' => 'Pcs', 'name' => 'Piece']);
         }
         $ml = InventoryUom::where('short_name', 'ml')->first();
-        if (!$ml) {
+        if (! $ml) {
             $ml = InventoryUom::create(['short_name' => 'ml', 'name' => 'Millilitre']);
         }
 
@@ -44,14 +44,14 @@ class BarSeeder extends Seeder
 
         // ─── 2. Bar inventory category ─────────────────────────────────────
         $fb = InventoryCategory::where('name', 'F&B')->first();
-        if (!$fb) {
+        if (! $fb) {
             $fb = InventoryCategory::create(['name' => 'F&B', 'parent_id' => null, 'description' => 'Food & Beverage']);
         }
         $catBar = InventoryCategory::firstOrCreate(
             ['name' => 'Bar'],
             ['parent_id' => $fb->id, 'description' => 'Spirits, beer, liquor']
         );
-        if (!$catBar->parent_id) {
+        if (! $catBar->parent_id) {
             $catBar->update(['parent_id' => $fb->id]);
         }
 
@@ -98,24 +98,26 @@ class BarSeeder extends Seeder
         // Spirits: ml (bottles × ml). Beer: Pcs (bottles)
         $stockData = [
             'Johnnie Walker Red 750ml' => 12 * 750,
-            'Royal Challenge 750ml'    => 12 * 750,
+            'Royal Challenge 750ml' => 12 * 750,
             'Kingfisher Premium 650ml' => 48,
-            'Bira 91 Blonde 330ml'     => 48,
+            'Bira 91 Blonde 330ml' => 48,
         ];
 
         foreach (array_filter([$mainStore, $barStore]) as $loc) {
             foreach ($stockData as $itemName => $qty) {
-                if (!isset($itemMap[$itemName])) continue;
+                if (! isset($itemMap[$itemName])) {
+                    continue;
+                }
                 DB::table('inventory_item_locations')->updateOrInsert(
                     [
-                        'inventory_item_id'     => $itemMap[$itemName]->id,
+                        'inventory_item_id' => $itemMap[$itemName]->id,
                         'inventory_location_id' => $loc->id,
                     ],
                     [
-                        'quantity'      => $qty,
+                        'quantity' => $qty,
                         'reorder_level' => 0,
-                        'created_at'    => now(),
-                        'updated_at'    => now(),
+                        'created_at' => now(),
+                        'updated_at' => now(),
                     ]
                 );
             }
@@ -132,14 +134,14 @@ class BarSeeder extends Seeder
         $barOutlet = RestaurantMaster::firstOrCreate(
             ['name' => 'BAR'],
             [
-                'floor'       => null,
+                'floor' => null,
                 'description' => 'Champions',
-                'is_active'   => true,
-                'address'     => 'EDATHUVA - CHAMPAKKULAM ROAD NEAR EDATHUA POLIC STATION',
-                'email'       => 'passionshotel@gmail.com',
-                'phone'       => '9496428888',
-                'gstin'       => '32AQOPP9995P2ZG',
-                'fssai'       => '00111111111',
+                'is_active' => true,
+                'address' => 'EDATHUVA - CHAMPAKKULAM ROAD NEAR EDATHUA POLIC STATION',
+                'email' => 'passionshotel@gmail.com',
+                'phone' => '9496428888',
+                'gstin' => '32AQOPP9995P2ZG',
+                'fssai' => '00111111111',
             ]
         );
         if ($barStore) {
@@ -254,7 +256,7 @@ class BarSeeder extends Seeder
         }
 
         $this->command->info('Bar seeder complete.');
-        $this->command->info('  Inventory items: ' . count($itemMap));
-        $this->command->info('  Menu items: ' . (count($spiritMenuItems) + count($beerMenuItems)));
+        $this->command->info('  Inventory items: '.count($itemMap));
+        $this->command->info('  Menu items: '.(count($spiritMenuItems) + count($beerMenuItems)));
     }
 }

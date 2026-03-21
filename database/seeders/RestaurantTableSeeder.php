@@ -2,22 +2,26 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
 use App\Models\Department;
-use App\Models\RestaurantMaster;
+use App\Models\InventoryLocation;
 use App\Models\RestaurantCombo;
+use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
 use App\Models\RestaurantMenuItemVariant;
 use App\Models\RestaurantTable;
 use App\Models\TableCategory;
-use App\Models\InventoryLocation;
+use Illuminate\Database\Seeder;
 
 class RestaurantTableSeeder extends Seeder
 {
     private const ADDRESS = 'EDATHUVA - CHAMPAKKULAM ROAD NEAR EDATHUA POLIC STATION';
+
     private const EMAIL = 'passionshotel@gmail.com';
+
     private const PHONE = '9496428888';
+
     private const GSTIN = '32AQOPP9995P2ZG';
+
     private const FSSAI = '00111111111';
 
     public function run(): void
@@ -37,14 +41,14 @@ class RestaurantTableSeeder extends Seeder
         $ottaal = RestaurantMaster::updateOrCreate(
             ['name' => 'OTTAAL'],
             [
-                'floor'        => null,
-                'description'  => 'Restaurant',
-                'is_active'    => true,
-                'address'      => self::ADDRESS,
-                'email'        => self::EMAIL,
-                'phone'        => self::PHONE,
-                'gstin'        => self::GSTIN,
-                'fssai'        => self::FSSAI,
+                'floor' => null,
+                'description' => 'Restaurant',
+                'is_active' => true,
+                'address' => self::ADDRESS,
+                'email' => self::EMAIL,
+                'phone' => self::PHONE,
+                'gstin' => self::GSTIN,
+                'fssai' => self::FSSAI,
             ]
         );
 
@@ -52,14 +56,14 @@ class RestaurantTableSeeder extends Seeder
         $bar = RestaurantMaster::updateOrCreate(
             ['name' => 'BAR'],
             [
-                'floor'        => null,
-                'description'  => 'Champions',
-                'is_active'    => true,
-                'address'      => self::ADDRESS,
-                'email'        => self::EMAIL,
-                'phone'        => self::PHONE,
-                'gstin'        => self::GSTIN,
-                'fssai'        => self::FSSAI,
+                'floor' => null,
+                'description' => 'Champions',
+                'is_active' => true,
+                'address' => self::ADDRESS,
+                'email' => self::EMAIL,
+                'phone' => self::PHONE,
+                'gstin' => self::GSTIN,
+                'fssai' => self::FSSAI,
             ]
         );
 
@@ -92,9 +96,9 @@ class RestaurantTableSeeder extends Seeder
                 ['table_number' => $num, 'restaurant_master_id' => $ottaal->id],
                 [
                     'category_id' => $cat->id,
-                    'capacity'    => $cap,
-                    'status'      => 'available',
-                    'location'    => null,
+                    'capacity' => $cap,
+                    'status' => 'available',
+                    'location' => null,
                 ]
             );
         }
@@ -110,9 +114,9 @@ class RestaurantTableSeeder extends Seeder
                 ['table_number' => $num, 'restaurant_master_id' => $bar->id],
                 [
                     'category_id' => $cat->id,
-                    'capacity'    => $cap,
-                    'status'      => 'available',
-                    'location'    => null,
+                    'capacity' => $cap,
+                    'status' => 'available',
+                    'location' => null,
                 ]
             );
         }
@@ -135,6 +139,6 @@ class RestaurantTableSeeder extends Seeder
 
         $this->command->info('Restaurant & Table seeder completed.');
         $this->command->info('  Outlets     : 2 (OTTAAL, BAR)');
-        $this->command->info('  Tables      : ' . RestaurantTable::count());
+        $this->command->info('  Tables      : '.RestaurantTable::count());
     }
 }

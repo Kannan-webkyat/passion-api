@@ -2,23 +2,23 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
-use App\Models\Vendor;
-use App\Models\InventoryUom;
+use App\Models\DietaryType;
 use App\Models\InventoryCategory;
-use App\Models\InventoryTax;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
-use App\Models\DietaryType;
+use App\Models\InventoryTax;
+use App\Models\InventoryUom;
 use App\Models\MenuCategory;
-use App\Models\MenuSubCategory;
 use App\Models\MenuItem;
+use App\Models\MenuSubCategory;
 use App\Models\Recipe;
 use App\Models\RecipeIngredient;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
+use App\Models\Vendor;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class FreshBiryaniTeaCoffeeSeeder extends Seeder
 {
@@ -111,7 +111,7 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
 
         // ─── 4. Tax ────────────────────────────────────────────────────────
         $gst5 = InventoryTax::where('rate', 5)->first();
-        if (!$gst5) {
+        if (! $gst5) {
             $gst5 = InventoryTax::create(['name' => 'GST 5% (Local)', 'rate' => 5, 'type' => 'local']);
         }
 
@@ -176,46 +176,48 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
         // Stock per item: Main Store + Kitchen (each gets same qty in issue UOM)
         // Gm items: 20000 = 20 kg, 10000 = 10 kg, etc. | Ml: 20000 = 20 Ltr | Pcs: 120 = 10 dozen
         $stockQty = [
-            'Chicken (Bone-in)'   => 20000,  // 20 kg
-            'Mutton'              => 15000,  // 15 kg
-            'Basmati Rice'        => 25000,  // 25 kg
-            'Onion'               => 10000,  // 10 kg
-            'Tomato'              => 10000,  // 10 kg
-            'Mint Leaves'         => 2000,   // 2 kg
-            'Coriander Leaves'    => 2000,   // 2 kg
-            'Curd (Yogurt)'       => 5000,   // 5 kg
-            'Desi Ghee'           => 5000,   // 5 kg
-            'Sunflower Oil'       => 20000,  // 20 Ltr (ml)
+            'Chicken (Bone-in)' => 20000,  // 20 kg
+            'Mutton' => 15000,  // 15 kg
+            'Basmati Rice' => 25000,  // 25 kg
+            'Onion' => 10000,  // 10 kg
+            'Tomato' => 10000,  // 10 kg
+            'Mint Leaves' => 2000,   // 2 kg
+            'Coriander Leaves' => 2000,   // 2 kg
+            'Curd (Yogurt)' => 5000,   // 5 kg
+            'Desi Ghee' => 5000,   // 5 kg
+            'Sunflower Oil' => 20000,  // 20 Ltr (ml)
             'Ginger-Garlic Paste' => 5000,   // 5 kg
-            'Biryani Masala'      => 2000,   // 2 kg
-            'Red Chilli Powder'   => 2000,   // 2 kg
-            'Turmeric Powder'     => 1000,   // 1 kg
-            'Garam Masala'        => 1000,   // 1 kg
-            'Salt'                => 10000,  // 10 kg
-            'Saffron'             => 50,     // 50 gm (expensive)
-            'Tea Leaves'          => 5000,   // 5 kg
-            'Coffee Powder'       => 2000,   // 2 kg
-            'Milk'                => 20000,  // 20 Ltr (ml)
-            'Sugar'               => 10000,  // 10 kg
-            'Cardamom'            => 500,    // 500 gm
-            'Cinnamon'            => 500,    // 500 gm
-            'Ginger'              => 2000,   // 2 kg
-            'Potato'               => 15000, // 15 kg
-            'Eggs'                => 120,    // 120 pcs (10 dozen)
-            'Butter'               => 2000,   // 2 kg
-            'Green Chilli'         => 2000,   // 2 kg
+            'Biryani Masala' => 2000,   // 2 kg
+            'Red Chilli Powder' => 2000,   // 2 kg
+            'Turmeric Powder' => 1000,   // 1 kg
+            'Garam Masala' => 1000,   // 1 kg
+            'Salt' => 10000,  // 10 kg
+            'Saffron' => 50,     // 50 gm (expensive)
+            'Tea Leaves' => 5000,   // 5 kg
+            'Coffee Powder' => 2000,   // 2 kg
+            'Milk' => 20000,  // 20 Ltr (ml)
+            'Sugar' => 10000,  // 10 kg
+            'Cardamom' => 500,    // 500 gm
+            'Cinnamon' => 500,    // 500 gm
+            'Ginger' => 2000,   // 2 kg
+            'Potato' => 15000, // 15 kg
+            'Eggs' => 120,    // 120 pcs (10 dozen)
+            'Butter' => 2000,   // 2 kg
+            'Green Chilli' => 2000,   // 2 kg
         ];
 
         foreach (array_filter([$mainStore, $kitchen]) as $loc) {
             foreach ($stockQty as $itemName => $qty) {
-                if (!isset($itemMap[$itemName])) continue;
+                if (! isset($itemMap[$itemName])) {
+                    continue;
+                }
                 DB::table('inventory_item_locations')->insert([
-                    'inventory_item_id'     => $itemMap[$itemName]->id,
+                    'inventory_item_id' => $itemMap[$itemName]->id,
                     'inventory_location_id' => $loc->id,
-                    'quantity'              => $qty,
-                    'reorder_level'         => 0,
-                    'created_at'            => now(),
-                    'updated_at'            => now(),
+                    'quantity' => $qty,
+                    'reorder_level' => 0,
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
             }
         }
@@ -467,10 +469,10 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
         }
 
         $this->command->info('Fresh Biryani, Tea, Coffee seeder complete.');
-        $this->command->info('  Vendors: ' . count($vendorMap));
-        $this->command->info('  UOMs: ' . count($uomMap));
-        $this->command->info('  Inventory items: ' . count($itemMap));
-        $this->command->info('  Menu items: ' . count($menuItemMap));
+        $this->command->info('  Vendors: '.count($vendorMap));
+        $this->command->info('  UOMs: '.count($uomMap));
+        $this->command->info('  Inventory items: '.count($itemMap));
+        $this->command->info('  Menu items: '.count($menuItemMap));
         $this->command->info('  Recipes: 8');
     }
 }

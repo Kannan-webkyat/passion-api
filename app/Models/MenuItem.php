@@ -13,9 +13,9 @@ class MenuItem extends Model
     ];
 
     protected $casts = [
-        'is_active'      => 'boolean',
+        'is_active' => 'boolean',
         'is_direct_sale' => 'boolean',
-        'price'          => 'decimal:2',
+        'price' => 'decimal:2',
     ];
 
     public function tax()

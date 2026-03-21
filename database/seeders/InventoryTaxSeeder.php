@@ -2,8 +2,8 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
 use App\Models\InventoryTax;
+use Illuminate\Database\Seeder;
 
 class InventoryTaxSeeder extends Seeder
 {

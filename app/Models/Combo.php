@@ -3,13 +3,12 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Combo extends Model
 {
     protected $fillable = [
-        'name', 'price', 'fixed_ept', 'is_active'
+        'name', 'price', 'fixed_ept', 'is_active',
     ];
 
     protected $casts = [

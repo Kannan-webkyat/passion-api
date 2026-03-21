@@ -12,6 +12,7 @@ class Setting extends Model
     public static function get(string $key, mixed $default = null): mixed
     {
         $setting = Cache::remember("setting.{$key}", 300, fn () => self::where('key', $key)->first());
+
         return $setting ? ($setting->value ?: $default) : $default;
     }
 
@@ -25,9 +26,9 @@ class Setting extends Model
     {
         return [
             'address' => self::get('receipt_address', ''),
-            'email'   => self::get('receipt_email', ''),
-            'phone'   => self::get('receipt_phone', ''),
-            'logo_url' => self::get('receipt_logo_path') ? asset('storage/' . self::get('receipt_logo_path')) : null,
+            'email' => self::get('receipt_email', ''),
+            'phone' => self::get('receipt_phone', ''),
+            'logo_url' => self::get('receipt_logo_path') ? asset('storage/'.self::get('receipt_logo_path')) : null,
         ];
     }
 }

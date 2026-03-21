@@ -7,20 +7,20 @@ use Illuminate\Database\Eloquent\Model;
 class RoomType extends Model
 {
     protected $fillable = [
-        'name', 
-        'description', 
+        'name',
+        'description',
         'is_active',
-        'base_price', 
+        'base_price',
         'breakfast_price',
         'child_breakfast_price',
-        'extra_bed_cost', 
-        'base_occupancy', 
-        'capacity', 
-        'extra_bed_capacity', 
-        'child_sharing_limit', 
-        'bed_config', 
+        'extra_bed_cost',
+        'base_occupancy',
+        'capacity',
+        'extra_bed_capacity',
+        'child_sharing_limit',
+        'bed_config',
         'amenities',
-        'tax_id'
+        'tax_id',
     ];
 
     protected $casts = [

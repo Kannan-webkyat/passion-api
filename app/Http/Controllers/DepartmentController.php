@@ -10,9 +10,10 @@ class DepartmentController extends Controller
     public function index(Request $request)
     {
         $query = Department::withCount('users', 'locations');
-        if (!$request->boolean('include_inactive')) {
+        if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
+
         return response()->json($query->get());
     }
 
@@ -21,10 +22,11 @@ class DepartmentController extends Controller
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:50|unique:departments,code',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
         ]);
 
         $department = Department::create($validated);
+
         return response()->json($department, 201);
     }
 
@@ -37,20 +39,26 @@ class DepartmentController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'code' => 'required|string|max:50|unique:departments,code,' . $department->id,
-            'is_active' => 'boolean'
+            'code' => 'required|string|max:50|unique:departments,code,'.$department->id,
+            'is_active' => 'boolean',
         ]);
 
         $department->update($validated);
+
         return response()->json($department);
     }
 
     public function destroy(Department $department)
     {
-        if ($department->locations()->count() > 0) {
-            return response()->json(['message' => 'Cannot delete department with linked locations'], 422);
+        try {
+            $department->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete department as it has linked locations, users, or historical transactions.'], 409);
+            }
+            throw $e;
         }
-        $department->delete();
-        return response()->json(null, 204);
     }
 }

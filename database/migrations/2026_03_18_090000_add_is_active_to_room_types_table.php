@@ -9,7 +9,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('room_types', function (Blueprint $table) {
-            if (!Schema::hasColumn('room_types', 'is_active')) {
+            if (! Schema::hasColumn('room_types', 'is_active')) {
                 $table->boolean('is_active')->default(true)->after('amenities');
             }
         });
@@ -24,4 +24,3 @@ return new class extends Migration
         });
     }
 };
-

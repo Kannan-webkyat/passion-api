@@ -11,10 +11,10 @@ class Recipe extends Model
     ];
 
     protected $casts = [
-        'is_active'           => 'boolean',
+        'is_active' => 'boolean',
         'requires_production' => 'boolean',
-        'yield_quantity'    => 'decimal:3',
-        'food_cost_target'  => 'decimal:2',
+        'yield_quantity' => 'decimal:3',
+        'food_cost_target' => 'decimal:2',
     ];
 
     public function menuItem()

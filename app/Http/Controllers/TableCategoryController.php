@@ -15,12 +15,13 @@ class TableCategoryController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'name'        => 'required|string|max:255',
-            'capacity'    => 'required|integer|min:1',
+            'name' => 'required|string|max:255',
+            'capacity' => 'required|integer|min:1',
             'description' => 'nullable|string',
         ]);
 
         $category = TableCategory::create($validated);
+
         return response()->json($category, 201);
     }
 
@@ -32,18 +33,20 @@ class TableCategoryController extends Controller
     public function update(Request $request, TableCategory $tableCategory)
     {
         $validated = $request->validate([
-            'name'        => 'sometimes|required|string|max:255',
-            'capacity'    => 'sometimes|required|integer|min:1',
+            'name' => 'sometimes|required|string|max:255',
+            'capacity' => 'sometimes|required|integer|min:1',
             'description' => 'nullable|string',
         ]);
 
         $tableCategory->update($validated);
+
         return response()->json($tableCategory);
     }
 
     public function destroy(TableCategory $tableCategory)
     {
         $tableCategory->delete();
+
         return response()->json(null, 204);
     }
 }

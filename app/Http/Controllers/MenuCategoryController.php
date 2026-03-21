@@ -16,10 +16,11 @@ class MenuCategoryController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
         ]);
-        
+
         $category = MenuCategory::create($validated);
+
         return response()->json($category, 201);
     }
 
@@ -32,16 +33,25 @@ class MenuCategoryController extends Controller
     {
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
-            'is_active' => 'boolean'
+            'is_active' => 'boolean',
         ]);
 
         $menuCategory->update($validated);
+
         return response()->json($menuCategory);
     }
 
     public function destroy(MenuCategory $menuCategory)
     {
-        $menuCategory->delete();
-        return response()->json(null, 204);
+        try {
+            $menuCategory->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete menu category because it contains items that are referenced in existing orders or recipes. Please disable it instead.'], 409);
+            }
+            throw $e;
+        }
     }
 }

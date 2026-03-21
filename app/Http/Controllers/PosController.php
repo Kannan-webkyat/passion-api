@@ -4,23 +4,22 @@ namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use App\Models\Combo;
-use App\Models\RestaurantCombo;
-use App\Models\MenuItem;
-use App\Models\MenuItemVariant;
+use App\Models\InventoryItem;
+use App\Models\InventoryLocation;
+use App\Models\InventoryTransaction;
 use App\Models\MenuCategory;
+use App\Models\MenuItem;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
 use App\Models\PosOrderRefund;
 use App\Models\PosPayment;
 use App\Models\Recipe;
-use App\Models\InventoryItem;
-use App\Models\InventoryLocation;
-use App\Models\InventoryTransaction;
+use App\Models\RestaurantCombo;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
 use App\Models\RestaurantMenuItemVariant;
-use App\Models\Setting;
 use App\Models\RestaurantTable;
+use App\Models\Setting;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -40,7 +39,7 @@ class PosController extends Controller
             ->keyBy('id');
 
         $currentId = $request->integer('current_waiter_id');
-        if ($currentId && !$users->has($currentId)) {
+        if ($currentId && ! $users->has($currentId)) {
             $current = User::find($currentId, ['id', 'name']);
             if ($current) {
                 $users->put($current->id, ['id' => $current->id, 'name' => $current->name]);
@@ -86,25 +85,25 @@ class PosController extends Controller
             ->map(function ($order) {
                 $kotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
                 $itemCount = $kotItems->sum('quantity');
-                $total     = $kotItems->sum(fn($i) => $i->quantity * $i->unit_price);
-                $readyBatches = $kotItems->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray();
-                $servedBatches = $kotItems->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray();
+                $total = $kotItems->sum(fn ($i) => $i->quantity * $i->unit_price);
+                $readyBatches = $kotItems->filter(fn ($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray();
+                $servedBatches = $kotItems->filter(fn ($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray();
 
                 return [
-                    'id'             => $order->id,
-                    'order_type'     => $order->order_type,
-                    'status'         => $order->status,
+                    'id' => $order->id,
+                    'order_type' => $order->order_type,
+                    'status' => $order->status,
                     'kitchen_status' => $order->kitchen_status ?? 'pending',
-                    'ready_batches'  => $readyBatches,
+                    'ready_batches' => $readyBatches,
                     'served_batches' => $servedBatches,
-                    'room_number'       => $order->room?->room_number,
-                    'customer_name'     => $order->customer_name,
-                    'customer_phone'    => $order->customer_phone,
-                    'delivery_address'  => $order->delivery_address,
-                    'delivery_channel'  => $order->delivery_channel,
-                    'item_count'     => (int) $itemCount,
-                    'total'          => (float) $total,
-                    'opened_at'      => $order->created_at,
+                    'room_number' => $order->room?->room_number,
+                    'customer_name' => $order->customer_name,
+                    'customer_phone' => $order->customer_phone,
+                    'delivery_address' => $order->delivery_address,
+                    'delivery_channel' => $order->delivery_channel,
+                    'item_count' => (int) $itemCount,
+                    'total' => (float) $total,
+                    'opened_at' => $order->created_at,
                 ];
             });
 
@@ -126,15 +125,16 @@ class PosController extends Controller
         $defaults = Setting::getReceiptDefaults();
         $config = [
             'restaurant_name' => $restaurant->name,
-            'address'         => $restaurant->address ?: ($defaults['address'] ?? ''),
-            'email'           => $restaurant->email ?: ($defaults['email'] ?? ''),
-            'phone'           => $restaurant->phone ?: ($defaults['phone'] ?? ''),
-            'gstin'           => $restaurant->gstin ?: '',
-            'fssai'           => $restaurant->fssai ?: '',
-            'logo_url'        => $restaurant->logo_path
-                ? asset('storage/' . $restaurant->logo_path)
+            'address' => $restaurant->address ?: ($defaults['address'] ?? ''),
+            'email' => $restaurant->email ?: ($defaults['email'] ?? ''),
+            'phone' => $restaurant->phone ?: ($defaults['phone'] ?? ''),
+            'gstin' => $restaurant->gstin ?: '',
+            'fssai' => $restaurant->fssai ?: '',
+            'logo_url' => $restaurant->logo_path
+                ? asset('storage/'.$restaurant->logo_path)
                 : ($defaults['logo_url'] ?? null),
         ];
+
         return response()->json($config);
     }
 
@@ -155,29 +155,29 @@ class PosController extends Controller
                     ->first();
 
                 $readyBatches = $openOrder
-                    ? $openOrder->items->where('kot_sent', true)->where('status', 'active')->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray()
+                    ? $openOrder->items->where('kot_sent', true)->where('status', 'active')->filter(fn ($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray()
                     : [];
                 $servedBatches = $openOrder
-                    ? $openOrder->items->where('kot_sent', true)->where('status', 'active')->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray()
+                    ? $openOrder->items->where('kot_sent', true)->where('status', 'active')->filter(fn ($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray()
                     : [];
 
                 return [
-                    'id'           => $table->id,
+                    'id' => $table->id,
                     'table_number' => $table->table_number,
-                    'capacity'     => $table->capacity,
-                    'status'       => $table->status,
-                    'location'     => $table->location,
-                    'category'     => $table->category,
-                    'open_order'   => $openOrder ? [
-                        'id'             => $openOrder->id,
-                        'status'         => $openOrder->status,
+                    'capacity' => $table->capacity,
+                    'status' => $table->status,
+                    'location' => $table->location,
+                    'category' => $table->category,
+                    'open_order' => $openOrder ? [
+                        'id' => $openOrder->id,
+                        'status' => $openOrder->status,
                         'kitchen_status' => $openOrder->kitchen_status ?? 'pending',
-                        'ready_batches'  => $readyBatches,
+                        'ready_batches' => $readyBatches,
                         'served_batches' => $servedBatches,
-                        'covers'         => $openOrder->covers,
-                        'item_count'     => $openOrder->items->sum('quantity'),
-                        'total'          => $openOrder->total_amount,
-                        'opened_at'      => $openOrder->opened_at,
+                        'covers' => $openOrder->covers,
+                        'item_count' => $openOrder->items->sum('quantity'),
+                        'total' => $openOrder->total_amount,
+                        'opened_at' => $openOrder->opened_at,
                     ] : null,
                 ];
             });
@@ -199,7 +199,7 @@ class PosController extends Controller
             ->select('recipes.menu_item_id', DB::raw('COALESCE(SUM(production_logs.quantity_produced), 0) as total'))
             ->groupBy('recipes.menu_item_id')
             ->pluck('total', 'menu_item_id')
-            ->map(fn($v) => (float) $v);
+            ->map(fn ($v) => (float) $v);
 
         // Total portions already committed (active items in non-void orders)
         $sold = DB::table('pos_order_items')
@@ -210,7 +210,7 @@ class PosController extends Controller
             ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
             ->groupBy('pos_order_items.menu_item_id')
             ->pluck('total', 'menu_item_id')
-            ->map(fn($v) => (float) $v);
+            ->map(fn ($v) => (float) $v);
 
         // Add sold from combo items (constituent menu items)
         $comboSold = DB::table('pos_order_items')
@@ -222,7 +222,7 @@ class PosController extends Controller
             ->select('combo_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
             ->groupBy('combo_items.menu_item_id')
             ->pluck('total', 'menu_item_id')
-            ->map(fn($v) => (float) $v);
+            ->map(fn ($v) => (float) $v);
         foreach ($comboSold as $mid => $cnt) {
             $sold->put($mid, ($sold->get($mid, 0) + $cnt));
         }
@@ -235,15 +235,15 @@ class PosController extends Controller
                 ->get()
                 ->keyBy('menu_item_id');
 
-            $categories = MenuCategory::with(['items' => function ($q) use ($restaurantId, $rmiByItem) {
+            $categories = MenuCategory::with(['items' => function ($q) use ($rmiByItem) {
                 $q->with(['tax', 'variants'])->where('menu_items.is_active', true)
                     ->whereIn('menu_items.id', $rmiByItem->keys()->toArray())
                     ->orderBy('name');
-            }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
+            }])->get()->filter(fn ($c) => $c->items->isNotEmpty())->values();
 
             $rviByRmiAndVariant = RestaurantMenuItemVariant::whereIn('restaurant_menu_item_id', $rmiByItem->values()->pluck('id'))
                 ->get()
-                ->keyBy(fn ($rvi) => $rvi->restaurant_menu_item_id . '_' . $rvi->menu_item_variant_id);
+                ->keyBy(fn ($rvi) => $rvi->restaurant_menu_item_id.'_'.$rvi->menu_item_variant_id);
 
             $categories->each(function ($cat) use ($produced, $sold, $rmiByItem, $rviByRmiAndVariant) {
                 $cat->items->each(function ($item) use ($produced, $sold, $rmiByItem, $rviByRmiAndVariant) {
@@ -255,9 +255,12 @@ class PosController extends Controller
                         $item->variants = $item->variants->map(function ($v) use ($rmi, $rviByRmiAndVariant) {
                             $price = (float) $v->price;
                             if ($rmi) {
-                                $rvi = $rviByRmiAndVariant->get($rmi->id . '_' . $v->id);
-                                if ($rvi) $price = (float) $rvi->price;
+                                $rvi = $rviByRmiAndVariant->get($rmi->id.'_'.$v->id);
+                                if ($rvi) {
+                                    $price = (float) $rvi->price;
+                                }
                             }
+
                             return ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $price];
                         })->values();
                     } else {
@@ -273,7 +276,7 @@ class PosController extends Controller
         } else {
             $categories = MenuCategory::with(['items' => function ($q) {
                 $q->with(['tax', 'variants'])->where('is_active', true)->orderBy('name');
-            }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
+            }])->get()->filter(fn ($c) => $c->items->isNotEmpty())->values();
 
             $categories->each(function ($cat) use ($produced, $sold) {
                 $cat->items->each(function ($item) use ($produced, $sold) {
@@ -311,30 +314,31 @@ class PosController extends Controller
                             $availables[] = max(0, $produced[$mi->id] - ($sold->get($mi->id, 0)));
                         }
                     }
-                    if (!empty($availables)) {
+                    if (! empty($availables)) {
                         $availableQty = (int) min($availables);
                     }
                 }
                 $price = $restaurantComboPrices->has($c->id)
                     ? (string) $restaurantComboPrices[$c->id]
                     : (string) $c->price;
+
                 return (object) [
-                    'id'            => $c->id,
-                    'name'          => $c->name,
-                    'price'         => $price,
-                    'type'          => 'combo',
-                    'item_code'     => 'COMBO-' . $c->id,
+                    'id' => $c->id,
+                    'name' => $c->name,
+                    'price' => $price,
+                    'type' => 'combo',
+                    'item_code' => 'COMBO-'.$c->id,
                     'available_qty' => $availableQty,
-                    'combo_id'      => $c->id,
-                    'menu_items'    => $c->menuItems->map(fn ($m) => ['id' => $m->id, 'name' => $m->name])->toArray(),
+                    'combo_id' => $c->id,
+                    'menu_items' => $c->menuItems->map(fn ($m) => ['id' => $m->id, 'name' => $m->name])->toArray(),
                 ];
             });
 
         if ($combos->isNotEmpty()) {
             $categories = $categories->push((object) [
-                'id'       => 0,
-                'name'     => 'Combos',
-                'items'    => $combos->values()->all(),
+                'id' => 0,
+                'name' => 'Combos',
+                'items' => $combos->values()->all(),
             ]);
         }
 
@@ -348,18 +352,18 @@ class PosController extends Controller
         $orderType = $request->input('order_type', 'dine_in');
 
         $rules = [
-            'order_type'     => 'nullable|in:dine_in,takeaway,room_service,delivery,walk_in',
-            'restaurant_id'  => 'required|exists:restaurant_masters,id',
-            'covers'         => 'required|integer|min:1',
-            'customer_name'  => 'nullable|string|max:191',
+            'order_type' => 'nullable|in:dine_in,takeaway,room_service,delivery,walk_in',
+            'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'covers' => 'required|integer|min:1',
+            'customer_name' => 'nullable|string|max:191',
             'customer_phone' => 'nullable|string|max:30',
-            'tax_exempt'     => 'nullable|boolean',
+            'tax_exempt' => 'nullable|boolean',
         ];
 
         if ($orderType === 'dine_in') {
             $rules['table_id'] = 'required|exists:restaurant_tables,id';
         } elseif ($orderType === 'room_service') {
-            $rules['room_id']    = 'required|exists:rooms,id';
+            $rules['room_id'] = 'required|exists:rooms,id';
             $rules['booking_id'] = 'nullable|exists:bookings,id';
         } elseif ($orderType === 'delivery') {
             $rules['delivery_address'] = 'required|string|max:500';
@@ -381,21 +385,21 @@ class PosController extends Controller
 
         $order = DB::transaction(function () use ($validated, $orderType) {
             $order = PosOrder::create([
-                'order_type'     => $orderType,
-                'table_id'       => $orderType === 'dine_in' ? $validated['table_id'] : null,
-                'restaurant_id'  => $validated['restaurant_id'],
-                'room_id'        => $validated['room_id'] ?? null,
-                'booking_id'     => $validated['booking_id'] ?? null,
-                'customer_name'     => $validated['customer_name'] ?? null,
-                'customer_phone'    => $validated['customer_phone'] ?? null,
-                'delivery_address'  => $validated['delivery_address'] ?? null,
-                'delivery_channel'  => $validated['delivery_channel'] ?? null,
-                'waiter_id'         => auth()->id(),
-                'opened_by'      => auth()->id(),
-                'tax_exempt'     => (bool) ($validated['tax_exempt'] ?? false),
-                'covers'         => $validated['covers'],
-                'status'         => 'open',
-                'opened_at'      => now(),
+                'order_type' => $orderType,
+                'table_id' => $orderType === 'dine_in' ? $validated['table_id'] : null,
+                'restaurant_id' => $validated['restaurant_id'],
+                'room_id' => $validated['room_id'] ?? null,
+                'booking_id' => $validated['booking_id'] ?? null,
+                'customer_name' => $validated['customer_name'] ?? null,
+                'customer_phone' => $validated['customer_phone'] ?? null,
+                'delivery_address' => $validated['delivery_address'] ?? null,
+                'delivery_channel' => $validated['delivery_channel'] ?? null,
+                'waiter_id' => auth()->id(),
+                'opened_by' => auth()->id(),
+                'tax_exempt' => (bool) ($validated['tax_exempt'] ?? false),
+                'covers' => $validated['covers'],
+                'status' => 'open',
+                'opened_at' => now(),
             ]);
 
             if ($orderType === 'dine_in') {
@@ -415,11 +419,11 @@ class PosController extends Controller
     {
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
-            'order_id'      => 'nullable|integer|min:1',
-            'from'          => 'nullable|date',
-            'to'            => 'nullable|date|after_or_equal:from',
-            'page'          => 'nullable|integer|min:1',
-            'per_page'      => 'nullable|integer|min:1|max:100',
+            'order_id' => 'nullable|integer|min:1',
+            'from' => 'nullable|date',
+            'to' => 'nullable|date|after_or_equal:from',
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
         $query = PosOrder::with(['room', 'table', 'refunds'])
@@ -427,13 +431,13 @@ class PosController extends Controller
             ->whereIn('status', ['paid', 'refunded'])
             ->orderByDesc('closed_at');
 
-        if (!empty($validated['order_id'])) {
+        if (! empty($validated['order_id'])) {
             $query->where('id', (int) $validated['order_id']);
         } else {
-            if (!empty($validated['from'])) {
+            if (! empty($validated['from'])) {
                 $query->whereDate('closed_at', '>=', $validated['from']);
             }
-            if (!empty($validated['to'])) {
+            if (! empty($validated['to'])) {
                 $query->whereDate('closed_at', '<=', $validated['to']);
             }
         }
@@ -442,23 +446,23 @@ class PosController extends Controller
         $paginated = $query->paginate($perPage);
 
         $orders = $paginated->getCollection()->map(fn ($o) => [
-            'id'              => $o->id,
-            'order_type'      => $o->order_type,
-            'customer_name'   => $o->customer_name,
-            'room_number'     => $o->room?->room_number,
-            'table_number'    => $o->table?->table_number,
-            'total_amount'    => (float) $o->total_amount,
-            'refunded_amount'  => (float) $o->refunds->sum('amount'),
-            'status'          => $o->status,
-            'closed_at'       => $o->closed_at,
+            'id' => $o->id,
+            'order_type' => $o->order_type,
+            'customer_name' => $o->customer_name,
+            'room_number' => $o->room?->room_number,
+            'table_number' => $o->table?->table_number,
+            'total_amount' => (float) $o->total_amount,
+            'refunded_amount' => (float) $o->refunds->sum('amount'),
+            'status' => $o->status,
+            'closed_at' => $o->closed_at,
         ]);
 
         return response()->json([
-            'data'         => $orders->values()->all(),
+            'data' => $orders->values()->all(),
             'current_page' => $paginated->currentPage(),
-            'last_page'    => $paginated->lastPage(),
-            'per_page'     => $paginated->perPage(),
-            'total'        => $paginated->total(),
+            'last_page' => $paginated->lastPage(),
+            'per_page' => $paginated->perPage(),
+            'total' => $paginated->total(),
         ]);
     }
 
@@ -473,19 +477,19 @@ class PosController extends Controller
 
     public function updateOrder(Request $request, PosOrder $order)
     {
-        if (!in_array($order->status, ['open', 'billed'])) {
+        if (! in_array($order->status, ['open', 'billed'])) {
             return response()->json(['message' => 'Order is not editable.'], 422);
         }
 
         $rules = [
-            'customer_name'     => 'nullable|string|max:191',
-            'customer_phone'    => 'nullable|string|max:30',
-            'delivery_address'  => 'nullable|string|max:500',
-            'delivery_channel'  => 'nullable|string|in:own_driver,swiggy,zomato,dunzo,other',
-            'covers'            => 'nullable|integer|min:1',
-            'notes'             => 'nullable|string|max:1000',
-            'waiter_id'         => 'nullable|exists:users,id',
-            'tax_exempt'        => 'nullable|boolean',
+            'customer_name' => 'nullable|string|max:191',
+            'customer_phone' => 'nullable|string|max:30',
+            'delivery_address' => 'nullable|string|max:500',
+            'delivery_channel' => 'nullable|string|in:own_driver,swiggy,zomato,dunzo,other',
+            'covers' => 'nullable|integer|min:1',
+            'notes' => 'nullable|string|max:1000',
+            'waiter_id' => 'nullable|exists:users,id',
+            'tax_exempt' => 'nullable|boolean',
         ];
         $validated = $request->validate($rules);
 
@@ -536,7 +540,7 @@ class PosController extends Controller
         if ($order->order_type !== 'dine_in') {
             return response()->json(['message' => 'Only dine-in orders can be transferred.'], 422);
         }
-        if (!in_array($order->status, ['open', 'billed'])) {
+        if (! in_array($order->status, ['open', 'billed'])) {
             return response()->json(['message' => 'Order is not transferable.'], 422);
         }
 
@@ -582,12 +586,12 @@ class PosController extends Controller
         }
 
         $validated = $request->validate([
-            'items'                => 'present|array',
+            'items' => 'present|array',
             'items.*.menu_item_id' => 'nullable|exists:menu_items,id',
             'items.*.menu_item_variant_id' => 'nullable|exists:menu_item_variants,id',
-            'items.*.combo_id'    => 'nullable|exists:combos,id',
-            'items.*.quantity'     => 'required|integer|min:1',
-            'items.*.notes'        => 'nullable|string',
+            'items.*.combo_id' => 'nullable|exists:combos,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'items.*.notes' => 'nullable|string',
         ]);
 
         foreach ($validated['items'] as $i => $row) {
@@ -598,11 +602,11 @@ class PosController extends Controller
                     'message' => "Item at index {$i} must have exactly one of menu_item_id or combo_id.",
                 ], 422);
             }
-            if ($hasMenu && !empty($row['menu_item_variant_id'])) {
+            if ($hasMenu && ! empty($row['menu_item_variant_id'])) {
                 $variant = \App\Models\MenuItemVariant::where('id', $row['menu_item_variant_id'])
                     ->where('menu_item_id', $row['menu_item_id'])
                     ->first();
-                if (!$variant) {
+                if (! $variant) {
                     return response()->json([
                         'message' => "Item at index {$i}: variant does not belong to this menu item.",
                     ], 422);
@@ -664,13 +668,14 @@ class PosController extends Controller
         }
 
         foreach ($incomingByItem as $menuItemId => $incomingQty) {
-            if (!$produced->has($menuItemId)) {
+            if (! $produced->has($menuItemId)) {
                 continue;
             }
             $available = max(0, $produced[$menuItemId] - ($soldExcludingThis[$menuItemId] ?? 0));
             if ($incomingQty > $available + 0.001) {
                 $item = MenuItem::find($menuItemId);
                 $name = $item ? $item->name : "Item #{$menuItemId}";
+
                 return response()->json([
                     'message' => "Insufficient stock for \"{$name}\". Only {$available} available, requested {$incomingQty}.",
                 ], 422);
@@ -681,25 +686,25 @@ class PosController extends Controller
             $currentActive = $order->items()->where('status', 'active')->get();
 
             $key = fn ($row) => (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '')
-                ? 'c_' . $row['combo_id'] . '|' . trim($row['notes'] ?? '')
-                : 'm_' . $row['menu_item_id'] . '_v_' . ($row['menu_item_variant_id'] ?? '0') . '|' . trim($row['notes'] ?? '');
+                ? 'c_'.$row['combo_id'].'|'.trim($row['notes'] ?? '')
+                : 'm_'.$row['menu_item_id'].'_v_'.($row['menu_item_variant_id'] ?? '0').'|'.trim($row['notes'] ?? '');
             $incomingByKey = collect($validated['items'])
                 ->filter(fn ($row) => (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '')
                     || (array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== ''))
                 ->mapToGroups(function ($row) use ($key) {
                     return [$key($row) => $row];
                 })->map(fn ($rows) => [
-                'menu_item_id'        => $rows->first()['menu_item_id'] ?? null,
-                'menu_item_variant_id' => $rows->first()['menu_item_variant_id'] ?? null,
-                'combo_id'            => $rows->first()['combo_id'] ?? null,
-                'quantity'            => $rows->sum('quantity'),
-                'notes'               => $rows->first()['notes'] ?? null,
-            ]);
+                    'menu_item_id' => $rows->first()['menu_item_id'] ?? null,
+                    'menu_item_variant_id' => $rows->first()['menu_item_variant_id'] ?? null,
+                    'combo_id' => $rows->first()['combo_id'] ?? null,
+                    'quantity' => $rows->sum('quantity'),
+                    'notes' => $rows->first()['notes'] ?? null,
+                ]);
 
             // ── Step 1: Cancel/remove items no longer in cart ───────────────────
             foreach ($currentActive as $item) {
-                $k = $item->combo_id ? 'c_' . $item->combo_id . '|' . trim($item->notes ?? '') : 'm_' . $item->menu_item_id . '_v_' . ($item->menu_item_variant_id ?? '0') . '|' . trim($item->notes ?? '');
-                if (!$incomingByKey->has($k)) {
+                $k = $item->combo_id ? 'c_'.$item->combo_id.'|'.trim($item->notes ?? '') : 'm_'.$item->menu_item_id.'_v_'.($item->menu_item_variant_id ?? '0').'|'.trim($item->notes ?? '');
+                if (! $incomingByKey->has($k)) {
                     if ($item->kot_sent) {
                         $item->update(['status' => 'cancelled']);
                     } else {
@@ -713,30 +718,34 @@ class PosController extends Controller
             // ── Step 2: Sync each incoming line ─────────────────────────────────
             foreach ($incomingByKey as $row) {
                 $notes = $row['notes'] ?? null;
-                $qty   = (int) $row['quantity'];
+                $qty = (int) $row['quantity'];
 
                 if (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '') {
                     // Combo item
                     $combo = Combo::find($row['combo_id']);
-                    if (!$combo) continue; // skip deleted combos
+                    if (! $combo) {
+                        continue;
+                    } // skip deleted combos
                     $rc = RestaurantCombo::where('combo_id', $row['combo_id'])
                         ->where('restaurant_master_id', $order->restaurant_id)
                         ->where('is_active', true)
                         ->first();
                     $unitPrice = $rc ? floatval($rc->price) : floatval($combo->price);
-                    $taxRate   = 0;
-                    $matching  = $currentActive->filter(
+                    $taxRate = 0;
+                    $matching = $currentActive->filter(
                         fn ($i) => $i->combo_id == $row['combo_id']
                             && trim($i->notes ?? '') === trim($notes ?? '')
                     );
                 } else {
                     // Regular menu item (with optional variant)
-                    $menuItem  = MenuItem::with('tax')->find($row['menu_item_id']);
-                    if (!$menuItem) continue;
+                    $menuItem = MenuItem::with('tax')->find($row['menu_item_id']);
+                    if (! $menuItem) {
+                        continue;
+                    }
                     $variantId = $row['menu_item_variant_id'] ?? null;
                     if ($variantId) {
                         $variant = \App\Models\MenuItemVariant::find($variantId);
-                        $rmi     = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
+                        $rmi = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
                             ->where('restaurant_master_id', $order->restaurant_id)
                             ->first();
                         $unitPrice = (float) ($variant?->price ?? 0);
@@ -744,16 +753,18 @@ class PosController extends Controller
                             $rvi = RestaurantMenuItemVariant::where('restaurant_menu_item_id', $rmi->id)
                                 ->where('menu_item_variant_id', $variant->id)
                                 ->first();
-                            if ($rvi) $unitPrice = (float) $rvi->price;
+                            if ($rvi) {
+                                $unitPrice = (float) $rvi->price;
+                            }
                         }
                     } else {
-                        $rmi       = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
+                        $rmi = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
                             ->where('restaurant_master_id', $order->restaurant_id)
                             ->first();
                         $unitPrice = $rmi ? floatval($rmi->price) : floatval($menuItem->price);
                     }
-                    $taxRate   = floatval($menuItem->tax?->rate ?? 0);
-                    $matching  = $currentActive->filter(
+                    $taxRate = floatval($menuItem->tax?->rate ?? 0);
+                    $matching = $currentActive->filter(
                         fn ($i) => $i->menu_item_id == $row['menu_item_id']
                             && ($i->menu_item_variant_id ?? null) == $variantId
                             && trim($i->notes ?? '') === trim($notes ?? '')
@@ -766,32 +777,32 @@ class PosController extends Controller
                 }
 
                 $createAttrs = fn ($q, $u) => [
-                    'order_id'              => $order->id,
-                    'menu_item_id'          => $row['menu_item_id'] ?? null,
-                    'menu_item_variant_id'  => $row['menu_item_variant_id'] ?? null,
-                    'combo_id'              => $row['combo_id'] ?? null,
-                    'quantity'              => $q,
-                    'unit_price'   => $u,
-                    'tax_rate'     => $taxRate,
-                    'line_total'   => $u * $q,
-                    'kot_sent'     => false,
-                    'status'       => 'active',
-                    'kot_batch'    => null,
-                    'notes'        => $notes,
+                    'order_id' => $order->id,
+                    'menu_item_id' => $row['menu_item_id'] ?? null,
+                    'menu_item_variant_id' => $row['menu_item_variant_id'] ?? null,
+                    'combo_id' => $row['combo_id'] ?? null,
+                    'quantity' => $q,
+                    'unit_price' => $u,
+                    'tax_rate' => $taxRate,
+                    'line_total' => $u * $q,
+                    'kot_sent' => false,
+                    'status' => 'active',
+                    'kot_batch' => null,
+                    'notes' => $notes,
                 ];
 
                 if ($totalCurrent < $qty) {
                     $delta = $qty - $totalCurrent;
-                    $sent  = $matching->first(fn ($i) => $i->kot_sent);
+                    $sent = $matching->first(fn ($i) => $i->kot_sent);
                     if ($sent) {
                         PosOrderItem::create($createAttrs($delta, $unitPrice));
                     } else {
                         $first = $matching->first();
                         if ($first) {
                             $first->update([
-                                'quantity'   => $qty,
+                                'quantity' => $qty,
                                 'line_total' => $unitPrice * $qty,
-                                'notes'      => $notes,
+                                'notes' => $notes,
                             ]);
                         } else {
                             PosOrderItem::create($createAttrs($qty, $unitPrice));
@@ -800,7 +811,9 @@ class PosController extends Controller
                 } else {
                     $toReduce = $totalCurrent - $qty;
                     foreach ($matching->sortByDesc('kot_sent') as $item) {
-                        if ($toReduce <= 0) break;
+                        if ($toReduce <= 0) {
+                            break;
+                        }
                         if ($item->quantity <= $toReduce) {
                             $toReduce -= $item->quantity;
                             if ($item->kot_sent) {
@@ -815,9 +828,9 @@ class PosController extends Controller
                                 PosOrderItem::create($createAttrs($newQty, $unitPrice));
                             } else {
                                 $item->update([
-                                    'quantity'   => $newQty,
+                                    'quantity' => $newQty,
                                     'line_total' => $unitPrice * $newQty,
-                                    'notes'      => $notes,
+                                    'notes' => $notes,
                                 ]);
                             }
                             $toReduce = 0;
@@ -859,14 +872,14 @@ class PosController extends Controller
         }
 
         // Always reset kitchen status so the display re-acknowledges
-        if (!in_array($order->kitchen_status, ['pending', 'preparing'])) {
+        if (! in_array($order->kitchen_status, ['pending', 'preparing'])) {
             $order->update(['kitchen_status' => 'pending']);
         }
 
         return response()->json([
-            'message'        => 'KOT sent.',
+            'message' => 'KOT sent.',
             'kitchen_status' => $order->fresh()->kitchen_status,
-            'kot_batch'      => $order->fresh()->current_kot_batch,
+            'kot_batch' => $order->fresh()->current_kot_batch,
         ]);
     }
 
@@ -890,7 +903,7 @@ class PosController extends Controller
     public function settle(Request $request, PosOrder $order)
     {
         $user = auth()->user();
-        if (!$user->hasRole('Admin') && !$user->can('pos-settle')) {
+        if (! $user->hasRole('Admin') && ! $user->can('pos-settle')) {
             return response()->json(['message' => 'You do not have permission to settle payments.'], 403);
         }
 
@@ -899,21 +912,21 @@ class PosController extends Controller
         }
 
         $validated = $request->validate([
-            'discount_type'  => 'nullable|in:percent,flat',
+            'discount_type' => 'nullable|in:percent,flat',
             'discount_value' => 'nullable|numeric|min:0',
-            'service_charge_type'  => 'nullable|in:percent,flat',
+            'service_charge_type' => 'nullable|in:percent,flat',
             'service_charge_value' => 'nullable|numeric|min:0',
-            'tax_exempt'     => 'nullable|boolean',
-            'tip_amount'     => 'nullable|numeric|min:0',
+            'tax_exempt' => 'nullable|boolean',
+            'tip_amount' => 'nullable|numeric|min:0',
             'delivery_charge' => 'nullable|numeric|min:0',
-            'payments'       => 'required|array|min:1',
-            'payments.*.method'       => 'required|in:cash,card,upi,room_charge',
-            'payments.*.amount'       => 'required|numeric|min:0.01',
+            'payments' => 'required|array|min:1',
+            'payments.*.method' => 'required|in:cash,card,upi,room_charge',
+            'payments.*.amount' => 'required|numeric|min:0.01',
             'payments.*.reference_no' => 'nullable|string',
         ]);
 
         $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
-        if ($hasRoomCharge && ($order->order_type !== 'room_service' || !$order->booking_id)) {
+        if ($hasRoomCharge && ($order->order_type !== 'room_service' || ! $order->booking_id)) {
             return response()->json(['message' => 'Room charge is only available for room service orders with a linked booking.'], 422);
         }
 
@@ -924,12 +937,12 @@ class PosController extends Controller
                 $deliveryCharge = 0;
             }
             $order->update([
-                'discount_type'  => $validated['discount_type']  ?? null,
+                'discount_type' => $validated['discount_type'] ?? null,
                 'discount_value' => $validated['discount_value'] ?? 0,
-                'service_charge_type'  => $validated['service_charge_type']  ?? null,
+                'service_charge_type' => $validated['service_charge_type'] ?? null,
                 'service_charge_value' => $validated['service_charge_value'] ?? 0,
-                'tax_exempt'     => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
-                'tip_amount'     => (float) ($validated['tip_amount'] ?? 0),
+                'tax_exempt' => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
+                'tip_amount' => (float) ($validated['tip_amount'] ?? 0),
                 'delivery_charge' => $deliveryCharge,
             ]);
             $this->recalculate($order);
@@ -939,7 +952,7 @@ class PosController extends Controller
             if ($paymentsTotal < $order->total_amount - 0.01) {
                 throw new \Illuminate\Http\Exceptions\HttpResponseException(
                     response()->json([
-                        'message' => 'Total payments (' . number_format($paymentsTotal, 2) . ') is less than order total (' . number_format($order->total_amount, 2) . ').',
+                        'message' => 'Total payments ('.number_format($paymentsTotal, 2).') is less than order total ('.number_format($order->total_amount, 2).').',
                     ], 422),
                 );
             }
@@ -948,12 +961,12 @@ class PosController extends Controller
             $order->payments()->delete();
             foreach ($validated['payments'] as $pay) {
                 PosPayment::create([
-                    'order_id'     => $order->id,
-                    'method'       => $pay['method'],
-                    'amount'       => $pay['amount'],
+                    'order_id' => $order->id,
+                    'method' => $pay['method'],
+                    'amount' => $pay['amount'],
                     'reference_no' => $pay['reference_no'] ?? null,
-                    'paid_at'      => now(),
-                    'received_by'  => auth()->id(),
+                    'paid_at' => now(),
+                    'received_by' => auth()->id(),
                 ]);
             }
 
@@ -1020,7 +1033,7 @@ class PosController extends Controller
             $deductions = InventoryTransaction::whereIn('reference_type', ['pos_order', 'pos_order_batch'])
                 ->where(function ($q) use ($order) {
                     $q->where('reference_id', (string) $order->id)
-                        ->orWhere('reference_id', 'like', (string) $order->id . '-%');
+                        ->orWhere('reference_id', 'like', (string) $order->id.'-%');
                 })
                 ->where('type', 'out')
                 ->get();
@@ -1028,24 +1041,24 @@ class PosController extends Controller
             $affectedItemIds = [];
             foreach ($deductions as $tx) {
                 DB::table('inventory_item_locations')
-                    ->where('inventory_item_id',     $tx->inventory_item_id)
+                    ->where('inventory_item_id', $tx->inventory_item_id)
                     ->where('inventory_location_id', $tx->inventory_location_id)
                     ->increment('quantity', $tx->quantity);
 
                 $affectedItemIds[$tx->inventory_item_id] = true;
 
                 InventoryTransaction::create([
-                    'inventory_item_id'     => $tx->inventory_item_id,
+                    'inventory_item_id' => $tx->inventory_item_id,
                     'inventory_location_id' => $tx->inventory_location_id,
-                    'type'                  => 'in',
-                    'quantity'              => $tx->quantity,
-                    'unit_cost'             => $tx->unit_cost,
-                    'total_cost'            => $tx->total_cost,
-                    'reason'                => 'Void Reversal',
-                    'notes'                 => 'Reversed: Order #' . $order->id . ' voided',
-                    'user_id'               => auth()->id(),
-                    'reference_type'        => 'pos_order_void',
-                    'reference_id'          => (string) $order->id,
+                    'type' => 'in',
+                    'quantity' => $tx->quantity,
+                    'unit_cost' => $tx->unit_cost,
+                    'total_cost' => $tx->total_cost,
+                    'reason' => 'Void Reversal',
+                    'notes' => 'Reversed: Order #'.$order->id.' voided',
+                    'user_id' => auth()->id(),
+                    'reference_type' => 'pos_order_void',
+                    'reference_id' => (string) $order->id,
                 ]);
             }
             foreach (array_keys($affectedItemIds) as $itemId) {
@@ -1060,40 +1073,40 @@ class PosController extends Controller
 
     public function refund(Request $request, PosOrder $order)
     {
-        if (!in_array($order->status, ['paid', 'refunded'])) {
+        if (! in_array($order->status, ['paid', 'refunded'])) {
             return response()->json(['message' => 'Only paid orders can be refunded.'], 422);
         }
 
         $validated = $request->validate([
-            'amount'       => 'required|numeric|min:0.01',
-            'method'       => 'required|in:cash,card,upi,room_charge',
+            'amount' => 'required|numeric|min:0.01',
+            'method' => 'required|in:cash,card,upi,room_charge',
             'reference_no' => 'nullable|string|max:100',
-            'reason'       => 'nullable|string|max:500',
+            'reason' => 'nullable|string|max:500',
         ]);
 
         $amount = (float) $validated['amount'];
         $totalRefunded = (float) $order->refunds()->sum('amount');
         $refundable = (float) $order->total_amount - $totalRefunded;
 
-        if ($validated['method'] === 'room_charge' && !$order->booking_id) {
+        if ($validated['method'] === 'room_charge' && ! $order->booking_id) {
             return response()->json(['message' => 'Room charge refund is only available for room service orders with a linked booking.'], 422);
         }
 
         if ($amount > $refundable + 0.01) {
             return response()->json([
-                'message' => 'Refund amount (' . number_format($amount, 2) . ') exceeds refundable amount (' . number_format($refundable, 2) . ').',
+                'message' => 'Refund amount ('.number_format($amount, 2).') exceeds refundable amount ('.number_format($refundable, 2).').',
             ], 422);
         }
 
         DB::transaction(function () use ($order, $validated, $amount) {
             PosOrderRefund::create([
-                'order_id'     => $order->id,
-                'amount'       => $amount,
-                'method'       => $validated['method'],
+                'order_id' => $order->id,
+                'amount' => $amount,
+                'method' => $validated['method'],
                 'reference_no' => $validated['reference_no'] ?? null,
-                'reason'       => $validated['reason'] ?? null,
-                'refunded_at'  => now(),
-                'refunded_by'  => auth()->id(),
+                'reason' => $validated['reason'] ?? null,
+                'refunded_at' => now(),
+                'refunded_by' => auth()->id(),
             ]);
 
             if ($validated['method'] === 'room_charge' && $order->booking_id) {
@@ -1119,7 +1132,7 @@ class PosController extends Controller
         $query = PosOrder::with(['items.menuItem.tax', 'items.combo.menuItems', 'items.variant', 'table', 'restaurant', 'room'])
             ->whereIn('status', ['open', 'billed'])
             ->where('kitchen_status', '!=', 'served')
-            ->whereHas('items', fn($q) => $q->where('kot_sent', true)->where('status', 'active'));
+            ->whereHas('items', fn ($q) => $q->where('kot_sent', true)->where('status', 'active'));
 
         if ($restaurantId) {
             $query->where('restaurant_id', $restaurantId);
@@ -1127,12 +1140,12 @@ class PosController extends Controller
 
         $orders = $query->orderBy('opened_at')->get()
             ->map(function ($order) {
-                $label = match($order->order_type ?? 'dine_in') {
-                    'takeaway'     => 'Takeaway' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
-                    'walk_in'      => 'Walk-in' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
-                    'room_service' => 'Room ' . ($order->room?->room_number ?? $order->room_id),
-                    'delivery'     => 'Delivery' . ($order->customer_name ? ' — ' . $order->customer_name : '') . ($order->delivery_channel ? ' (' . str_replace('_', ' ', ucfirst($order->delivery_channel)) . ')' : ''),
-                    default        => 'Table ' . ($order->table?->table_number ?? '?'),
+                $label = match ($order->order_type ?? 'dine_in') {
+                    'takeaway' => 'Takeaway'.($order->customer_name ? ' — '.$order->customer_name : ''),
+                    'walk_in' => 'Walk-in'.($order->customer_name ? ' — '.$order->customer_name : ''),
+                    'room_service' => 'Room '.($order->room?->room_number ?? $order->room_id),
+                    'delivery' => 'Delivery'.($order->customer_name ? ' — '.$order->customer_name : '').($order->delivery_channel ? ' ('.str_replace('_', ' ', ucfirst($order->delivery_channel)).')' : ''),
+                    default => 'Table '.($order->table?->table_number ?? '?'),
                 };
 
                 $allKotItems = $order->items->where('status', 'active')->where('kot_sent', true);
@@ -1140,7 +1153,8 @@ class PosController extends Controller
                 $activeKotItems = $allKotItems->filter(function ($item) use ($allKotItems) {
                     $batch = $item->kot_batch ?? 1;
                     $batchItems = $allKotItems->where('kot_batch', $batch);
-                    return !$batchItems->every(fn($i) => $i->kitchen_served_at);
+
+                    return ! $batchItems->every(fn ($i) => $i->kitchen_served_at);
                 })->values();
 
                 // Cancelled items for batches we're still showing
@@ -1148,52 +1162,52 @@ class PosController extends Controller
                 $cancelledItems = $order->items
                     ->where('status', 'cancelled')
                     ->where('kot_sent', true)
-                    ->filter(fn($i) => $shownBatches->contains($i->kot_batch))
+                    ->filter(fn ($i) => $shownBatches->contains($i->kot_batch))
                     ->values();
 
                 $maxBatch = $activeKotItems->max('kot_batch') ?? 1;
-                $readyBatches = $activeKotItems->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->toArray();
-                $startedBatches = $activeKotItems->filter(fn($i) => $i->kot_started_at)->pluck('kot_batch')->unique()->sort()->values()->toArray();
+                $readyBatches = $activeKotItems->filter(fn ($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->toArray();
+                $startedBatches = $activeKotItems->filter(fn ($i) => $i->kot_started_at)->pluck('kot_batch')->unique()->sort()->values()->toArray();
 
                 return [
-                    'id'              => $order->id,
-                    'order_type'      => $order->order_type ?? 'dine_in',
-                    'label'           => $label,
-                    'table_number'    => $order->table?->table_number,
-                    'room_number'     => $order->room?->room_number,
-                    'customer_name'   => $order->customer_name,
-                    'restaurant'      => $order->restaurant?->name,
-                    'covers'          => $order->covers,
-                    'status'          => $order->status,
-                    'kitchen_status'  => $order->kitchen_status ?? 'pending',
-                    'current_batch'   => $maxBatch,
-                    'ready_batches'   => array_values(array_map('intval', $readyBatches)),
+                    'id' => $order->id,
+                    'order_type' => $order->order_type ?? 'dine_in',
+                    'label' => $label,
+                    'table_number' => $order->table?->table_number,
+                    'room_number' => $order->room?->room_number,
+                    'customer_name' => $order->customer_name,
+                    'restaurant' => $order->restaurant?->name,
+                    'covers' => $order->covers,
+                    'status' => $order->status,
+                    'kitchen_status' => $order->kitchen_status ?? 'pending',
+                    'current_batch' => $maxBatch,
+                    'ready_batches' => array_values(array_map('intval', $readyBatches)),
                     'started_batches' => array_values(array_map('intval', $startedBatches)),
-                    'opened_at'       => $order->opened_at,
-                    'items'           => $activeKotItems->map(fn($i) => [
-                        'id'               => $i->id,
-                        'name'             => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
-                            $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                    'opened_at' => $order->opened_at,
+                    'items' => $activeKotItems->map(fn ($i) => [
+                        'id' => $i->id,
+                        'name' => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                            $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown').' — '.($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
                         ),
-                        'type'             => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
-                        'combo_items'      => $i->combo_id && $i->combo ? $i->combo->menuItems->pluck('name')->toArray() : null,
-                        'quantity'         => $i->quantity,
-                        'notes'            => $i->notes,
-                        'kot_batch'        => $i->kot_batch ?? 1,
-                        'is_addl'          => ($i->kot_batch ?? 1) > 1,
+                        'type' => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
+                        'combo_items' => $i->combo_id && $i->combo ? $i->combo->menuItems->pluck('name')->toArray() : null,
+                        'quantity' => $i->quantity,
+                        'notes' => $i->notes,
+                        'kot_batch' => $i->kot_batch ?? 1,
+                        'is_addl' => ($i->kot_batch ?? 1) > 1,
                         'kitchen_ready_at' => $i->kitchen_ready_at?->toIso8601String(),
                     ]),
-                    'cancellations'   => $cancelledItems->map(fn($i) => [
-                        'id'        => $i->id,
-                        'name'      => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
-                            $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                    'cancellations' => $cancelledItems->map(fn ($i) => [
+                        'id' => $i->id,
+                        'name' => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                            $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown').' — '.($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
                         ),
-                        'quantity'  => $i->quantity,
+                        'quantity' => $i->quantity,
                         'kot_batch' => $i->kot_batch ?? 1,
                     ]),
                 ];
             })
-            ->filter(fn($o) => count($o['items']) > 0)
+            ->filter(fn ($o) => count($o['items']) > 0)
             ->values()
             ->all();
 
@@ -1217,7 +1231,7 @@ class PosController extends Controller
             return response()->json(['message' => 'No items in batch.'], 422);
         }
 
-        if ($batchItems->every(fn($i) => $i->kot_started_at)) {
+        if ($batchItems->every(fn ($i) => $i->kot_started_at)) {
             return response()->json(['message' => 'KOT already started.']);
         }
 
@@ -1232,7 +1246,7 @@ class PosController extends Controller
         }
 
         return response()->json([
-            'id'             => $order->id,
+            'id' => $order->id,
             'kitchen_status' => $order->fresh()->kitchen_status,
         ]);
     }
@@ -1257,25 +1271,16 @@ class PosController extends Controller
         }
 
         // Already marked?
-        if ($batchItems->every(fn($i) => $i->kitchen_ready_at)) {
+        if ($batchItems->every(fn ($i) => $i->kitchen_ready_at)) {
             return response()->json([
-                'id'             => $order->id,
+                'id' => $order->id,
                 'kitchen_status' => $order->fresh()->kitchen_status,
-                'ready_batches'  => $this->getReadyBatches($order),
+                'ready_batches' => $this->getReadyBatches($order),
             ]);
         }
 
-        // Deduct first (returns insufficient array if stock short); then mark ready
+        // Exact deductions enabled for full theoretical tracking
         $insufficient = $this->deductBatchIngredients($order, $batch);
-        if ($insufficient !== null) {
-            $msg = collect($insufficient)->map(fn($e) =>
-                "{$e['menu_item']}: {$e['ingredient']} — {$e['available']} {$e['uom']} available, {$e['required']} required"
-            )->join('; ');
-            return response()->json([
-                'message' => 'Insufficient stock. ' . $msg,
-                'errors'  => $insufficient,
-            ], 422);
-        }
 
         // Mark batch ready
         $order->items()
@@ -1288,15 +1293,15 @@ class PosController extends Controller
         $order->refresh();
         // All KOT items in this order
         $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
-        $allReady = $allKotItems->every(fn($i) => $i->kitchen_ready_at);
+        $allReady = $allKotItems->every(fn ($i) => $i->kitchen_ready_at);
         if ($allReady) {
             $order->update(['kitchen_status' => 'ready']);
         }
 
         return response()->json([
-            'id'             => $order->id,
+            'id' => $order->id,
             'kitchen_status' => $order->fresh()->kitchen_status,
-            'ready_batches'  => $this->getReadyBatches($order),
+            'ready_batches' => $this->getReadyBatches($order),
         ]);
     }
 
@@ -1346,17 +1351,17 @@ class PosController extends Controller
         }
 
         // Must be ready before delivered
-        if ($batchItems->contains(fn($i) => !$i->kitchen_ready_at)) {
+        if ($batchItems->contains(fn ($i) => ! $i->kitchen_ready_at)) {
             return response()->json(['message' => 'Batch must be ready before marking delivered.'], 422);
         }
 
         // Already marked delivered?
-        if ($batchItems->every(fn($i) => $i->kitchen_served_at)) {
+        if ($batchItems->every(fn ($i) => $i->kitchen_served_at)) {
             return response()->json([
-                'id'              => $order->id,
-                'kitchen_status'  => $order->fresh()->kitchen_status,
-                'ready_batches'   => $this->getReadyBatches($order),
-                'served_batches'  => $this->getServedBatches($order),
+                'id' => $order->id,
+                'kitchen_status' => $order->fresh()->kitchen_status,
+                'ready_batches' => $this->getReadyBatches($order),
+                'served_batches' => $this->getServedBatches($order),
             ]);
         }
 
@@ -1368,15 +1373,15 @@ class PosController extends Controller
 
         $order->refresh();
         $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
-        $allServed = $allKotItems->isNotEmpty() && $allKotItems->every(fn($i) => $i->kitchen_served_at);
+        $allServed = $allKotItems->isNotEmpty() && $allKotItems->every(fn ($i) => $i->kitchen_served_at);
         if ($allServed) {
             $order->update(['kitchen_status' => 'served']);
         }
 
         return response()->json([
-            'id'             => $order->id,
+            'id' => $order->id,
             'kitchen_status' => $order->fresh()->kitchen_status,
-            'ready_batches'  => $this->getReadyBatches($order),
+            'ready_batches' => $this->getReadyBatches($order),
             'served_batches' => $this->getServedBatches($order),
         ]);
     }
@@ -1387,8 +1392,11 @@ class PosController extends Controller
         $restaurant = $order->restaurant;
         if ($restaurant?->kitchen_location_id) {
             $loc = InventoryLocation::find($restaurant->kitchen_location_id);
-            if ($loc) return $loc;
+            if ($loc) {
+                return $loc;
+            }
         }
+
         return InventoryLocation::where('type', 'kitchen_store')->first();
     }
 
@@ -1399,7 +1407,9 @@ class PosController extends Controller
     private function checkMadeToOrderStock(PosOrder $order, $items): array
     {
         $kitchenStore = $this->getKitchenForOrder($order);
-        if (!$kitchenStore) return [];
+        if (! $kitchenStore) {
+            return [];
+        }
 
         $insufficient = [];
         foreach ($items as $orderItem) {
@@ -1414,30 +1424,33 @@ class PosController extends Controller
                     ->where('is_active', true)
                     ->first();
 
-                if (!$recipe || ($recipe->requires_production ?? true)) continue;
+                if (! $recipe || ($recipe->requires_production ?? true)) {
+                    continue;
+                }
 
                 $multiplier = $orderItem->quantity / $recipe->yield_quantity;
-                $menuName = $baseName . ' · ' . ($recipe->menuItem?->name ?? 'Item #' . $menuItemId);
+                $menuName = $baseName.' · '.($recipe->menuItem?->name ?? 'Item #'.$menuItemId);
 
-            foreach ($recipe->ingredients as $ing) {
-                $rawQty = round($ing->raw_quantity * $multiplier, 3);
-                $currentStock = (float) (DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $ing->inventory_item_id)
-                    ->where('inventory_location_id', $kitchenStore->id)
-                    ->value('quantity') ?? 0);
+                foreach ($recipe->ingredients as $ing) {
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+                    $currentStock = (float) (DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $ing->inventory_item_id)
+                        ->where('inventory_location_id', $kitchenStore->id)
+                        ->value('quantity') ?? 0);
 
-                if ($currentStock < $rawQty) {
-                    $insufficient[] = [
-                        'menu_item'  => $menuName,
-                        'ingredient' => $ing->inventoryItem?->name ?? 'Unknown',
-                        'required'   => $rawQty,
-                        'available'  => $currentStock,
-                        'uom'        => $ing->inventoryItem?->issueUom?->short_name ?? $ing->uom?->short_name ?? 'unit',
-                    ];
+                    if ($currentStock < $rawQty) {
+                        $insufficient[] = [
+                            'menu_item' => $menuName,
+                            'ingredient' => $ing->inventoryItem?->name ?? 'Unknown',
+                            'required' => $rawQty,
+                            'available' => $currentStock,
+                            'uom' => $ing->inventoryItem?->issueUom?->short_name ?? $ing->uom?->short_name ?? 'unit',
+                        ];
+                    }
                 }
             }
-            }
         }
+
         return $insufficient;
     }
 
@@ -1448,13 +1461,17 @@ class PosController extends Controller
     private function deductBatchIngredients(PosOrder $order, int $batch): ?array
     {
         $kitchenStore = $this->getKitchenForOrder($order);
-        if (!$kitchenStore) return null;
+        if (! $kitchenStore) {
+            return null;
+        }
 
-        $refId = $order->id . '-' . $batch;
+        $refId = $order->id.'-'.$batch;
         $alreadyDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
             ->where('reference_id', $refId)
             ->exists();
-        if ($alreadyDeducted) return null;
+        if ($alreadyDeducted) {
+            return null;
+        }
 
         $batchItems = $order->items()
             ->with(['menuItem', 'combo.menuItems'])
@@ -1464,49 +1481,7 @@ class PosController extends Controller
             ->get();
 
         $result = DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId) {
-            // Pass 1: Verify all made-to-order ingredients have sufficient stock (with lock)
-            $insufficient = [];
-            foreach ($batchItems as $orderItem) {
-                $menuItemIds = $orderItem->combo_id && $orderItem->combo
-                    ? $orderItem->combo->menuItems->pluck('id')
-                    : ($orderItem->menu_item_id ? collect([$orderItem->menu_item_id]) : collect());
-                $baseName = $orderItem->combo_id ? ($orderItem->combo?->name ?? 'Combo') : ($orderItem->menuItem?->name ?? 'Item');
-
-                foreach ($menuItemIds as $menuItemId) {
-                    $recipe = Recipe::with('ingredients.inventoryItem.issueUom')
-                        ->where('menu_item_id', $menuItemId)
-                        ->where('is_active', true)
-                        ->first();
-
-                    if (!$recipe || ($recipe->requires_production ?? true)) continue;
-
-                    $multiplier = $orderItem->quantity / $recipe->yield_quantity;
-                    $menuName = $baseName . ' · ' . ($recipe->menuItem?->name ?? 'Item #' . $menuItemId);
-
-                    foreach ($recipe->ingredients as $ing) {
-                        $rawQty = round($ing->raw_quantity * $multiplier, 3);
-                        $currentStock = (float) (DB::table('inventory_item_locations')
-                            ->where('inventory_item_id', $ing->inventory_item_id)
-                            ->where('inventory_location_id', $kitchenStore->id)
-                            ->lockForUpdate()
-                            ->value('quantity') ?? 0);
-
-                        if ($currentStock < $rawQty) {
-                            $insufficient[] = [
-                                'menu_item'  => $menuName,
-                                'ingredient' => $ing->inventoryItem?->name ?? 'Unknown',
-                                'required'   => $rawQty,
-                                'available'  => $currentStock,
-                                'uom'        => $ing->inventoryItem?->issueUom?->short_name ?? $ing->uom?->short_name ?? 'unit',
-                            ];
-                        }
-                    }
-                }
-            }
-            if (!empty($insufficient)) {
-                return ['insufficient' => $insufficient];
-            }
-
+            // Exact deductions enabled for full theoretical tracking
             // Pass 2: Deduct
             $affectedItemIds = [];
             foreach ($batchItems as $orderItem) {
@@ -1521,7 +1496,9 @@ class PosController extends Controller
                         ->where('is_active', true)
                         ->first();
 
-                    if (!$recipe || ($recipe->requires_production ?? true)) continue;
+                    if (! $recipe || ($recipe->requires_production ?? true)) {
+                        continue;
+                    }
 
                     $multiplier = $orderItem->quantity / $recipe->yield_quantity;
 
@@ -1534,13 +1511,30 @@ class PosController extends Controller
                             ->lockForUpdate()
                             ->value('quantity') ?? 0;
 
-                        $deduct = min($rawQty, max(0, (float) $currentStock));
-                        if ($deduct <= 0) continue;
+                        $deduct = $rawQty;
+                        if ($deduct <= 0) {
+                            continue;
+                        }
 
-                        DB::table('inventory_item_locations')
+                        $exists = DB::table('inventory_item_locations')
                             ->where('inventory_item_id', $ing->inventory_item_id)
                             ->where('inventory_location_id', $kitchenStore->id)
-                            ->decrement('quantity', $deduct);
+                            ->exists();
+
+                        if ($exists) {
+                            DB::table('inventory_item_locations')
+                                ->where('inventory_item_id', $ing->inventory_item_id)
+                                ->where('inventory_location_id', $kitchenStore->id)
+                                ->decrement('quantity', $deduct);
+                        } else {
+                            DB::table('inventory_item_locations')->insert([
+                                'inventory_item_id' => $ing->inventory_item_id,
+                                'inventory_location_id' => $kitchenStore->id,
+                                'quantity' => -$deduct,
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ]);
+                        }
 
                         $affectedItemIds[$ing->inventory_item_id] = true;
 
@@ -1548,30 +1542,31 @@ class PosController extends Controller
                         $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
 
                         InventoryTransaction::create([
-                            'inventory_item_id'     => $ing->inventory_item_id,
+                            'inventory_item_id' => $ing->inventory_item_id,
                             'inventory_location_id' => $kitchenStore->id,
-                            'type'                  => 'out',
-                            'quantity'              => $deduct,
-                            'unit_cost'             => $unitCostAtTime,
-                            'total_cost'            => round($deduct * $unitCostAtTime, 2),
-                            'reason'                => 'POS Order',
-                            'notes'                 => 'Order #' . $order->id . ' Batch ' . $batch . ' — ' . $itemLabel . ' ×' . $orderItem->quantity,
-                            'user_id'               => auth()->id(),
-                            'reference_type'        => 'pos_order_batch',
-                            'reference_id'          => $refId,
+                            'type' => 'out',
+                            'quantity' => $deduct,
+                            'unit_cost' => $unitCostAtTime,
+                            'total_cost' => round($deduct * $unitCostAtTime, 2),
+                            'reason' => 'POS Order',
+                            'notes' => 'Order #'.$order->id.' Batch '.$batch.' — '.$itemLabel.' ×'.$orderItem->quantity,
+                            'user_id' => auth()->id(),
+                            'reference_type' => 'pos_order_batch',
+                            'reference_id' => $refId,
                         ]);
                     }
                 }
             }
+
             return ['affected' => array_keys($affectedItemIds)];
         });
 
-        if (isset($result['insufficient'])) {
-            return $result['insufficient'];
-        }
+        // Exact deductions completed
+
         foreach ($result['affected'] ?? [] as $itemId) {
             InventoryItem::syncStoredCurrentStockFromLocations($itemId);
         }
+
         return null;
     }
 
@@ -1584,29 +1579,19 @@ class PosController extends Controller
         ]);
 
         $previousStatus = $order->kitchen_status;
-        $newStatus      = $validated['kitchen_status'];
+        $newStatus = $validated['kitchen_status'];
 
         // When marking ready: check stock before updating (legacy flow - whole order at once)
         if ($newStatus === 'ready' && $previousStatus !== 'ready') {
             $perBatchDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
-                ->where('reference_id', 'like', (string) $order->id . '-%')
+                ->where('reference_id', 'like', (string) $order->id.'-%')
                 ->exists();
             $legacyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
                 ->where('reference_id', (string) $order->id)
                 ->exists();
 
-            if (!$perBatchDeducted && !$legacyDeducted) {
-                $kotItems = $order->items()->with(['menuItem', 'combo.menuItems'])->where('kot_sent', true)->get();
-                $insufficient = $this->checkMadeToOrderStock($order, $kotItems);
-                if (!empty($insufficient)) {
-                    $msg = collect($insufficient)->map(fn($e) =>
-                        "{$e['menu_item']}: {$e['ingredient']} — {$e['available']} {$e['uom']} available, {$e['required']} required"
-                    )->join('; ');
-                    return response()->json([
-                        'message' => 'Insufficient stock. ' . $msg,
-                        'errors'  => $insufficient,
-                    ], 422);
-                }
+            if (! $perBatchDeducted && ! $legacyDeducted) {
+                // Exact deductions enabled for full theoretical tracking
             }
         }
 
@@ -1625,19 +1610,19 @@ class PosController extends Controller
         // Skip if using per-batch (already deducted via markBatchReady).
         if ($newStatus === 'ready' && $previousStatus !== 'ready') {
             $perBatchDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
-                ->where('reference_id', 'like', (string) $order->id . '-%')
+                ->where('reference_id', 'like', (string) $order->id.'-%')
                 ->exists();
             $legacyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
                 ->where('reference_id', (string) $order->id)
                 ->exists();
 
-            if (!$perBatchDeducted && !$legacyDeducted) {
+            if (! $perBatchDeducted && ! $legacyDeducted) {
                 $this->deductOrderIngredients($order);
             }
         }
 
         return response()->json([
-            'id'             => $order->id,
+            'id' => $order->id,
             'kitchen_status' => $order->fresh()->kitchen_status,
         ]);
     }
@@ -1649,7 +1634,9 @@ class PosController extends Controller
     private function deductOrderIngredients(PosOrder $order): void
     {
         $kitchenStore = $this->getKitchenForOrder($order);
-        if (!$kitchenStore) return;
+        if (! $kitchenStore) {
+            return;
+        }
 
         $kotItems = $order->items()->with(['menuItem', 'combo.menuItems'])->where('kot_sent', true)->get();
         $affectedItemIds = [];
@@ -1667,54 +1654,75 @@ class PosController extends Controller
                         ->where('is_active', true)
                         ->first();
 
-                    if (!$recipe) continue;
+                    if (! $recipe) {
+                        continue;
+                    }
 
                     // Batch items (Chicken Biryani): ingredients already deducted at production.
                     // Only deduct for made-to-order items (Tea, Coffee, Omelette).
-                    if ($recipe->requires_production ?? true) continue;
+                    if ($recipe->requires_production ?? true) {
+                        continue;
+                    }
 
                     // multiplier = portions ordered / recipe yield
                     $multiplier = $orderItem->quantity / $recipe->yield_quantity;
 
-                foreach ($recipe->ingredients as $ing) {
-                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+                    foreach ($recipe->ingredients as $ing) {
+                        $rawQty = round($ing->raw_quantity * $multiplier, 3);
 
-                    // Lock the row before reading to prevent race conditions
-                    $currentStock = DB::table('inventory_item_locations')
-                        ->where('inventory_item_id',     $ing->inventory_item_id)
-                        ->where('inventory_location_id', $kitchenStore->id)
-                        ->lockForUpdate()
-                        ->value('quantity') ?? 0;
+                        // Lock the row before reading to prevent race conditions
+                        $currentStock = DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $ing->inventory_item_id)
+                            ->where('inventory_location_id', $kitchenStore->id)
+                            ->lockForUpdate()
+                            ->value('quantity') ?? 0;
 
-                    // Deduct only what's available — no hard-stop for quick items
-                    $deduct = min($rawQty, max(0, (float) $currentStock));
+                        // Deduct required exact amount to track theoretical stock
+                        $deduct = $rawQty;
 
-                    if ($deduct <= 0) continue;
+                        if ($deduct <= 0) {
+                            continue;
+                        }
 
-                    DB::table('inventory_item_locations')
-                        ->where('inventory_item_id',     $ing->inventory_item_id)
-                        ->where('inventory_location_id', $kitchenStore->id)
-                        ->decrement('quantity', $deduct);
+                        $exists = DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $ing->inventory_item_id)
+                            ->where('inventory_location_id', $kitchenStore->id)
+                            ->exists();
 
-                    $affectedItemIds[$ing->inventory_item_id] = true;
+                        if ($exists) {
+                            DB::table('inventory_item_locations')
+                                ->where('inventory_item_id', $ing->inventory_item_id)
+                                ->where('inventory_location_id', $kitchenStore->id)
+                                ->decrement('quantity', $deduct);
+                        } else {
+                            DB::table('inventory_item_locations')->insert([
+                                'inventory_item_id' => $ing->inventory_item_id,
+                                'inventory_location_id' => $kitchenStore->id,
+                                'quantity' => -$deduct,
+                                'created_at' => now(),
+                                'updated_at' => now(),
+                            ]);
+                        }
 
-                    $item           = $ing->inventoryItem;
-                    $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
+                        $affectedItemIds[$ing->inventory_item_id] = true;
 
-                    InventoryTransaction::create([
-                        'inventory_item_id'     => $ing->inventory_item_id,
-                        'inventory_location_id' => $kitchenStore->id,
-                        'type'                  => 'out',
-                        'quantity'              => $deduct,
-                        'unit_cost'             => $unitCostAtTime,
-                        'total_cost'            => round($deduct * $unitCostAtTime, 2),
-                        'reason'                => 'POS Order',
-                        'notes'                 => 'Order #' . $order->id . ' — ' . $itemLabel . ' ×' . $orderItem->quantity,
-                        'user_id'               => auth()->id(),
-                        'reference_type'        => 'pos_order',
-                        'reference_id'          => (string) $order->id,
-                    ]);
-                }
+                        $item = $ing->inventoryItem;
+                        $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
+
+                        InventoryTransaction::create([
+                            'inventory_item_id' => $ing->inventory_item_id,
+                            'inventory_location_id' => $kitchenStore->id,
+                            'type' => 'out',
+                            'quantity' => $deduct,
+                            'unit_cost' => $unitCostAtTime,
+                            'total_cost' => round($deduct * $unitCostAtTime, 2),
+                            'reason' => 'POS Order',
+                            'notes' => 'Order #'.$order->id.' — '.$itemLabel.' ×'.$orderItem->quantity,
+                            'user_id' => auth()->id(),
+                            'reference_type' => 'pos_order',
+                            'reference_id' => (string) $order->id,
+                        ]);
+                    }
                 }
             }
         });
@@ -1729,8 +1737,15 @@ class PosController extends Controller
      */
     private function deductDirectSaleItems(PosOrder $order): void
     {
-        $barStore = InventoryLocation::where('name', 'Bar Store')->first();
-        if (!$barStore) return;
+        $order->loadMissing('restaurant');
+        $barLocationId = $order->restaurant?->bar_location_id;
+        $barStore = $barLocationId
+            ? InventoryLocation::find($barLocationId)
+            : InventoryLocation::where('name', 'Bar Store')->first();
+
+        if (! $barStore) {
+            return;
+        }
 
         $activeItems = $order->items()
             ->with(['menuItem.inventoryItem', 'variant'])
@@ -1741,52 +1756,76 @@ class PosController extends Controller
         $affectedItemIds = [];
         foreach ($activeItems as $orderItem) {
             $menuItem = $orderItem->menuItem;
-            if (!$menuItem || !$menuItem->is_direct_sale || !$menuItem->inventory_item_id) continue;
+            if (! $menuItem || ! $menuItem->is_direct_sale || ! $menuItem->inventory_item_id) {
+                continue;
+            }
 
             $invItem = $menuItem->inventoryItem;
-            if (!$invItem) continue;
+            if (! $invItem) {
+                continue;
+            }
 
             $deductQty = 0;
             if ($orderItem->menu_item_variant_id && $orderItem->variant) {
                 $mlQty = (float) ($orderItem->variant->ml_quantity ?? 0);
                 if ($mlQty > 0) {
                     $deductQty = $mlQty * $orderItem->quantity;
+                } else {
+                    $deductQty = $orderItem->quantity;
                 }
             } else {
                 // No variant (beer): deduct 1 Pcs per bottle
                 $deductQty = $orderItem->quantity;
             }
-            if ($deductQty <= 0) continue;
-            if ($deductQty <= 0) continue;
+            if ($deductQty <= 0) {
+                continue;
+            }
 
             $currentStock = (float) (DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $menuItem->inventory_item_id)
                 ->where('inventory_location_id', $barStore->id)
                 ->value('quantity') ?? 0);
 
-            $deduct = min($deductQty, max(0, $currentStock));
-            if ($deduct <= 0) continue;
+            $deduct = $deductQty;
+            if ($deduct <= 0) {
+                continue;
+            }
 
-            DB::table('inventory_item_locations')
+            $exists = DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $menuItem->inventory_item_id)
                 ->where('inventory_location_id', $barStore->id)
-                ->decrement('quantity', $deduct);
+                ->exists();
+
+            if ($exists) {
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', $menuItem->inventory_item_id)
+                    ->where('inventory_location_id', $barStore->id)
+                    ->decrement('quantity', $deduct);
+            } else {
+                DB::table('inventory_item_locations')->insert([
+                    'inventory_item_id' => $menuItem->inventory_item_id,
+                    'inventory_location_id' => $barStore->id,
+                    'quantity' => -$deduct,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
 
             $affectedItemIds[$menuItem->inventory_item_id] = true;
 
             $unitCost = floatval($invItem->cost_price ?? 0) / floatval($invItem->conversion_factor ?? 1);
             InventoryTransaction::create([
-                'inventory_item_id'     => $menuItem->inventory_item_id,
+                'inventory_item_id' => $menuItem->inventory_item_id,
                 'inventory_location_id' => $barStore->id,
-                'type'                  => 'out',
-                'quantity'              => $deduct,
-                'unit_cost'             => round($unitCost, 4),
-                'total_cost'            => round($deduct * $unitCost, 2),
-                'reason'                => 'POS Order',
-                'notes'                 => 'Order #' . $order->id . ' — ' . ($menuItem->name ?? 'Bar item') . ' ×' . $orderItem->quantity,
-                'user_id'               => auth()->id(),
-                'reference_type'        => 'pos_order',
-                'reference_id'          => (string) $order->id,
+                'type' => 'out',
+                'quantity' => $deduct,
+                'unit_cost' => round($unitCost, 4),
+                'total_cost' => round($deduct * $unitCost, 2),
+                'reason' => 'POS Order',
+                'notes' => 'Order #'.$order->id.' — '.($menuItem->name ?? 'Bar item').' ×'.$orderItem->quantity,
+                'user_id' => auth()->id(),
+                'reference_type' => 'pos_order',
+                'reference_id' => (string) $order->id,
             ]);
         }
         foreach (array_keys($affectedItemIds) as $itemId) {
@@ -1801,8 +1840,8 @@ class PosController extends Controller
         $order->refresh();
         // Only count active (non-cancelled) items in totals
         $activeItems = $order->items->where('status', 'active');
-        $subtotal    = $activeItems->sum(fn($i) => floatval($i->line_total));
-        $taxAmount   = $order->tax_exempt ? 0 : $activeItems->sum(fn($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
+        $subtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
+        $taxAmount = $order->tax_exempt ? 0 : $activeItems->sum(fn ($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
 
         $serviceChargeAmount = 0;
         if ($order->service_charge_type === 'percent') {
@@ -1821,99 +1860,99 @@ class PosController extends Controller
         $tipAmount = (float) ($order->tip_amount ?? 0);
         $deliveryCharge = $order->order_type === 'delivery' ? (float) ($order->delivery_charge ?? 0) : 0;
         $order->update([
-            'subtotal'             => $subtotal,
-            'tax_amount'           => $taxAmount,
+            'subtotal' => $subtotal,
+            'tax_amount' => $taxAmount,
             'service_charge_amount' => $serviceChargeAmount,
-            'discount_amount'      => $discountAmount,
-            'total_amount'         => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount + $deliveryCharge),
+            'discount_amount' => $discountAmount,
+            'total_amount' => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount + $deliveryCharge),
         ]);
     }
 
     private function formatOrder(PosOrder $order): array
     {
         return [
-            'id'              => $order->id,
-            'order_type'      => $order->order_type ?? 'dine_in',
-            'table_id'        => $order->table_id,
-            'restaurant_id'   => $order->restaurant_id,
-            'room_id'         => $order->room_id,
-            'room_number'     => $order->room?->room_number ?? null,
-            'table_number'    => $order->table?->table_number ?? null,
-            'booking_id'      => $order->booking_id,
-            'customer_name'    => $order->customer_name,
-            'customer_phone'   => $order->customer_phone,
+            'id' => $order->id,
+            'order_type' => $order->order_type ?? 'dine_in',
+            'table_id' => $order->table_id,
+            'restaurant_id' => $order->restaurant_id,
+            'room_id' => $order->room_id,
+            'room_number' => $order->room?->room_number ?? null,
+            'table_number' => $order->table?->table_number ?? null,
+            'booking_id' => $order->booking_id,
+            'customer_name' => $order->customer_name,
+            'customer_phone' => $order->customer_phone,
             'delivery_address' => $order->delivery_address,
             'delivery_channel' => $order->delivery_channel,
-            'covers'           => $order->covers,
-            'waiter_id'       => $order->waiter_id,
-            'waiter'          => $order->waiter ? ['id' => $order->waiter->id, 'name' => $order->waiter->name] : null,
-            'opened_by'       => $order->opened_by,
-            'opened_by_user'  => $order->openedBy ? ['id' => $order->openedBy->id, 'name' => $order->openedBy->name] : null,
-            'status'          => $order->status,
-            'kitchen_status'  => $order->kitchen_status ?? 'pending',
+            'covers' => $order->covers,
+            'waiter_id' => $order->waiter_id,
+            'waiter' => $order->waiter ? ['id' => $order->waiter->id, 'name' => $order->waiter->name] : null,
+            'opened_by' => $order->opened_by,
+            'opened_by_user' => $order->openedBy ? ['id' => $order->openedBy->id, 'name' => $order->openedBy->name] : null,
+            'status' => $order->status,
+            'kitchen_status' => $order->kitchen_status ?? 'pending',
             'current_kot_batch' => (int) ($order->current_kot_batch ?? 0),
-            'ready_batches'   => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray(),
-            'served_batches'  => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn($b) => (int) $b)->toArray(),
-            'discount_type'   => $order->discount_type,
-            'discount_value'  => (float) $order->discount_value,
-            'service_charge_type'  => $order->service_charge_type,
+            'ready_batches' => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn ($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray(),
+            'served_batches' => $order->items->where('status', 'active')->where('kot_sent', true)->filter(fn ($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray(),
+            'discount_type' => $order->discount_type,
+            'discount_value' => (float) $order->discount_value,
+            'service_charge_type' => $order->service_charge_type,
             'service_charge_value' => (float) ($order->service_charge_value ?? 0),
             'service_charge_amount' => (float) ($order->service_charge_amount ?? 0),
-            'subtotal'        => (float) $order->subtotal,
-            'tax_amount'      => (float) $order->tax_amount,
+            'subtotal' => (float) $order->subtotal,
+            'tax_amount' => (float) $order->tax_amount,
             'discount_amount' => (float) $order->discount_amount,
-            'tip_amount'      => (float) ($order->tip_amount ?? 0),
+            'tip_amount' => (float) ($order->tip_amount ?? 0),
             'delivery_charge' => (float) ($order->delivery_charge ?? 0),
-            'total_amount'    => (float) $order->total_amount,
-            'opened_at'       => $order->opened_at,
-            'closed_at'       => $order->closed_at,
-            'notes'           => $order->notes,
-            'tax_exempt'      => (bool) ($order->tax_exempt ?? false),
-            'items'           => $order->items->where('status', 'active')->values()->map(fn($i) => [
-                'id'                    => $i->id,
-                'menu_item_id'          => $i->menu_item_id,
-                'menu_item_variant_id'  => $i->menu_item_variant_id,
-                'combo_id'              => $i->combo_id,
-                'name'                  => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
-                    $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+            'total_amount' => (float) $order->total_amount,
+            'opened_at' => $order->opened_at,
+            'closed_at' => $order->closed_at,
+            'notes' => $order->notes,
+            'tax_exempt' => (bool) ($order->tax_exempt ?? false),
+            'items' => $order->items->where('status', 'active')->values()->map(fn ($i) => [
+                'id' => $i->id,
+                'menu_item_id' => $i->menu_item_id,
+                'menu_item_variant_id' => $i->menu_item_variant_id,
+                'combo_id' => $i->combo_id,
+                'name' => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                    $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown').' — '.($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
                 ),
-                'category'     => $i->menuItem?->category?->name ?? ($i->combo_id ? 'Combo' : null),
-                'type'         => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
-                'quantity'     => $i->quantity,
-                'unit_price'   => (float) $i->unit_price,
-                'tax_rate'     => (float) $i->tax_rate,
-                'tax_name'     => $i->menuItem?->tax?->name ?? null,
-                'line_total'   => (float) $i->line_total,
-                'kot_sent'     => $i->kot_sent,
-                'kot_batch'    => $i->kot_batch,
+                'category' => $i->menuItem?->category?->name ?? ($i->combo_id ? 'Combo' : null),
+                'type' => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
+                'quantity' => $i->quantity,
+                'unit_price' => (float) $i->unit_price,
+                'tax_rate' => (float) $i->tax_rate,
+                'tax_name' => $i->menuItem?->tax?->name ?? null,
+                'line_total' => (float) $i->line_total,
+                'kot_sent' => $i->kot_sent,
+                'kot_batch' => $i->kot_batch,
                 'is_direct_sale' => (bool) ($i->menuItem?->is_direct_sale ?? false),
                 'kitchen_ready_at' => $i->kitchen_ready_at?->toIso8601String(),
-                'notes'        => $i->notes,
+                'notes' => $i->notes,
             ]),
-            'cancellations'   => $order->items->where('status', 'cancelled')->values()->map(fn($i) => [
-                'id'           => $i->id,
+            'cancellations' => $order->items->where('status', 'cancelled')->values()->map(fn ($i) => [
+                'id' => $i->id,
                 'menu_item_id' => $i->menu_item_id,
-                'combo_id'     => $i->combo_id,
-                'name'         => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
-                    $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
+                'combo_id' => $i->combo_id,
+                'name' => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
+                    $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown').' — '.($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
                 ),
-                'quantity'     => $i->quantity,
-                'kot_batch'    => $i->kot_batch,
+                'quantity' => $i->quantity,
+                'kot_batch' => $i->kot_batch,
             ]),
-            'payments'        => $order->payments->map(fn($p) => [
-                'id'           => $p->id,
-                'method'       => $p->method,
-                'amount'       => (float) $p->amount,
+            'payments' => $order->payments->map(fn ($p) => [
+                'id' => $p->id,
+                'method' => $p->method,
+                'amount' => (float) $p->amount,
                 'reference_no' => $p->reference_no,
-                'paid_at'      => $p->paid_at,
+                'paid_at' => $p->paid_at,
             ]),
-            'refunds'         => $order->refunds->map(fn($r) => [
-                'id'           => $r->id,
-                'amount'       => (float) $r->amount,
-                'method'       => $r->method,
+            'refunds' => $order->refunds->map(fn ($r) => [
+                'id' => $r->id,
+                'amount' => (float) $r->amount,
+                'method' => $r->method,
                 'reference_no' => $r->reference_no,
-                'reason'       => $r->reason,
-                'refunded_at'  => $r->refunded_at,
+                'reason' => $r->reason,
+                'refunded_at' => $r->refunded_at,
             ]),
             'refunded_amount' => (float) $order->refunds->sum('amount'),
         ];

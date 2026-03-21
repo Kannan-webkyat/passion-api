@@ -2,9 +2,9 @@
 
 namespace Database\Seeders;
 
-use Illuminate\Database\Seeder;
-use App\Models\InventoryLocation;
 use App\Models\Department;
+use App\Models\InventoryLocation;
+use Illuminate\Database\Seeder;
 
 class LocationSeeder extends Seeder
 {
@@ -39,7 +39,7 @@ class LocationSeeder extends Seeder
                     [
                         'type' => 'sub_store',
                         'department_id' => $dept->id,
-                        'is_active' => true
+                        'is_active' => true,
                     ]
                 );
             }

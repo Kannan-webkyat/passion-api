@@ -28,4 +28,3 @@ return new class extends Migration
         Schema::dropIfExists('room_status_blocks');
     }
 };
-

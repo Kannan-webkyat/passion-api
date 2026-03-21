@@ -21,6 +21,7 @@ class InventoryTaxController extends Controller
         ]);
 
         $tax = InventoryTax::create($validated);
+
         return response()->json($tax, 201);
     }
 
@@ -33,15 +34,21 @@ class InventoryTaxController extends Controller
         ]);
 
         $tax->update($validated);
+
         return response()->json($tax);
     }
 
     public function destroy(InventoryTax $tax)
     {
-        if ($tax->items()->count() > 0) {
-            return response()->json(['message' => 'Cannot delete tax rate that is currently assigned to items.'], 422);
+        try {
+            $tax->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete tax rule as it is assigned to active items or historical orders.'], 409);
+            }
+            throw $e;
         }
-        $tax->delete();
-        return response()->json(null, 204);
     }
 }

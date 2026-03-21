@@ -10,10 +10,11 @@ class RestaurantMasterController extends Controller
 {
     public function index(Request $request)
     {
-        $query = RestaurantMaster::with(['kitchenLocation', 'department']);
-        if (!$request->boolean('include_inactive')) {
+        $query = RestaurantMaster::with(['kitchenLocation', 'barLocation', 'department']);
+        if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
+
         return response()->json($query->get());
     }
 
@@ -21,6 +22,7 @@ class RestaurantMasterController extends Controller
     {
         $validated = $this->validateRestaurant($request);
         $restaurant = RestaurantMaster::create($validated);
+
         return response()->json($restaurant, 201);
     }
 
@@ -33,30 +35,41 @@ class RestaurantMasterController extends Controller
     {
         $validated = $this->validateRestaurant($request);
         $restaurantMaster->update($validated);
+
         return response()->json($restaurantMaster);
     }
 
     public function destroy(RestaurantMaster $restaurantMaster)
     {
-        $restaurantMaster->delete();
-        return response()->json(null, 204);
+        try {
+            $restaurantMaster->delete();
+
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete this restaurant because it has active tables, orders, or menu mappings. Please mark as Inactive instead.'], 409);
+            }
+            throw $e;
+        }
     }
 
     private function validateRestaurant(Request $request): array
     {
         $rules = [
-            'name'                 => 'required|string|max:255',
-            'floor'                => 'nullable|string|max:255',
-            'description'          => 'nullable|string',
-            'is_active'            => 'boolean',
-            'department_id'        => 'nullable|exists:departments,id',
-            'kitchen_location_id'  => 'nullable|exists:inventory_locations,id',
-            'address'              => 'nullable|string|max:1000',
-            'email'                => 'nullable|email|max:255',
-            'phone'                => 'nullable|string|max:50',
-            'gstin'                => 'nullable|string|max:50',
-            'fssai'                => 'nullable|string|max:50',
+            'name' => 'required|string|max:255',
+            'floor' => 'nullable|string|max:255',
+            'description' => 'nullable|string',
+            'is_active' => 'boolean',
+            'department_id' => 'nullable|exists:departments,id',
+            'kitchen_location_id' => 'nullable|exists:inventory_locations,id',
+            'bar_location_id' => 'nullable|exists:inventory_locations,id',
+            'address' => 'nullable|string|max:1000',
+            'email' => 'nullable|email|max:255',
+            'phone' => 'nullable|string|max:50',
+            'gstin' => 'nullable|string|max:50',
+            'fssai' => 'nullable|string|max:50',
         ];
+
         return $request->validate($rules);
     }
 
@@ -68,6 +81,7 @@ class RestaurantMasterController extends Controller
         }
         $path = $request->file('logo')->store('restaurant-logos', 'public');
         $restaurantMaster->update(['logo_path' => $path]);
+
         return response()->json($restaurantMaster->fresh());
     }
 }

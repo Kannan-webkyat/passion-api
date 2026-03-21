@@ -8,11 +8,11 @@ return new class extends Migration
 {
     public function up(): void
     {
-        if (!Schema::hasColumn('pos_orders', 'kitchen_status')) {
+        if (! Schema::hasColumn('pos_orders', 'kitchen_status')) {
             Schema::table('pos_orders', function (Blueprint $table) {
                 $table->enum('kitchen_status', ['pending', 'preparing', 'ready', 'served'])
-                      ->default('pending')
-                      ->after('status');
+                    ->default('pending')
+                    ->after('status');
             });
         }
     }

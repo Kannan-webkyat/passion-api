@@ -12,7 +12,7 @@ class PosOrderRefund extends Model
     ];
 
     protected $casts = [
-        'amount'      => 'decimal:2',
+        'amount' => 'decimal:2',
         'refunded_at' => 'datetime',
     ];
 

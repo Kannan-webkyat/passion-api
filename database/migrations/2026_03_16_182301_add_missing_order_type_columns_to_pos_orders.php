@@ -9,19 +9,19 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('pos_orders', function (Blueprint $table) {
-            if (!Schema::hasColumn('pos_orders', 'order_type')) {
+            if (! Schema::hasColumn('pos_orders', 'order_type')) {
                 $table->string('order_type', 20)->default('dine_in')->after('id');
             }
-            if (!Schema::hasColumn('pos_orders', 'room_id')) {
+            if (! Schema::hasColumn('pos_orders', 'room_id')) {
                 $table->foreignId('room_id')->nullable()->after('table_id')->constrained('rooms')->nullOnDelete();
             }
-            if (!Schema::hasColumn('pos_orders', 'booking_id')) {
+            if (! Schema::hasColumn('pos_orders', 'booking_id')) {
                 $table->foreignId('booking_id')->nullable()->after('room_id')->constrained('bookings')->nullOnDelete();
             }
-            if (!Schema::hasColumn('pos_orders', 'customer_name')) {
+            if (! Schema::hasColumn('pos_orders', 'customer_name')) {
                 $table->string('customer_name')->nullable()->after('booking_id');
             }
-            if (!Schema::hasColumn('pos_orders', 'customer_phone')) {
+            if (! Schema::hasColumn('pos_orders', 'customer_phone')) {
                 $table->string('customer_phone')->nullable()->after('customer_name');
             }
         });

@@ -11,9 +11,10 @@ class RoomTypeController extends Controller
     public function index(Request $request)
     {
         $query = RoomType::with(['tax', 'ratePlans']);
-        if (!$request->boolean('include_inactive')) {
+        if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
+
         return $query->get();
     }
 
@@ -22,9 +23,9 @@ class RoomTypeController extends Controller
      */
     private function validateCapacity(array $data): void
     {
-        $base     = (int) ($data['base_occupancy']     ?? 0);
+        $base = (int) ($data['base_occupancy'] ?? 0);
         $extraBed = (int) ($data['extra_bed_capacity'] ?? 0);
-        $child    = (int) ($data['child_sharing_limit'] ?? 0);
+        $child = (int) ($data['child_sharing_limit'] ?? 0);
         $expected = $base + $extraBed + $child;
 
         if ((int) $data['capacity'] !== $expected) {
@@ -37,22 +38,22 @@ class RoomTypeController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'name'                  => 'required|string|max:255',
-            'description'           => 'nullable|string',
-            'is_active'             => 'nullable|boolean',
-            'base_price'            => 'required|numeric|min:0',
-            'breakfast_price'       => 'nullable|numeric|min:0',
+            'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'is_active' => 'nullable|boolean',
+            'base_price' => 'required|numeric|min:0',
+            'breakfast_price' => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
-            'extra_bed_cost'        => 'required|numeric|min:0',
-            'base_occupancy'        => 'required|integer|min:1',
-            'capacity'              => 'required|integer|min:1',
-            'extra_bed_capacity'    => 'required|integer|min:0',
-            'child_sharing_limit'   => 'required|integer|min:0',
-            'bed_config'            => 'nullable|string|max:255',
-            'amenities'             => 'nullable|array',
-            'tax_id'                => 'nullable|exists:inventory_taxes,id',
-            'rate_plans'            => 'nullable|array',
-            'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
+            'extra_bed_cost' => 'required|numeric|min:0',
+            'base_occupancy' => 'required|integer|min:1',
+            'capacity' => 'required|integer|min:1',
+            'extra_bed_capacity' => 'required|integer|min:0',
+            'child_sharing_limit' => 'required|integer|min:0',
+            'bed_config' => 'nullable|string|max:255',
+            'amenities' => 'nullable|array',
+            'tax_id' => 'nullable|exists:inventory_taxes,id',
+            'rate_plans' => 'nullable|array',
+            'rate_plans.*.name' => 'required_with:rate_plans|string|max:255',
             'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
             'rate_plans.*.includes_breakfast' => 'nullable|boolean',
             // Hourly package extensions (backward compatible)
@@ -68,7 +69,7 @@ class RoomTypeController extends Controller
 
         $roomType = RoomType::create($validated);
 
-        if (!empty($validated['rate_plans'])) {
+        if (! empty($validated['rate_plans'])) {
             $roomType->ratePlans()->createMany($validated['rate_plans']);
         }
 
@@ -83,23 +84,23 @@ class RoomTypeController extends Controller
     public function update(Request $request, RoomType $roomType)
     {
         $validated = $request->validate([
-            'name'                  => 'string|max:255',
-            'description'           => 'nullable|string',
-            'is_active'             => 'nullable|boolean',
-            'base_price'            => 'numeric|min:0',
-            'breakfast_price'       => 'nullable|numeric|min:0',
+            'name' => 'string|max:255',
+            'description' => 'nullable|string',
+            'is_active' => 'nullable|boolean',
+            'base_price' => 'numeric|min:0',
+            'breakfast_price' => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
-            'extra_bed_cost'        => 'numeric|min:0',
-            'base_occupancy'        => 'integer|min:1',
-            'capacity'              => 'integer|min:1',
-            'extra_bed_capacity'    => 'integer|min:0',
-            'child_sharing_limit'   => 'integer|min:0',
-            'bed_config'            => 'nullable|string|max:255',
-            'amenities'             => 'nullable|array',
-            'tax_id'                => 'nullable|exists:inventory_taxes,id',
-            'rate_plans'            => 'nullable|array',
-            'rate_plans.*.id'       => 'nullable|exists:rate_plans,id',
-            'rate_plans.*.name'     => 'required_with:rate_plans|string|max:255',
+            'extra_bed_cost' => 'numeric|min:0',
+            'base_occupancy' => 'integer|min:1',
+            'capacity' => 'integer|min:1',
+            'extra_bed_capacity' => 'integer|min:0',
+            'child_sharing_limit' => 'integer|min:0',
+            'bed_config' => 'nullable|string|max:255',
+            'amenities' => 'nullable|array',
+            'tax_id' => 'nullable|exists:inventory_taxes,id',
+            'rate_plans' => 'nullable|array',
+            'rate_plans.*.id' => 'nullable|exists:rate_plans,id',
+            'rate_plans.*.name' => 'required_with:rate_plans|string|max:255',
             'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
             'rate_plans.*.includes_breakfast' => 'nullable|boolean',
             // Hourly package extensions (backward compatible)
@@ -113,10 +114,10 @@ class RoomTypeController extends Controller
 
         // Merge with existing values to handle partial updates
         $merged = array_merge([
-            'base_occupancy'      => $roomType->base_occupancy,
-            'extra_bed_capacity'  => $roomType->extra_bed_capacity,
+            'base_occupancy' => $roomType->base_occupancy,
+            'extra_bed_capacity' => $roomType->extra_bed_capacity,
             'child_sharing_limit' => $roomType->child_sharing_limit,
-            'capacity'            => $roomType->capacity,
+            'capacity' => $roomType->capacity,
         ], $validated);
 
         $this->validateCapacity($merged);
@@ -129,7 +130,7 @@ class RoomTypeController extends Controller
             $roomType->ratePlans()->whereNotIn('id', $incomingIds)->delete();
 
             foreach ($incomingPlans as $planData) {
-                if (!empty($planData['id'])) {
+                if (! empty($planData['id'])) {
                     $roomType->ratePlans()->where('id', $planData['id'])->update([
                         'name' => $planData['name'],
                         'base_price' => $planData['base_price'],
@@ -163,6 +164,7 @@ class RoomTypeController extends Controller
     public function destroy(RoomType $roomType)
     {
         $roomType->delete();
+
         return response()->json(null, 204);
     }
 }
