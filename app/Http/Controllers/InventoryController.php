@@ -9,6 +9,14 @@ use Illuminate\Support\Facades\DB;
 
 class InventoryController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get();
@@ -27,6 +35,7 @@ class InventoryController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'sku' => 'required|string|max:100|unique:inventory_items,sku',
@@ -87,6 +96,7 @@ class InventoryController extends Controller
 
     public function update(Request $request, InventoryItem $item)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'sku' => 'required|string|max:100|unique:inventory_items,sku,'.$item->id,
@@ -142,6 +152,7 @@ class InventoryController extends Controller
 
     public function destroy(InventoryItem $item)
     {
+        $this->checkPermission('manage-inventory');
         try {
             $item->delete();
 
@@ -179,6 +190,7 @@ class InventoryController extends Controller
 
     public function issue(Request $request)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'item_id' => 'required|exists:inventory_items,id',
             'location_id' => 'required|exists:inventory_locations,id',
@@ -190,19 +202,20 @@ class InventoryController extends Controller
         $item = \App\Models\InventoryItem::findOrFail($validated['item_id']);
         $dept = \App\Models\Department::findOrFail($validated['department_id']);
 
-        // Check stock at location
-        $locationStock = DB::table('inventory_item_locations')
-            ->where('inventory_item_id', $item->id)
-            ->where('inventory_location_id', $validated['location_id'])
-            ->first();
-
-        if (! $locationStock || $locationStock->quantity < $validated['quantity']) {
-            return response()->json(['message' => 'Insufficient stock in this location'], 422);
-        }
-
         DB::beginTransaction();
         try {
-            // 1. Decrement Location Stock (source of truth)
+            // 1. Lock Location Stock for update to prevent race conditions
+            $locationStock = DB::table('inventory_item_locations')
+                ->where('inventory_item_id', $item->id)
+                ->where('inventory_location_id', $validated['location_id'])
+                ->lockForUpdate()
+                ->first();
+
+            if (! $locationStock || $locationStock->quantity < $validated['quantity']) {
+                throw new \Exception('Insufficient stock in this location');
+            }
+
+            // 2. Decrement Location Stock (source of truth)
             DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $item->id)
                 ->where('inventory_location_id', $validated['location_id'])

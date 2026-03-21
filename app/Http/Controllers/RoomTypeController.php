@@ -8,6 +8,14 @@ use Illuminate\Validation\ValidationException;
 
 class RoomTypeController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
         $query = RoomType::with(['tax', 'ratePlans']);
@@ -37,6 +45,7 @@ class RoomTypeController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
@@ -83,6 +92,7 @@ class RoomTypeController extends Controller
 
     public function update(Request $request, RoomType $roomType)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'name' => 'string|max:255',
             'description' => 'nullable|string',
@@ -163,8 +173,16 @@ class RoomTypeController extends Controller
 
     public function destroy(RoomType $roomType)
     {
-        $roomType->delete();
+        $this->checkPermission('manage-rooms');
+        try {
+            $roomType->delete();
 
-        return response()->json(null, 204);
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete room type as it has existing rooms assigned to it.'], 409);
+            }
+            throw $e;
+        }
     }
 }

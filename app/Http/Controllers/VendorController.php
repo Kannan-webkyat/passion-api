@@ -12,8 +12,17 @@ class VendorController extends Controller
         return response()->json(Vendor::orderBy('name')->get());
     }
 
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function store(Request $request)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
@@ -37,6 +46,7 @@ class VendorController extends Controller
 
     public function update(Request $request, Vendor $vendor)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
@@ -55,6 +65,7 @@ class VendorController extends Controller
 
     public function destroy(Vendor $vendor)
     {
+        $this->checkPermission('manage-inventory');
         try {
             $vendor->delete();
 

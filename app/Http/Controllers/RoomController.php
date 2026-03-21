@@ -7,6 +7,14 @@ use Illuminate\Http\Request;
 
 class RoomController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
         $query = Room::with('roomType');
@@ -19,6 +27,7 @@ class RoomController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'room_number' => 'required|string|unique:rooms,room_number',
             'room_type_id' => 'required|exists:room_types,id',
@@ -40,6 +49,7 @@ class RoomController extends Controller
 
     public function update(Request $request, Room $room)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'room_number' => 'string|unique:rooms,room_number,'.$room->id,
             'room_type_id' => 'exists:room_types,id',
@@ -56,8 +66,16 @@ class RoomController extends Controller
 
     public function destroy(Room $room)
     {
-        $room->delete();
+        $this->checkPermission('manage-rooms');
+        try {
+            $room->delete();
 
-        return response()->json(null, 204);
+            return response()->json(null, 204);
+        } catch (\Illuminate\Database\QueryException $e) {
+            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
+                return response()->json(['message' => 'Cannot delete room as it has historical bookings or active transactions.'], 409);
+            }
+            throw $e;
+        }
     }
 }

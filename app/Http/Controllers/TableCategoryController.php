@@ -7,6 +7,14 @@ use Illuminate\Http\Request;
 
 class TableCategoryController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         return response()->json(TableCategory::all());
@@ -14,6 +22,7 @@ class TableCategoryController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-tables');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'capacity' => 'required|integer|min:1',
@@ -32,6 +41,7 @@ class TableCategoryController extends Controller
 
     public function update(Request $request, TableCategory $tableCategory)
     {
+        $this->checkPermission('manage-tables');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'capacity' => 'sometimes|required|integer|min:1',
@@ -45,6 +55,7 @@ class TableCategoryController extends Controller
 
     public function destroy(TableCategory $tableCategory)
     {
+        $this->checkPermission('manage-tables');
         $tableCategory->delete();
 
         return response()->json(null, 204);

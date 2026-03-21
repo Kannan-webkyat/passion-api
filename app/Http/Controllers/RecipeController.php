@@ -19,6 +19,7 @@ class RecipeController extends Controller
      */
     public function index(Request $request)
     {
+        $this->checkPermission('kitchen-production');
         $query = MenuItem::where(fn ($q) => $q->where('is_direct_sale', false)->orWhereNull('is_direct_sale'))
             ->with([
                 'category',
@@ -96,11 +97,20 @@ class RecipeController extends Controller
         return response()->json($items);
     }
 
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     /**
      * Save (create or update) a full recipe for a menu item.
      */
     public function upsert(Request $request, $menuItemId)
     {
+        $this->checkPermission('kitchen-production');
         $menuItem = MenuItem::findOrFail($menuItemId);
         if ($menuItem->is_direct_sale) {
             return response()->json([
@@ -160,6 +170,7 @@ class RecipeController extends Controller
      */
     public function produce(Request $request, $recipeId)
     {
+        $this->checkPermission('kitchen-production');
         $validated = $request->validate([
             'quantity_produced' => 'required|numeric|min:0.001',
             'inventory_location_id' => 'required|exists:inventory_locations,id',
@@ -176,47 +187,67 @@ class RecipeController extends Controller
         try {
             DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$totalProductionCost) {
 
-                // ── Deduct stock and record snapshot costs ─────────────
+                // ── 1. Deduct raw ingredients and record snapshot costs ─────────────
                 foreach ($recipe->ingredients as $ing) {
-                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
-
                     $item = $ing->inventoryItem;
+                    if (! $item) {
+                        continue;
+                    }
+
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
                     $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
                     $lineCostAtTime = $rawQty * $unitCostAtTime;
                     $totalProductionCost += $lineCostAtTime;
 
-                    $exists = DB::table('inventory_item_locations')
+                    // Atomic decrement for ingredient deduction (only if record exists)
+                    DB::table('inventory_item_locations')
                         ->where('inventory_item_id', $ing->inventory_item_id)
                         ->where('inventory_location_id', $validated['inventory_location_id'])
-                        ->exists();
-
-                    if ($exists) {
-                        DB::table('inventory_item_locations')
-                            ->where('inventory_item_id', $ing->inventory_item_id)
-                            ->where('inventory_location_id', $validated['inventory_location_id'])
-                            ->decrement('quantity', $rawQty);
-                    } else {
-                        DB::table('inventory_item_locations')->insert([
-                            'inventory_item_id' => $ing->inventory_item_id,
-                            'inventory_location_id' => $validated['inventory_location_id'],
-                            'quantity' => -$rawQty,
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ]);
-                    }
+                        ->where('quantity', '>', -999999) // ensure existence
+                        ->decrement('quantity', $rawQty);
 
                     InventoryTransaction::create([
                         'inventory_item_id' => $ing->inventory_item_id,
                         'inventory_location_id' => $validated['inventory_location_id'],
                         'type' => 'out',
                         'quantity' => $rawQty,
-                        'unit_cost' => $unitCostAtTime,   // price snapshot
-                        'total_cost' => $lineCostAtTime,   // price snapshot
+                        'unit_cost' => $unitCostAtTime,
+                        'total_cost' => $lineCostAtTime,
                         'reason' => 'Production',
-                        'notes' => 'Recipe: '.$recipe->menuItem->name.' × '.$validated['quantity_produced'],
+                        'notes' => 'Batch Production: '.($recipe->menuItem?->name ?? 'Unknown').' × '.$validated['quantity_produced'],
                         'user_id' => auth()->id(),
                         'reference_id' => $refId,
                         'reference_type' => 'production',
+                    ]);
+                }
+
+                // ── 2. Increment stock of the FINISHED MENU ITEM (if linked to inventory) ──
+                if ($recipe->menuItem && $recipe->menuItem->inventory_item_id) {
+                    $qtyProduced = $validated['quantity_produced'];
+                    $finishedItemId = $recipe->menuItem->inventory_item_id;
+
+                    // Atomic increment for finished goods stock
+                    DB::table('inventory_item_locations')->updateOrInsert(
+                        ['inventory_item_id' => $finishedItemId, 'inventory_location_id' => $validated['inventory_location_id']],
+                        ['updated_at' => now(), 'created_at' => now()]
+                    );
+                    DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $finishedItemId)
+                        ->where('inventory_location_id', $validated['inventory_location_id'])
+                        ->increment('quantity', $qtyProduced);
+
+                    InventoryTransaction::create([
+                        'inventory_item_id' => $finishedItemId,
+                        'inventory_location_id' => $validated['inventory_location_id'],
+                        'type' => 'in',
+                        'quantity' => $qtyProduced,
+                        'unit_cost' => $totalProductionCost / $qtyProduced,
+                        'total_cost' => $totalProductionCost,
+                        'reason' => 'Finished Goods',
+                        'notes' => 'Produced Batch: '.($recipe->menuItem->name),
+                        'user_id' => auth()->id(),
+                        'reference_id' => $refId,
+                        'reference_type' => 'production_finished',
                     ]);
                 }
 
@@ -249,6 +280,7 @@ class RecipeController extends Controller
      */
     public function productionLogDetails(ProductionLog $log)
     {
+        $this->checkPermission('kitchen-production');
         $ingredients = InventoryTransaction::with(['item.issueUom'])
             ->where('reference_id', $log->reference_id)
             ->where('reference_type', 'production')
@@ -286,6 +318,7 @@ class RecipeController extends Controller
      */
     public function productionLogs()
     {
+        $this->checkPermission('kitchen-production');
         $logs = ProductionLog::with([
             'recipe.menuItem',
             'recipe.yieldUom',

@@ -7,6 +7,14 @@ use Illuminate\Http\Request;
 
 class TableController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         return response()->json(
@@ -16,6 +24,7 @@ class TableController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-tables');
         $validated = $request->validate([
             'table_number' => 'required|string|max:255',
             'restaurant_master_id' => 'required|exists:restaurant_masters,id',
@@ -38,6 +47,7 @@ class TableController extends Controller
 
     public function update(Request $request, RestaurantTable $table)
     {
+        $this->checkPermission('manage-tables');
         $validated = $request->validate([
             'table_number' => 'sometimes|required|string|max:255',
             'restaurant_master_id' => 'sometimes|required|exists:restaurant_masters,id',
@@ -55,6 +65,7 @@ class TableController extends Controller
 
     public function destroy(RestaurantTable $table)
     {
+        $this->checkPermission('manage-tables');
         try {
             $table->delete();
 

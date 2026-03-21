@@ -7,6 +7,14 @@ use Illuminate\Http\Request;
 
 class PaymentMethodController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
         $query = PaymentMethod::query();
@@ -19,6 +27,7 @@ class PaymentMethodController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'name' => 'required|string|unique:payment_methods,name',
             'code' => 'nullable|string|in:cash,card,upi,room_charge',
@@ -37,6 +46,7 @@ class PaymentMethodController extends Controller
 
     public function update(Request $request, PaymentMethod $paymentMethod)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'name' => 'required|string|unique:payment_methods,name,'.$paymentMethod->id,
             'code' => 'nullable|string|in:cash,card,upi,room_charge',
@@ -55,6 +65,7 @@ class PaymentMethodController extends Controller
 
     public function destroy(PaymentMethod $paymentMethod)
     {
+        $this->checkPermission('manage-settings');
         $paymentMethod->delete();
 
         return response()->json(null, 204);

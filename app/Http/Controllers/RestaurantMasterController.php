@@ -8,6 +8,14 @@ use Illuminate\Support\Facades\Storage;
 
 class RestaurantMasterController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
         $query = RestaurantMaster::with(['kitchenLocation', 'barLocation', 'department']);
@@ -20,6 +28,7 @@ class RestaurantMasterController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-restaurants');
         $validated = $this->validateRestaurant($request);
         $restaurant = RestaurantMaster::create($validated);
 
@@ -33,6 +42,7 @@ class RestaurantMasterController extends Controller
 
     public function update(Request $request, RestaurantMaster $restaurantMaster)
     {
+        $this->checkPermission('manage-restaurants');
         $validated = $this->validateRestaurant($request);
         $restaurantMaster->update($validated);
 
@@ -41,6 +51,7 @@ class RestaurantMasterController extends Controller
 
     public function destroy(RestaurantMaster $restaurantMaster)
     {
+        $this->checkPermission('manage-restaurants');
         try {
             $restaurantMaster->delete();
 

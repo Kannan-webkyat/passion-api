@@ -8,6 +8,14 @@ use Spatie\Permission\Models\Role;
 
 class RoleController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         return Role::with('permissions')->get();
@@ -20,10 +28,15 @@ class RoleController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-users');
         $validated = $request->validate([
             'name' => 'required|string|unique:roles,name',
             'permissions' => 'nullable|array',
         ]);
+
+        if ($validated['name'] === 'Admin' && ! auth()->user()->hasRole('Admin')) {
+            abort(403, 'Only Admins can create the Admin role.');
+        }
 
         $role = Role::create(['name' => $validated['name'], 'guard_name' => 'web']);
 
@@ -41,6 +54,10 @@ class RoleController extends Controller
 
     public function update(Request $request, Role $role)
     {
+        $this->checkPermission('manage-users');
+        if ($role->name === 'Admin' && ! auth()->user()->hasRole('Admin')) {
+            abort(403, 'Only Admins can modify the Admin role.');
+        }
         $validated = $request->validate([
             'name' => 'string|unique:roles,name,'.$role->id,
             'permissions' => 'nullable|array',
@@ -60,6 +77,7 @@ class RoleController extends Controller
 
     public function destroy(Role $role)
     {
+        $this->checkPermission('manage-users');
         if ($role->name === 'Admin') {
             return response()->json(['message' => 'Cannot delete the Admin role.'], 403);
         }

@@ -12,8 +12,17 @@ class InventoryCategoryController extends Controller
         return response()->json(InventoryCategory::with('parent')->orderBy('name')->get());
     }
 
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function store(Request $request)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255|unique:inventory_categories,name',
             'description' => 'nullable|string',
@@ -31,6 +40,7 @@ class InventoryCategoryController extends Controller
 
     public function update(Request $request, InventoryCategory $category)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255|unique:inventory_categories,name,'.$category->id,
             'description' => 'nullable|string',
@@ -43,6 +53,7 @@ class InventoryCategoryController extends Controller
 
     public function destroy(InventoryCategory $category)
     {
+        $this->checkPermission('manage-inventory');
         try {
             $category->delete();
 

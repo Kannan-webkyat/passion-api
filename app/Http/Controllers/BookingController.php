@@ -13,6 +13,14 @@ use Illuminate\Http\Request;
 
 class BookingController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     private function dateEndExclusiveFromDateTime(Carbon $dt): string
     {
         // If checkout is exactly at midnight, the date itself is already exclusive.
@@ -105,6 +113,7 @@ class BookingController extends Controller
 
     public function index(Request $request)
     {
+        $this->checkPermission('view-rooms');
         return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
             ->when($request->booking_group_id, function ($q) use ($request) {
                 $q->where('booking_group_id', $request->booking_group_id);
@@ -115,6 +124,7 @@ class BookingController extends Controller
 
     public function chart(Request $request)
     {
+        $this->checkPermission('view-rooms');
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -142,6 +152,7 @@ class BookingController extends Controller
 
     public function summary(Request $request)
     {
+        $this->checkPermission('view-rooms');
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
         $dayStartAt = $date->copy()->startOfDay();
@@ -207,6 +218,7 @@ class BookingController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('reservation');
         $validated = $request->validate([
             'room_ids' => 'nullable|array',
             'room_ids.*' => 'exists:rooms,id',
@@ -483,6 +495,7 @@ class BookingController extends Controller
      */
     public function storeGroup(Request $request)
     {
+        $this->checkPermission('reservation');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
@@ -505,11 +518,13 @@ class BookingController extends Controller
 
     public function show(Booking $booking)
     {
+        $this->checkPermission('reservation');
         return $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
     }
 
     public function update(Request $request, Booking $booking)
     {
+        $this->checkPermission('reservation');
         $validated = $request->validate([
             'room_id' => 'exists:rooms,id',
             'first_name' => 'string|max:255',
@@ -723,6 +738,7 @@ class BookingController extends Controller
     // ── Early Check-In ────────────────────────────────────────────────────────
     public function earlyCheckin(Request $request, Booking $booking)
     {
+        $this->checkPermission('reservation');
         $request->validate([
             'time' => 'required|date_format:H:i',
         ]);
@@ -767,6 +783,7 @@ class BookingController extends Controller
     // ── Late Checkout ─────────────────────────────────────────────────────────
     public function lateCheckout(Request $request, Booking $booking)
     {
+        $this->checkPermission('reservation');
         $request->validate([
             'time' => 'required|date_format:H:i',
         ]);

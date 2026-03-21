@@ -8,6 +8,14 @@ use Illuminate\Support\Facades\Hash;
 
 class UserController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         return User::with(['roles', 'departments'])->get();
@@ -15,6 +23,7 @@ class UserController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-users');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'email' => 'required|string|email|max:255|unique:users',
@@ -30,6 +39,9 @@ class UserController extends Controller
         ]);
 
         if (isset($validated['roles'])) {
+            if (in_array('Admin', $validated['roles']) && ! auth()->user()->hasRole('Admin')) {
+                abort(403, 'Only Admins can assign the Admin role.');
+            }
             $user->syncRoles($validated['roles']);
         }
 
@@ -47,6 +59,7 @@ class UserController extends Controller
 
     public function update(Request $request, User $user)
     {
+        $this->checkPermission('manage-users');
         $validated = $request->validate([
             'name' => 'string|max:255',
             'email' => 'string|email|max:255|unique:users,email,'.$user->id,
@@ -68,6 +81,13 @@ class UserController extends Controller
         $user->save();
 
         if (isset($validated['roles'])) {
+            if (in_array('Admin', $validated['roles']) && ! auth()->user()->hasRole('Admin')) {
+                abort(403, 'Only Admins can assign the Admin role.');
+            }
+            // Also prevent removing Admin role from an admin if requester is not admin
+            if ($user->hasRole('Admin') && ! auth()->user()->hasRole('Admin')) {
+                abort(403, 'Cannot modify Admin users.');
+            }
             $user->syncRoles($validated['roles']);
         }
 
@@ -80,6 +100,11 @@ class UserController extends Controller
 
     public function destroy(User $user)
     {
+        $this->checkPermission('manage-users');
+        if ($user->hasRole('Admin') && ! auth()->user()->hasRole('Admin')) {
+            abort(403, 'Only Admins can delete other Admins.');
+        }
+
         if ($user->hasRole('Admin') && User::role('Admin')->count() <= 1) {
             return response()->json(['message' => 'Cannot delete the last admin.'], 403);
         }

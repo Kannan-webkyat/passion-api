@@ -12,6 +12,14 @@ use Illuminate\Support\Str;
 
 class StoreRequestController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         $user = auth()->user();
@@ -87,6 +95,7 @@ class StoreRequestController extends Controller
 
     public function approve(StoreRequest $storeRequest)
     {
+        $this->checkPermission('manage-inventory');
         if ($storeRequest->status !== 'pending') {
             return response()->json(['message' => 'Request already processsed'], 422);
         }
@@ -102,6 +111,7 @@ class StoreRequestController extends Controller
 
     public function reject(StoreRequest $storeRequest)
     {
+        $this->checkPermission('manage-inventory');
         if ($storeRequest->status !== 'pending') {
             return response()->json(['message' => 'Request already processed'], 422);
         }
@@ -143,6 +153,7 @@ class StoreRequestController extends Controller
 
     public function issue(Request $request, StoreRequest $storeRequest)
     {
+        $this->checkPermission('manage-inventory');
         if (! in_array($storeRequest->status, ['approved', 'partially_issued'])) {
             return response()->json(['message' => 'Request must be approved before issuance'], 422);
         }
@@ -165,41 +176,33 @@ class StoreRequestController extends Controller
                     continue;
                 }
 
-                // 1. Deduct from Source Location (e.g., Main Store)
+                // 1. Lock and Verify source location stock
+                /** @var object|null $sourceStock */
                 $sourceStock = DB::table('inventory_item_locations')
                     ->where('inventory_item_id', $requestItem->inventory_item_id)
                     ->where('inventory_location_id', $storeRequest->to_location_id)
+                    ->lockForUpdate()
                     ->first();
 
                 if (! $sourceStock || $sourceStock->quantity < $qtyToIssue) {
                     throw new \Exception('Insufficient stock in source location for item '.$requestItem->item->name);
                 }
 
+                // 2. Atomically decrement from source location
                 DB::table('inventory_item_locations')
                     ->where('inventory_item_id', $requestItem->inventory_item_id)
                     ->where('inventory_location_id', $storeRequest->to_location_id)
                     ->decrement('quantity', $qtyToIssue);
 
-                // 2. Add to Target Location (e.g., Bar Store)
-                $existsInTarget = DB::table('inventory_item_locations')
+                // 3. Atomically increment for TARGET location (with locking and existence check)
+                DB::table('inventory_item_locations')->updateOrInsert(
+                    ['inventory_item_id' => $requestItem->inventory_item_id, 'inventory_location_id' => $storeRequest->from_location_id],
+                    ['updated_at' => now(), 'created_at' => now()]
+                );
+                DB::table('inventory_item_locations')
                     ->where('inventory_item_id', $requestItem->inventory_item_id)
                     ->where('inventory_location_id', $storeRequest->from_location_id)
-                    ->exists();
-
-                if ($existsInTarget) {
-                    DB::table('inventory_item_locations')
-                        ->where('inventory_item_id', $requestItem->inventory_item_id)
-                        ->where('inventory_location_id', $storeRequest->from_location_id)
-                        ->increment('quantity', $qtyToIssue, ['updated_at' => now()]);
-                } else {
-                    DB::table('inventory_item_locations')->insert([
-                        'inventory_item_id' => $requestItem->inventory_item_id,
-                        'inventory_location_id' => $storeRequest->from_location_id,
-                        'quantity' => $qtyToIssue,
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ]);
-                }
+                    ->increment('quantity', $qtyToIssue);
 
                 // 3. Update Request Item
                 $requestItem->increment('quantity_issued', $qtyToIssue);

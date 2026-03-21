@@ -13,8 +13,17 @@ class ComboController extends Controller
         return response()->json(Combo::with(['menuItems', 'restaurantCombos'])->get());
     }
 
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function store(Request $request)
     {
+        $this->checkPermission('manage-restaurant');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'price' => 'required|numeric',
@@ -44,6 +53,7 @@ class ComboController extends Controller
 
     public function update(Request $request, Combo $menuCombo)
     {
+        $this->checkPermission('manage-restaurant');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'price' => 'sometimes|required|numeric',
@@ -71,6 +81,7 @@ class ComboController extends Controller
 
     public function destroy(Combo $menuCombo)
     {
+        $this->checkPermission('manage-restaurant');
         try {
             $menuCombo->delete();
 

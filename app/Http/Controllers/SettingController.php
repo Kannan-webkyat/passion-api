@@ -8,6 +8,14 @@ use Illuminate\Support\Facades\Storage;
 
 class SettingController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function receiptDefaults()
     {
         return response()->json(Setting::getReceiptDefaults());
@@ -15,6 +23,7 @@ class SettingController extends Controller
 
     public function updateReceiptDefaults(Request $request)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'address' => 'nullable|string|max:1000',
             'email' => 'nullable|email|max:255',

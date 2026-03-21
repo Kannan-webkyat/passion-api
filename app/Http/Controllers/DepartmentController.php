@@ -7,6 +7,14 @@ use Illuminate\Http\Request;
 
 class DepartmentController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
         $query = Department::withCount('users', 'locations');
@@ -19,6 +27,7 @@ class DepartmentController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:50|unique:departments,code',
@@ -37,6 +46,7 @@ class DepartmentController extends Controller
 
     public function update(Request $request, Department $department)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:50|unique:departments,code,'.$department->id,
@@ -50,6 +60,7 @@ class DepartmentController extends Controller
 
     public function destroy(Department $department)
     {
+        $this->checkPermission('manage-settings');
         try {
             $department->delete();
 

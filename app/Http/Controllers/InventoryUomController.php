@@ -12,8 +12,17 @@ class InventoryUomController extends Controller
         return response()->json(InventoryUom::orderBy('name')->get());
     }
 
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function store(Request $request)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255|unique:inventory_uoms,name',
             'short_name' => 'required|string|max:50|unique:inventory_uoms,short_name',
@@ -25,6 +34,7 @@ class InventoryUomController extends Controller
 
     public function update(Request $request, InventoryUom $uom)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|max:255|unique:inventory_uoms,name,'.$uom->id,
             'short_name' => 'required|string|max:50|unique:inventory_uoms,short_name,'.$uom->id,
@@ -36,6 +46,7 @@ class InventoryUomController extends Controller
 
     public function destroy(InventoryUom $uom)
     {
+        $this->checkPermission('manage-inventory');
         try {
             $uom->delete();
 

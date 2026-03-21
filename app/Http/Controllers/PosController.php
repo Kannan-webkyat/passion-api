@@ -9,6 +9,7 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\MenuCategory;
 use App\Models\MenuItem;
+use App\Models\PosDayClosing;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
 use App\Models\PosOrderRefund;
@@ -26,12 +27,21 @@ use Illuminate\Support\Facades\DB;
 
 class PosController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     // ── Restaurants ──────────────────────────────────────────────────────────
 
     // ── Waiters (for Change Waiter dropdown) ──────────────────────────────────
 
     public function waiters(Request $request)
     {
+        $this->checkPermission('pos-order');
         $users = User::role(['Waiter', 'Senior Waiter'])
             ->orderBy('name')
             ->get(['id', 'name'])
@@ -53,6 +63,7 @@ class PosController extends Controller
 
     public function rooms()
     {
+        $this->checkPermission('pos-order');
         $rooms = DB::table('bookings')
             ->join('rooms', 'bookings.room_id', '=', 'rooms.id')
             ->where('bookings.status', 'checked_in')
@@ -74,6 +85,7 @@ class PosController extends Controller
 
     public function activeOrders(Request $request)
     {
+        $this->checkPermission('pos-order');
         $request->validate(['restaurant_id' => 'required|exists:restaurant_masters,id']);
 
         $orders = PosOrder::with(['room'])
@@ -112,12 +124,23 @@ class PosController extends Controller
 
     public function restaurants()
     {
-        $restaurants = RestaurantMaster::where('is_active', true)
+        $user = auth()->user();
+        $query = RestaurantMaster::where('is_active', true)
             ->with(['department'])
-            ->withCount('tables')
-            ->get();
+            ->withCount('tables');
 
-        return response()->json($restaurants);
+        // Non-admins can only see outlets linked to their departments.
+        if ($user && ! $user->hasRole('Admin')) {
+            $deptIds = $user->departments()->pluck('departments.id')->toArray();
+            if (count($deptIds) > 0) {
+                // Return outlets that belong to any of the user's departments OR have no department (general outlets).
+                $query->where(function ($q) use ($deptIds) {
+                    $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                });
+            }
+        }
+
+        return response()->json($query->get());
     }
 
     public function receiptConfig(RestaurantMaster $restaurant)
@@ -142,6 +165,7 @@ class PosController extends Controller
 
     public function tables(Request $request)
     {
+        $this->checkPermission('pos-order');
         $request->validate(['restaurant_id' => 'required|exists:restaurant_masters,id']);
 
         $tables = RestaurantTable::with(['category'])
@@ -189,6 +213,7 @@ class PosController extends Controller
 
     public function menu(Request $request)
     {
+        $this->checkPermission('pos-order');
         $restaurantId = $request->input('restaurant_id');
 
         // Total portions produced per menu_item (via recipe)
@@ -349,6 +374,7 @@ class PosController extends Controller
 
     public function openOrder(Request $request)
     {
+        $this->checkPermission('pos-order');
         $orderType = $request->input('order_type', 'dine_in');
 
         $rules = [
@@ -372,18 +398,22 @@ class PosController extends Controller
 
         $validated = $request->validate($rules);
 
-        if ($orderType === 'dine_in') {
-            // Prevent duplicate open orders on the same table
-            $existing = PosOrder::where('table_id', $validated['table_id'])
-                ->whereIn('status', ['open', 'billed'])
-                ->first();
+        $duplicateOrder = null;
+        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder) {
+            if ($orderType === 'dine_in') {
+                // Lock the table to prevent concurrent order creation
+                RestaurantTable::where('id', $validated['table_id'])->lockForUpdate()->first();
+                
+                $existing = PosOrder::where('table_id', $validated['table_id'])
+                    ->whereIn('status', ['open', 'billed'])
+                    ->first();
 
-            if ($existing) {
-                return response()->json($this->formatOrder($existing->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')));
+                if ($existing) {
+                    $duplicateOrder = $existing;
+                    return null;
+                }
             }
-        }
 
-        $order = DB::transaction(function () use ($validated, $orderType) {
             $order = PosOrder::create([
                 'order_type' => $orderType,
                 'table_id' => $orderType === 'dine_in' ? $validated['table_id'] : null,
@@ -410,6 +440,10 @@ class PosController extends Controller
             return $order;
         });
 
+        if ($duplicateOrder) {
+            return response()->json($this->formatOrder($duplicateOrder->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')));
+        }
+
         return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy')), 201);
     }
 
@@ -417,6 +451,7 @@ class PosController extends Controller
 
     public function orderHistory(Request $request)
     {
+        $this->checkPermission('pos-order');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'order_id' => 'nullable|integer|min:1',
@@ -470,6 +505,7 @@ class PosController extends Controller
 
     public function getOrder(PosOrder $order)
     {
+        $this->checkPermission('pos-order');
         return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
 
@@ -477,6 +513,7 @@ class PosController extends Controller
 
     public function updateOrder(Request $request, PosOrder $order)
     {
+        $this->checkPermission('pos-order');
         if (! in_array($order->status, ['open', 'billed'])) {
             return response()->json(['message' => 'Order is not editable.'], 422);
         }
@@ -537,6 +574,7 @@ class PosController extends Controller
 
     public function transferTable(Request $request, PosOrder $order)
     {
+        $this->checkPermission('pos-order');
         if ($order->order_type !== 'dine_in') {
             return response()->json(['message' => 'Only dine-in orders can be transferred.'], 422);
         }
@@ -558,21 +596,34 @@ class PosController extends Controller
             return response()->json(['message' => 'Target table must be in the same restaurant.'], 422);
         }
 
-        $existingOrder = PosOrder::where('table_id', $newTableId)
-            ->whereIn('status', ['open', 'billed'])
-            ->where('id', '!=', $order->id)
-            ->first();
-        if ($existingOrder) {
-            return response()->json(['message' => 'Target table already has an active order.'], 422);
-        }
+        $errorResponse = null;
+        DB::transaction(function () use ($order, $newTableId, &$errorResponse) {
+            // Lock the resources to prevent concurrent transfers or opens
+            RestaurantTable::where('id', $newTableId)->lockForUpdate()->first();
+            if ($order->table_id) {
+                RestaurantTable::where('id', $order->table_id)->lockForUpdate()->first();
+            }
 
-        DB::transaction(function () use ($order, $newTableId) {
+            $existingOrder = PosOrder::where('table_id', $newTableId)
+                ->whereIn('status', ['open', 'billed'])
+                ->where('id', '!=', $order->id)
+                ->first();
+
+            if ($existingOrder) {
+                $errorResponse = response()->json(['message' => 'Target table already has an active order.'], 422);
+                return;
+            }
+
             if ($order->table_id) {
                 RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
             }
             $order->update(['table_id' => $newTableId]);
             RestaurantTable::where('id', $newTableId)->update(['status' => 'occupied']);
         });
+
+        if ($errorResponse) {
+            return $errorResponse;
+        }
 
         return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
@@ -581,6 +632,7 @@ class PosController extends Controller
 
     public function syncItems(Request $request, PosOrder $order)
     {
+        $this->checkPermission('pos-order');
         if ($order->status !== 'open') {
             return response()->json(['message' => 'Order is billed. Re-open to add or edit items.'], 422);
         }
@@ -592,7 +644,18 @@ class PosController extends Controller
             'items.*.combo_id' => 'nullable|exists:combos,id',
             'items.*.quantity' => 'required|integer|min:1',
             'items.*.notes' => 'nullable|string',
+            'last_updated_at' => 'nullable|string',
         ]);
+
+        if (! empty($validated['last_updated_at'])) {
+            $remoteUpdated = $order->updated_at->toIso8601String();
+            if ($remoteUpdated !== $validated['last_updated_at']) {
+                return response()->json([
+                    'message' => 'This order was modified by another terminal. Please reload to see the latest changes.',
+                    'order' => $this->formatOrder($order->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')),
+                ], 409);
+            }
+        }
 
         foreach ($validated['items'] as $i => $row) {
             $hasMenu = array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== '';
@@ -614,75 +677,81 @@ class PosController extends Controller
             }
         }
 
-        // ── Availability check: prevent overselling produced items ─────────────
-        $produced = DB::table('recipes')
-            ->leftJoin('production_logs', 'recipes.id', '=', 'production_logs.recipe_id')
-            ->where('recipes.is_active', true)
-            ->where('recipes.requires_production', true)
-            ->select('recipes.menu_item_id', DB::raw('COALESCE(SUM(production_logs.quantity_produced), 0) as total'))
-            ->groupBy('recipes.menu_item_id')
-            ->pluck('total', 'menu_item_id')
-            ->map(fn ($v) => (float) $v);
+        DB::transaction(function () use ($order, $validated) {
+            // Lock the order to serialize all cart synchronization requests
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            
+            // ── Availability check: prevent overselling produced items (INSIDE transaction) ──
+            $produced = DB::table('recipes')
+                ->leftJoin('production_logs', 'recipes.id', '=', 'production_logs.recipe_id')
+                ->where('recipes.is_active', true)
+                ->where('recipes.requires_production', true)
+                ->select('recipes.menu_item_id', DB::raw('COALESCE(SUM(production_logs.quantity_produced), 0) as total'))
+                ->groupBy('recipes.menu_item_id')
+                ->pluck('total', 'menu_item_id')
+                ->map(fn ($v) => (float) $v);
 
-        $soldExcludingThis = DB::table('pos_order_items')
-            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-            ->where('pos_orders.status', '!=', 'void')
-            ->where('pos_order_items.order_id', '!=', $order->id)
-            ->where('pos_order_items.status', 'active')
-            ->whereNotNull('pos_order_items.menu_item_id')
-            ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
-            ->groupBy('pos_order_items.menu_item_id')
-            ->pluck('total', 'menu_item_id')
-            ->map(fn ($v) => (float) $v);
+            $soldExcludingThis = DB::table('pos_order_items')
+                ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+                ->where('pos_orders.status', '!=', 'void')
+                ->where('pos_order_items.order_id', '!=', $order->id)
+                ->where('pos_order_items.status', 'active')
+                ->whereNotNull('pos_order_items.menu_item_id')
+                ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
+                ->groupBy('pos_order_items.menu_item_id')
+                ->pluck('total', 'menu_item_id')
+                ->map(fn ($v) => (float) $v);
 
-        // Add sold from combo items (constituent menu items)
-        $comboSold = DB::table('pos_order_items')
-            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-            ->join('combo_items', 'combo_items.combo_id', '=', 'pos_order_items.combo_id')
-            ->where('pos_orders.status', '!=', 'void')
-            ->where('pos_order_items.order_id', '!=', $order->id)
-            ->where('pos_order_items.status', 'active')
-            ->whereNotNull('pos_order_items.combo_id')
-            ->select('combo_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
-            ->groupBy('combo_items.menu_item_id')
-            ->pluck('total', 'menu_item_id')
-            ->map(fn ($v) => (float) $v);
-        foreach ($comboSold as $mid => $cnt) {
-            $soldExcludingThis->put($mid, ($soldExcludingThis->get($mid, 0) + $cnt));
-        }
+            // Add sold from combo items (constituent menu items)
+            $comboSold = DB::table('pos_order_items')
+                ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+                ->join('combo_items', 'combo_items.combo_id', '=', 'pos_order_items.combo_id')
+                ->where('pos_orders.status', '!=', 'void')
+                ->where('pos_order_items.order_id', '!=', $order->id)
+                ->where('pos_order_items.status', 'active')
+                ->whereNotNull('pos_order_items.combo_id')
+                ->select('combo_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
+                ->groupBy('combo_items.menu_item_id')
+                ->pluck('total', 'menu_item_id')
+                ->map(fn ($v) => (float) $v);
 
-        // Expand combos to constituent items for availability check
-        $incomingByItem = collect();
-        foreach ($validated['items'] as $row) {
-            if (array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== '') {
-                $incomingByItem->put($row['menu_item_id'], $incomingByItem->get($row['menu_item_id'], 0) + (int) $row['quantity']);
-            } elseif (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '') {
-                $combo = Combo::with('menuItems')->find($row['combo_id']);
-                if ($combo && $combo->menuItems->isNotEmpty()) {
-                    $qty = (int) $row['quantity'];
-                    foreach ($combo->menuItems as $mi) {
-                        $incomingByItem->put($mi->id, $incomingByItem->get($mi->id, 0) + $qty);
+            foreach ($comboSold as $mid => $cnt) {
+                $soldExcludingThis->put($mid, ($soldExcludingThis->get($mid, 0) + $cnt));
+            }
+
+            // Expand combos to constituent items for availability check
+            $incomingByItem = collect();
+            foreach ($validated['items'] as $row) {
+                if (array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== '') {
+                    $incomingByItem->put($row['menu_item_id'], $incomingByItem->get($row['menu_item_id'], 0) + (int) $row['quantity']);
+                } elseif (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '') {
+                    $combo = \App\Models\Combo::with('menuItems')->find($row['combo_id']);
+                    if ($combo && $combo->menuItems->isNotEmpty()) {
+                        $qty = (int) $row['quantity'];
+                        foreach ($combo->menuItems as $mi) {
+                            $incomingByItem->put($mi->id, $incomingByItem->get($mi->id, 0) + $qty);
+                        }
                     }
                 }
             }
-        }
 
-        foreach ($incomingByItem as $menuItemId => $incomingQty) {
-            if (! $produced->has($menuItemId)) {
-                continue;
+            foreach ($incomingByItem as $menuItemId => $incomingQty) {
+                if (! $produced->has($menuItemId)) {
+                    continue;
+                }
+                $available = max(0, $produced[$menuItemId] - ($soldExcludingThis[$menuItemId] ?? 0));
+                if ($incomingQty > $available + 0.001) {
+                    $item = \App\Models\MenuItem::find($menuItemId);
+                    $name = $item ? $item->name : "Item #{$menuItemId}";
+
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json([
+                            'message' => "Insufficient stock for \"{$name}\". Only {$available} available, requested {$incomingQty}.",
+                        ], 422)
+                    );
+                }
             }
-            $available = max(0, $produced[$menuItemId] - ($soldExcludingThis[$menuItemId] ?? 0));
-            if ($incomingQty > $available + 0.001) {
-                $item = MenuItem::find($menuItemId);
-                $name = $item ? $item->name : "Item #{$menuItemId}";
 
-                return response()->json([
-                    'message' => "Insufficient stock for \"{$name}\". Only {$available} available, requested {$incomingQty}.",
-                ], 422);
-            }
-        }
-
-        DB::transaction(function () use ($order, $validated) {
             $currentActive = $order->items()->where('status', 'active')->get();
 
             $key = fn ($row) => (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '')
@@ -839,6 +908,7 @@ class PosController extends Controller
                 }
             }
 
+            $order->touch(); // Force updated_at change even if only items were synced
             $this->recalculate($order);
         });
 
@@ -855,26 +925,32 @@ class PosController extends Controller
 
         // Only items that need kitchen (not is_direct_sale) go to KOT
         $directSaleIds = MenuItem::where('is_direct_sale', true)->pluck('id')->toArray();
-        $kotQuery = $order->items()
-            ->where('status', 'active')
-            ->where('kot_sent', false)
-            ->where(fn ($q) => $q->whereNull('menu_item_id')->orWhereNotIn('menu_item_id', $directSaleIds));
-
-        if ($kotQuery->exists()) {
-            $order->increment('current_kot_batch');
-            $batch = $order->fresh()->current_kot_batch;
-
-            $order->items()
+        
+        DB::transaction(function () use ($order, $directSaleIds) {
+            // Lock the order to prevent concurrent simultaneous KOT triggers issuing the same batch number
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            
+            $kotQuery = $order->items()
                 ->where('status', 'active')
                 ->where('kot_sent', false)
-                ->where(fn ($q) => $q->whereNull('menu_item_id')->orWhereNotIn('menu_item_id', $directSaleIds))
-                ->update(['kot_sent' => true, 'kot_batch' => $batch]);
-        }
+                ->where(fn ($q) => $q->whereNull('menu_item_id')->orWhereNotIn('menu_item_id', $directSaleIds));
 
-        // Always reset kitchen status so the display re-acknowledges
-        if (! in_array($order->kitchen_status, ['pending', 'preparing'])) {
-            $order->update(['kitchen_status' => 'pending']);
-        }
+            if ($kotQuery->exists()) {
+                $order->increment('current_kot_batch');
+                $batch = $order->current_kot_batch;
+
+                $order->items()
+                    ->where('status', 'active')
+                    ->where('kot_sent', false)
+                    ->where(fn ($q) => $q->whereNull('menu_item_id')->orWhereNotIn('menu_item_id', $directSaleIds))
+                    ->update(['kot_sent' => true, 'kot_batch' => $batch]);
+            }
+
+            // Always reset kitchen status so the display re-acknowledges
+            if (! in_array($order->kitchen_status, ['pending', 'preparing'])) {
+                $order->update(['kitchen_status' => 'pending']);
+            }
+        });
 
         return response()->json([
             'message' => 'KOT sent.',
@@ -887,13 +963,23 @@ class PosController extends Controller
 
     public function openBill(PosOrder $order)
     {
-        if ($order->status !== 'open') {
-            return response()->json([
-                'message' => 'Order must be open to generate bill.',
-            ], 422);
-        }
+        $this->checkPermission('pos-settle');
+        $errorResponse = null;
+        DB::transaction(function () use ($order, &$errorResponse) {
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            
+            if ($order->status !== 'open') {
+                $errorResponse = response()->json([
+                    'message' => 'Order must be open to generate bill.',
+                ], 422);
+                return;
+            }
+            $order->update(['status' => 'billed']);
+        });
 
-        $order->update(['status' => 'billed']);
+        if ($errorResponse) {
+            return $errorResponse;
+        }
 
         return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
@@ -902,13 +988,15 @@ class PosController extends Controller
 
     public function settle(Request $request, PosOrder $order)
     {
-        $user = auth()->user();
-        if (! $user->hasRole('Admin') && ! $user->can('pos-settle')) {
-            return response()->json(['message' => 'You do not have permission to settle payments.'], 403);
-        }
-
+        $this->checkPermission('pos-settle');
         if ($order->status === 'paid') {
             return response()->json(['message' => 'Order already paid.'], 422);
+        }
+
+        // ── 1. CHECK IF DATE IS CLOSED ──
+        $today = now()->format('Y-m-d');
+        if (PosDayClosing::where('restaurant_id', $order->restaurant_id)->where('closed_date', $today)->exists()) {
+            return response()->json(['message' => 'Cannot settle new orders for a date that is already closed.'], 422);
         }
 
         $validated = $request->validate([
@@ -931,6 +1019,25 @@ class PosController extends Controller
         }
 
         DB::transaction(function () use ($order, $validated) {
+            // Lock the order to prevent concurrent settling/payments
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            if ($order->status === 'paid') {
+                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                    response()->json(['message' => 'Order is already paid.'], 422)
+                );
+            }
+
+            // If room charge is used, ensure booking is still active/checked-in
+            $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
+            if ($hasRoomCharge && $order->booking_id) {
+                $booking = Booking::lockForUpdate()->find($order->booking_id);
+                if (! $booking || $booking->status !== 'checked_in') {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json(['message' => 'Linked booking is no longer checked-in. Cannot process room charge.'], 422)
+                    );
+                }
+            }
+
             // Apply discount, service charge, tax exempt, delivery charge
             $deliveryCharge = (float) ($validated['delivery_charge'] ?? 0);
             if ($order->order_type !== 'delivery') {
@@ -997,19 +1104,32 @@ class PosController extends Controller
 
     public function reopen(PosOrder $order)
     {
-        if ($order->status !== 'billed') {
-            return response()->json([
-                'message' => 'Only billed (unpaid) orders can be re-opened.',
-            ], 422);
-        }
+        $this->checkPermission('pos-manage');
+        $errorResponse = null;
+        DB::transaction(function () use ($order, &$errorResponse) {
+            // Lock the order to prevent concurrent payments while reopening
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            
+            if ($order->status !== 'billed') {
+                $errorResponse = response()->json([
+                    'message' => 'Only billed (unpaid) orders can be re-opened.',
+                ], 422);
+                return;
+            }
 
-        if ($order->payments()->exists()) {
-            return response()->json([
-                'message' => 'Cannot re-open: order has payments. Void or refund first.',
-            ], 422);
-        }
+            if ($order->payments()->exists()) {
+                $errorResponse = response()->json([
+                    'message' => 'Cannot re-open: order has payments. Void or refund first.',
+                ], 422);
+                return;
+            }
 
-        $order->update(['status' => 'open']);
+            $order->update(['status' => 'open']);
+        });
+
+        if ($errorResponse) {
+            return $errorResponse;
+        }
 
         return response()->json($this->formatOrder($order->fresh()->load('items.menuItem.tax', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy')));
     }
@@ -1018,11 +1138,24 @@ class PosController extends Controller
 
     public function void(PosOrder $order)
     {
+        $this->checkPermission('manage-restaurant');
         if ($order->status === 'paid') {
             return response()->json(['message' => 'Cannot void a paid order.'], 422);
         }
 
+        // ── 1. CHECK IF DATE IS CLOSED ──
+        $orderDate = $order->created_at->format('Y-m-d');
+        if (PosDayClosing::where('restaurant_id', $order->restaurant_id)->where('closed_date', $orderDate)->exists()) {
+            return response()->json(['message' => 'Cannot void orders from a closed date.'], 422);
+        }
+
         DB::transaction(function () use ($order) {
+            // Lock the order to prevent concurrent voids
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            if ($order->status === 'void') {
+                return; // Already voided by another thread
+            }
+            
             $order->update(['status' => 'void', 'closed_at' => now()]);
 
             if ($order->table_id) {
@@ -1073,9 +1206,17 @@ class PosController extends Controller
 
     public function refund(Request $request, PosOrder $order)
     {
+        $this->checkPermission('manage-restaurant');
         if (! in_array($order->status, ['paid', 'refunded'])) {
             return response()->json(['message' => 'Only paid orders can be refunded.'], 422);
         }
+
+        // ── 1. CHECK IF DATE IS CLOSED ──
+        $today = now()->format('Y-m-d');
+        if (PosDayClosing::where('restaurant_id', $order->restaurant_id)->where('closed_date', $today)->exists()) {
+            return response()->json(['message' => 'Cannot process refunds for a date that is already closed.'], 422);
+        }
+    
 
         $validated = $request->validate([
             'amount' => 'required|numeric|min:0.01',
@@ -1099,6 +1240,19 @@ class PosController extends Controller
         }
 
         DB::transaction(function () use ($order, $validated, $amount) {
+            // Lock the order to serialize multiple concurrent refund requests
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            
+            // Re-verify the refundable amount after acquiring lock
+            $currentRefunded = (float) $order->refunds()->sum('amount');
+            $currentRefundable = (float) $order->total_amount - $currentRefunded;
+
+            if ($amount > $currentRefundable + 0.01) {
+                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                    response()->json(['message' => 'Refund amount exceeds remaining refundable amount.'], 422)
+                );
+            }
+
             PosOrderRefund::create([
                 'order_id' => $order->id,
                 'amount' => $amount,
@@ -1260,49 +1414,54 @@ class PosController extends Controller
         ]);
         $batch = (int) $validated['batch'];
 
-        $batchItems = $order->items()
-            ->where('kot_sent', true)
-            ->where('status', 'active')
-            ->where('kot_batch', $batch)
-            ->get();
+        return DB::transaction(function () use ($order, $batch) {
+            // Lock the order to prevent concurrent ready deductions for the same batch
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
 
-        if ($batchItems->isEmpty()) {
-            return response()->json(['message' => 'No items in batch.'], 422);
-        }
+            $batchItems = $order->items()
+                ->where('kot_sent', true)
+                ->where('status', 'active')
+                ->where('kot_batch', $batch)
+                ->get();
 
-        // Already marked?
-        if ($batchItems->every(fn ($i) => $i->kitchen_ready_at)) {
+            if ($batchItems->isEmpty()) {
+                return response()->json(['message' => 'No items in batch.'], 422);
+            }
+
+            // Already marked?
+            if ($batchItems->every(fn ($i) => $i->kitchen_ready_at)) {
+                return response()->json([
+                    'id' => $order->id,
+                    'kitchen_status' => $order->fresh()->kitchen_status,
+                    'ready_batches' => $this->getReadyBatches($order),
+                ]);
+            }
+
+            // Exact deductions enabled for full theoretical tracking
+            $insufficient = $this->deductBatchIngredients($order, $batch);
+
+            // Mark batch ready
+            $order->items()
+                ->where('kot_sent', true)
+                ->where('status', 'active')
+                ->where('kot_batch', $batch)
+                ->update(['kitchen_ready_at' => now()]);
+
+            // If all batches are now ready, set order kitchen_status
+            $order->refresh();
+            // All KOT items in this order
+            $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
+            $allReady = $allKotItems->every(fn ($i) => $i->kitchen_ready_at);
+            if ($allReady) {
+                $order->update(['kitchen_status' => 'ready']);
+            }
+
             return response()->json([
                 'id' => $order->id,
                 'kitchen_status' => $order->fresh()->kitchen_status,
                 'ready_batches' => $this->getReadyBatches($order),
             ]);
-        }
-
-        // Exact deductions enabled for full theoretical tracking
-        $insufficient = $this->deductBatchIngredients($order, $batch);
-
-        // Mark batch ready
-        $order->items()
-            ->where('kot_sent', true)
-            ->where('status', 'active')
-            ->where('kot_batch', $batch)
-            ->update(['kitchen_ready_at' => now()]);
-
-        // If all batches are now ready, set order kitchen_status
-        $order->refresh();
-        // All KOT items in this order
-        $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
-        $allReady = $allKotItems->every(fn ($i) => $i->kitchen_ready_at);
-        if ($allReady) {
-            $order->update(['kitchen_status' => 'ready']);
-        }
-
-        return response()->json([
-            'id' => $order->id,
-            'kitchen_status' => $order->fresh()->kitchen_status,
-            'ready_batches' => $this->getReadyBatches($order),
-        ]);
+        });
     }
 
     private function getReadyBatches(PosOrder $order): array
@@ -1427,8 +1586,8 @@ class PosController extends Controller
                 if (! $recipe || ($recipe->requires_production ?? true)) {
                     continue;
                 }
-
-                $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+                $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
+                $multiplier = $orderItem->quantity / $yield;
                 $menuName = $baseName.' · '.($recipe->menuItem?->name ?? 'Item #'.$menuItemId);
 
                 foreach ($recipe->ingredients as $ing) {
@@ -1500,9 +1659,15 @@ class PosController extends Controller
                         continue;
                     }
 
-                    $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+                    $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
+                    $multiplier = $orderItem->quantity / $yield;
 
                     foreach ($recipe->ingredients as $ing) {
+                        $item = $ing->inventoryItem;
+                        if (! $item) {
+                            continue;
+                        }
+
                         $rawQty = round($ing->raw_quantity * $multiplier, 3);
 
                         $currentStock = DB::table('inventory_item_locations')
@@ -1516,25 +1681,12 @@ class PosController extends Controller
                             continue;
                         }
 
-                        $exists = DB::table('inventory_item_locations')
+                        // Atomic decrement only if the record exists to prevent SQL silent failures
+                        DB::table('inventory_item_locations')
                             ->where('inventory_item_id', $ing->inventory_item_id)
                             ->where('inventory_location_id', $kitchenStore->id)
-                            ->exists();
-
-                        if ($exists) {
-                            DB::table('inventory_item_locations')
-                                ->where('inventory_item_id', $ing->inventory_item_id)
-                                ->where('inventory_location_id', $kitchenStore->id)
-                                ->decrement('quantity', $deduct);
-                        } else {
-                            DB::table('inventory_item_locations')->insert([
-                                'inventory_item_id' => $ing->inventory_item_id,
-                                'inventory_location_id' => $kitchenStore->id,
-                                'quantity' => -$deduct,
-                                'created_at' => now(),
-                                'updated_at' => now(),
-                            ]);
-                        }
+                            ->where('quantity', '>', -999999) // ensure existence
+                            ->decrement('quantity', $deduct);
 
                         $affectedItemIds[$ing->inventory_item_id] = true;
 
@@ -1665,7 +1817,8 @@ class PosController extends Controller
                     }
 
                     // multiplier = portions ordered / recipe yield
-                    $multiplier = $orderItem->quantity / $recipe->yield_quantity;
+                    $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
+                    $multiplier = $orderItem->quantity / $yield;
 
                     foreach ($recipe->ingredients as $ing) {
                         $rawQty = round($ing->raw_quantity * $multiplier, 3);
@@ -1684,29 +1837,19 @@ class PosController extends Controller
                             continue;
                         }
 
-                        $exists = DB::table('inventory_item_locations')
+                        // Atomic decrement only if the record exists to prevent SQL silent failures
+                        DB::table('inventory_item_locations')
                             ->where('inventory_item_id', $ing->inventory_item_id)
                             ->where('inventory_location_id', $kitchenStore->id)
-                            ->exists();
-
-                        if ($exists) {
-                            DB::table('inventory_item_locations')
-                                ->where('inventory_item_id', $ing->inventory_item_id)
-                                ->where('inventory_location_id', $kitchenStore->id)
-                                ->decrement('quantity', $deduct);
-                        } else {
-                            DB::table('inventory_item_locations')->insert([
-                                'inventory_item_id' => $ing->inventory_item_id,
-                                'inventory_location_id' => $kitchenStore->id,
-                                'quantity' => -$deduct,
-                                'created_at' => now(),
-                                'updated_at' => now(),
-                            ]);
-                        }
+                            ->where('quantity', '>', -999999) // ensure existence
+                            ->decrement('quantity', $deduct);
 
                         $affectedItemIds[$ing->inventory_item_id] = true;
 
                         $item = $ing->inventoryItem;
+                        if (! $item) {
+                            continue;
+                        }
                         $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
 
                         InventoryTransaction::create([
@@ -1784,6 +1927,7 @@ class PosController extends Controller
             $currentStock = (float) (DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $menuItem->inventory_item_id)
                 ->where('inventory_location_id', $barStore->id)
+                ->lockForUpdate()
                 ->value('quantity') ?? 0);
 
             $deduct = $deductQty;
@@ -1791,25 +1935,12 @@ class PosController extends Controller
                 continue;
             }
 
-            $exists = DB::table('inventory_item_locations')
+            // Atomic decrement to prevent race conditions during deduction
+            DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $menuItem->inventory_item_id)
                 ->where('inventory_location_id', $barStore->id)
-                ->exists();
-
-            if ($exists) {
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $menuItem->inventory_item_id)
-                    ->where('inventory_location_id', $barStore->id)
-                    ->decrement('quantity', $deduct);
-            } else {
-                DB::table('inventory_item_locations')->insert([
-                    'inventory_item_id' => $menuItem->inventory_item_id,
-                    'inventory_location_id' => $barStore->id,
-                    'quantity' => -$deduct,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
+                ->where('quantity', '>', -999999) // ensures existence for successful decrement
+                ->decrement('quantity', $deduct);
 
             $affectedItemIds[$menuItem->inventory_item_id] = true;
 

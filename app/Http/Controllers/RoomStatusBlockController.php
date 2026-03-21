@@ -10,8 +10,17 @@ use Illuminate\Http\Request;
 
 class RoomStatusBlockController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'start' => 'nullable|date',
             'end' => 'nullable|date|after_or_equal:start',
@@ -37,6 +46,7 @@ class RoomStatusBlockController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
             'status' => 'required|in:maintenance,dirty,cleaning',
@@ -89,6 +99,7 @@ class RoomStatusBlockController extends Controller
 
     public function update(Request $request, RoomStatusBlock $roomStatusBlock)
     {
+        $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'is_active' => 'nullable|boolean',
             'note' => 'nullable|string|max:255',
@@ -101,6 +112,7 @@ class RoomStatusBlockController extends Controller
 
     public function destroy(RoomStatusBlock $roomStatusBlock)
     {
+        $this->checkPermission('manage-rooms');
         $roomStatusBlock->delete();
 
         return response()->json(null, 204);

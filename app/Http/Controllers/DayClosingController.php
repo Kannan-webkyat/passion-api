@@ -6,15 +6,25 @@ use App\Models\PosDayClosing;
 use App\Models\PosOrder;
 use App\Models\PosPayment;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class DayClosingController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     /**
      * Preview day closing summary for a restaurant and date.
      * GET /pos/day-closing/preview?restaurant_id=&date=YYYY-MM-DD
      */
     public function preview(Request $request)
     {
+        $this->checkPermission('manage-restaurant');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'date' => 'required|date',
@@ -42,6 +52,7 @@ class DayClosingController extends Controller
      */
     public function close(Request $request)
     {
+        $this->checkPermission('manage-restaurant');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'date' => 'required|date',
@@ -53,24 +64,51 @@ class DayClosingController extends Controller
         $restaurantId = (int) $validated['restaurant_id'];
         $closedDate = $validated['date'];
 
-        $summary = $this->computeSummary($restaurantId, $closedDate);
+        $closing = DB::transaction(function () use ($restaurantId, $closedDate, $validated) {
+            $summary = $this->computeSummary($restaurantId, $closedDate);
 
-        $existing = PosDayClosing::where('restaurant_id', $restaurantId)
-            ->where('closed_date', $closedDate)
-            ->first();
+            $existing = PosDayClosing::where('restaurant_id', $restaurantId)
+                ->where('closed_date', $closedDate)
+                ->lockForUpdate()
+                ->first();
 
-        if ($existing) {
-            $recloseNote = 'Re-closed at '.now()->format('d M Y H:i').' by '.(auth()->user()?->name ?? 'System');
-            $notes = $existing->notes ? $existing->notes."\n\n".$recloseNote : $recloseNote;
-            if (! empty($validated['notes'])) {
-                $notes = trim($validated['notes'])."\n\n".$notes;
+            if ($existing) {
+                $recloseNote = 'Re-closed at '.now()->format('d M Y H:i').' by '.(auth()->user()?->name ?? 'System');
+                $notes = $existing->notes ? $existing->notes."\n\n".$recloseNote : $recloseNote;
+                if (! empty($validated['notes'])) {
+                    $notes = trim($validated['notes'])."\n\n".$notes;
+                }
+
+                $existing->update([
+                    'closed_at' => now(),
+                    'closed_by' => auth()->id(),
+                    'opening_balance' => $validated['opening_balance'] ?? $existing->opening_balance,
+                    'closing_balance' => $validated['closing_balance'] ?? $existing->closing_balance,
+                    'total_sales' => $summary['total_sales'],
+                    'total_discount' => $summary['total_discount'],
+                    'total_tax' => $summary['total_tax'],
+                    'total_service_charge' => $summary['total_service_charge'],
+                    'total_tip' => $summary['total_tip'],
+                    'total_paid' => $summary['total_paid'],
+                    'cash_total' => $summary['cash_total'],
+                    'card_total' => $summary['card_total'],
+                    'upi_total' => $summary['upi_total'],
+                    'room_charge_total' => $summary['room_charge_total'],
+                    'order_count' => $summary['order_count'],
+                    'void_count' => $summary['void_count'],
+                    'notes' => $notes ?: null,
+                ]);
+
+                return $existing;
             }
 
-            $existing->update([
+            return PosDayClosing::create([
+                'restaurant_id' => $restaurantId,
+                'closed_date' => $closedDate,
                 'closed_at' => now(),
                 'closed_by' => auth()->id(),
-                'opening_balance' => $validated['opening_balance'] ?? $existing->opening_balance,
-                'closing_balance' => $validated['closing_balance'] ?? $existing->closing_balance,
+                'opening_balance' => $validated['opening_balance'] ?? null,
+                'closing_balance' => $validated['closing_balance'] ?? null,
                 'total_sales' => $summary['total_sales'],
                 'total_discount' => $summary['total_discount'],
                 'total_tax' => $summary['total_tax'],
@@ -83,36 +121,9 @@ class DayClosingController extends Controller
                 'room_charge_total' => $summary['room_charge_total'],
                 'order_count' => $summary['order_count'],
                 'void_count' => $summary['void_count'],
-                'notes' => $notes ?: null,
+                'notes' => $validated['notes'] ?? null,
             ]);
-
-            return response()->json([
-                'message' => 'Day closing updated successfully.',
-                'closing' => $existing->fresh()->load('closedByUser'),
-            ], 200);
-        }
-
-        $closing = PosDayClosing::create([
-            'restaurant_id' => $restaurantId,
-            'closed_date' => $closedDate,
-            'closed_at' => now(),
-            'closed_by' => auth()->id(),
-            'opening_balance' => $validated['opening_balance'] ?? null,
-            'closing_balance' => $validated['closing_balance'] ?? null,
-            'total_sales' => $summary['total_sales'],
-            'total_discount' => $summary['total_discount'],
-            'total_tax' => $summary['total_tax'],
-            'total_service_charge' => $summary['total_service_charge'],
-            'total_tip' => $summary['total_tip'],
-            'total_paid' => $summary['total_paid'],
-            'cash_total' => $summary['cash_total'],
-            'card_total' => $summary['card_total'],
-            'upi_total' => $summary['upi_total'],
-            'room_charge_total' => $summary['room_charge_total'],
-            'order_count' => $summary['order_count'],
-            'void_count' => $summary['void_count'],
-            'notes' => $validated['notes'] ?? null,
-        ]);
+        });
 
         return response()->json([
             'message' => 'Day closed successfully.',
@@ -126,6 +137,7 @@ class DayClosingController extends Controller
      */
     public function index(Request $request)
     {
+        $this->checkPermission('view-reports');
         $validated = $request->validate([
             'restaurant_id' => 'nullable|exists:restaurant_masters,id',
             'from' => 'nullable|date',
@@ -175,15 +187,21 @@ class DayClosingController extends Controller
              COALESCE(SUM(total_amount), 0) as total_paid'
         )->first();
 
-        $totalRefunded = \App\Models\PosOrderRefund::whereIn('order_id', $orderIds)
-            ->sum('amount');
+        // Refunds are attributed to the date they were PERFORMED, not the order date.
+        // This is critical for balancing the cash drawer today vs yesterday.
+        $refundData = \App\Models\PosOrderRefund::whereHas('order', function ($q) use ($restaurantId) {
+                $q->where('restaurant_id', $restaurantId);
+            })
+            ->whereDate('refunded_at', $closedDate);
+
+        $totalRefunded = (clone $refundData)->sum('amount');
 
         $paymentsByMethod = PosPayment::whereIn('order_id', $orderIds)
             ->selectRaw('method, COALESCE(SUM(amount), 0) as total')
             ->groupBy('method')
             ->pluck('total', 'method');
 
-        $refundsByMethod = \App\Models\PosOrderRefund::whereIn('order_id', $orderIds)
+        $refundsByMethod = (clone $refundData)
             ->selectRaw('method, COALESCE(SUM(amount), 0) as total')
             ->groupBy('method')
             ->pluck('total', 'method');

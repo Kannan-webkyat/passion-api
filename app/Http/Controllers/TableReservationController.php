@@ -9,8 +9,17 @@ use Illuminate\Http\Request;
 
 class TableReservationController extends Controller
 {
+    private function checkPermission(string $permission)
+    {
+        $user = auth()->user();
+        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
+        $this->checkPermission('reservation');
         $query = TableReservation::with('table');
 
         if ($request->has('date')) {
@@ -22,6 +31,7 @@ class TableReservationController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('reservation');
         $validated = $request->validate([
             'table_id' => 'required|exists:restaurant_tables,id',
             'guest_name' => 'required|string|max:255',
@@ -41,11 +51,13 @@ class TableReservationController extends Controller
 
     public function show(TableReservation $tableReservation)
     {
+        $this->checkPermission('reservation');
         return response()->json($tableReservation->load('table'));
     }
 
     public function update(Request $request, TableReservation $tableReservation)
     {
+        $this->checkPermission('reservation');
         $validated = $request->validate([
             'table_id' => 'sometimes|required|exists:restaurant_tables,id',
             'guest_name' => 'sometimes|required|string|max:255',
@@ -65,6 +77,7 @@ class TableReservationController extends Controller
 
     public function destroy(TableReservation $tableReservation)
     {
+        $this->checkPermission('reservation');
         $tableReservation->delete();
 
         return response()->json(null, 204);
@@ -72,6 +85,7 @@ class TableReservationController extends Controller
 
     public function checkIn(TableReservation $tableReservation)
     {
+        $this->checkPermission('reservation');
         $tableReservation->update([
             'status' => 'seated',
             'checked_in_at' => Carbon::now(),
@@ -85,6 +99,7 @@ class TableReservationController extends Controller
 
     public function complete(TableReservation $tableReservation)
     {
+        $this->checkPermission('reservation');
         $tableReservation->update(['status' => 'completed']);
 
         RestaurantTable::where('id', $tableReservation->table_id)
@@ -95,6 +110,7 @@ class TableReservationController extends Controller
 
     public function cancel(TableReservation $tableReservation)
     {
+        $this->checkPermission('reservation');
         $tableReservation->update(['status' => 'cancelled']);
 
         if ($tableReservation->status === 'seated') {
