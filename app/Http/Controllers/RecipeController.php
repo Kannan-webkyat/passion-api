@@ -20,7 +20,14 @@ class RecipeController extends Controller
     public function index(Request $request)
     {
         $this->checkPermission('kitchen-production');
-        $query = MenuItem::where(fn ($q) => $q->where('is_direct_sale', false)->orWhereNull('is_direct_sale'))
+        // Hide items that are direct-sale AND directly linked to an inventory item
+        // (e.g. Pepsi, Sprite, spirits) — they are deducted directly, no recipe needed.
+        // Show Tea, Coffee etc. (direct-sale but NO inventory link) so ingredients can be set.
+        $query = MenuItem::where(function ($q) {
+            $q->where('is_direct_sale', false)
+              ->orWhereNull('is_direct_sale')
+              ->orWhereNull('inventory_item_id');
+        })
             ->with([
                 'category',
                 'subCategory',
@@ -112,11 +119,8 @@ class RecipeController extends Controller
     {
         $this->checkPermission('kitchen-production');
         $menuItem = MenuItem::findOrFail($menuItemId);
-        if ($menuItem->is_direct_sale) {
-            return response()->json([
-                'message' => 'Cannot create or update recipe for direct-sale items.',
-            ], 422);
-        }
+        // Direct-sale items (e.g. Tea, Coffee) are allowed to have recipes
+        // so their ingredients can be tracked and deducted from inventory.
 
         $validated = $request->validate([
             'yield_quantity' => 'required|numeric|min:0.001',
@@ -187,6 +191,32 @@ class RecipeController extends Controller
         try {
             DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$totalProductionCost) {
 
+                // ── 0. Pre-flight: check all ingredients have sufficient stock ──────
+                $shortfalls = [];
+                foreach ($recipe->ingredients as $ing) {
+                    $item = $ing->inventoryItem;
+                    if (! $item) continue;
+
+                    $rawQty = round($ing->raw_quantity * $multiplier, 3);
+                    $locationStock = DB::table('inventory_item_locations')
+                        ->where('inventory_item_id', $ing->inventory_item_id)
+                        ->where('inventory_location_id', $validated['inventory_location_id'])
+                        ->value('quantity') ?? 0;
+
+                    if ((float) $locationStock < $rawQty) {
+                        $shortfalls[] = [
+                            'item'      => $item->name,
+                            'required'  => $rawQty,
+                            'available' => (float) $locationStock,
+                            'uom'       => $ing->uom?->short_name ?? 'unit',
+                        ];
+                    }
+                }
+
+                if (! empty($shortfalls)) {
+                    throw new \Exception(json_encode(['__shortfall' => true, 'errors' => $shortfalls]));
+                }
+
                 // ── 1. Deduct raw ingredients and record snapshot costs ─────────────
                 foreach ($recipe->ingredients as $ing) {
                     $item = $ing->inventoryItem;
@@ -199,11 +229,15 @@ class RecipeController extends Controller
                     $lineCostAtTime = $rawQty * $unitCostAtTime;
                     $totalProductionCost += $lineCostAtTime;
 
-                    // Atomic decrement for ingredient deduction (only if record exists)
+                    // Ensure row exists (supports negative stock — cook can produce even if store is at 0)
+                    DB::table('inventory_item_locations')->updateOrInsert(
+                        ['inventory_item_id' => $ing->inventory_item_id, 'inventory_location_id' => $validated['inventory_location_id']],
+                        ['updated_at' => now(), 'created_at' => now()]
+                    );
+
                     DB::table('inventory_item_locations')
                         ->where('inventory_item_id', $ing->inventory_item_id)
                         ->where('inventory_location_id', $validated['inventory_location_id'])
-                        ->where('quantity', '>', -999999) // ensure existence
                         ->decrement('quantity', $rawQty);
 
                     InventoryTransaction::create([

@@ -195,10 +195,15 @@ class BarSeeder extends Seeder
                     'type' => $type,
                     'is_active' => true,
                     'is_direct_sale' => true,
+                    'requires_production' => false,
                     'inventory_item_id' => $invItem?->id,
                 ]
             );
-            $mi->update(['is_direct_sale' => true, 'inventory_item_id' => $invItem?->id]);
+            $mi->update([
+                'is_direct_sale' => true,
+                'requires_production' => false,
+                'inventory_item_id' => $invItem?->id
+            ]);
 
             $rmi = RestaurantMenuItem::firstOrCreate(
                 ['menu_item_id' => $mi->id, 'restaurant_master_id' => $barOutlet->id],
@@ -237,10 +242,15 @@ class BarSeeder extends Seeder
                     'type' => $type,
                     'is_active' => true,
                     'is_direct_sale' => true,
+                    'requires_production' => false,
                     'inventory_item_id' => $invItem?->id,
                 ]
             );
-            $mi->update(['is_direct_sale' => true, 'inventory_item_id' => $invItem?->id]);
+            $mi->update([
+                'is_direct_sale' => true,
+                'requires_production' => false,
+                'inventory_item_id' => $invItem?->id
+            ]);
 
             // Beer has no variants — remove any old variants
             MenuItemVariant::where('menu_item_id', $mi->id)->each(function ($v) {

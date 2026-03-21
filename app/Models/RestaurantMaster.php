@@ -51,4 +51,10 @@ class RestaurantMaster extends Model
     {
         return $this->belongsTo(\App\Models\InventoryLocation::class, 'bar_location_id');
     }
+
+    public function users()
+    {
+        return $this->belongsToMany(User::class, 'restaurant_user', 'restaurant_master_id', 'user_id')
+            ->withTimestamps();
+    }
 }

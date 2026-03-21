@@ -94,6 +94,8 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ['Ml', 'Millilitre'],
             ['Pcs', 'Piece'],
             ['Cup', 'Cup'],
+            ['Bottle', 'Bottle'],
+            ['Can', 'Can'],
         ];
         $uomMap = [];
         foreach ($uoms as [$short, $name]) {
@@ -150,6 +152,9 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ['Eggs', 'FB-DE-EG1', $catDairy, $v3, 'Pcs', 'Pcs', 1, 8, 2],
             ['Butter', 'FB-OF-BT1', $catOils, $v3, 'Kg', 'Gm', 1000, 480, 1],
             ['Green Chilli', 'FB-VG-GC1', $catVeg, $v1, 'Kg', 'Gm', 1000, 60, 1],
+            ['Pepsi (Can)', 'FB-BV-PP1', $catBev, $v1, 'Pcs', 'Pcs', 1, 30, 2],
+            ['Sprite (Can)', 'FB-BV-SP1', $catBev, $v1, 'Pcs', 'Pcs', 1, 30, 2],
+            ['JW Black Label', 'FB-BV-JW1', $catBev, $v1, 'Bottle', 'Ml', 750, 4500, 1],
         ];
 
         $itemMap = [];
@@ -204,6 +209,9 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             'Eggs' => 120,    // 120 pcs (10 dozen)
             'Butter' => 2000,   // 2 kg
             'Green Chilli' => 2000,   // 2 kg
+            'Pepsi (Can)' => 48,      // 48 cans
+            'Sprite (Can)' => 48,     // 48 cans
+            'JW Black Label' => 10,  // 10 bottles
         ];
 
         foreach (array_filter([$mainStore, $kitchen]) as $loc) {
@@ -241,18 +249,21 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
         $pcs = $uomMap['Pcs'];
 
         $menuItems = [
-            ['Chicken Biryani', 'MENU-CB-001', $catBiryani, $subChicken, 350, 'non-veg', 15],
-            ['Mutton Biryani', 'MENU-MB-001', $catBiryani, $subMutton, 450, 'non-veg', 20],
-            ['Veg Biryani', 'MENU-VB-001', $catBiryani, $subVeg, 250, 'veg', 12],
-            ['Tea', 'MENU-TE-001', $catBeverages, $subHot, 30, 'veg', 5],
-            ['Coffee', 'MENU-CF-001', $catBeverages, $subHot, 40, 'veg', 5],
-            ['Masala Chai', 'MENU-MC-001', $catBeverages, $subHot, 35, 'veg', 6],
-            ['Cold Coffee', 'MENU-CC-001', $catBeverages, $subCold, 50, 'veg', 5],
-            ['Iced Tea', 'MENU-IT-001', $catBeverages, $subCold, 45, 'veg', 5],
+            // Name, Code, Cat, Sub, Price, Type, EPT, isDirect, requiresProduction
+            ['Chicken Biryani', 'MENU-CB-001', $catBiryani, $subChicken, 350, 'non-veg', 15, false, true],
+            ['Mutton Biryani', 'MENU-MB-001', $catBiryani, $subMutton, 450, 'non-veg', 20, false, true],
+            ['Veg Biryani', 'MENU-VB-001', $catBiryani, $subVeg, 250, 'veg', 12, false, true],
+            ['Tea', 'MENU-TE-001', $catBeverages, $subHot, 30, 'veg', 5, true, true],
+            ['Coffee', 'MENU-CF-001', $catBeverages, $subHot, 40, 'veg', 5, true, true],
+            ['Masala Chai', 'MENU-MC-001', $catBeverages, $subHot, 35, 'veg', 6, true, true],
+            ['Cold Coffee', 'MENU-CC-001', $catBeverages, $subCold, 50, 'veg', 5, true, true],
+            ['Iced Tea', 'MENU-IT-001', $catBeverages, $subCold, 45, 'veg', 5, true, true],
+            ['Pepsi (Can)', 'MENU-PP-001', $catBeverages, $subCold, 40, 'veg', 0, true, false],
+            ['Sprite (Can)', 'MENU-SP-001', $catBeverages, $subCold, 40, 'veg', 0, true, false],
         ];
 
         $menuItemMap = [];
-        foreach ($menuItems as [$name, $code, $cat, $sub, $price, $type, $ept]) {
+        foreach ($menuItems as [$name, $code, $cat, $sub, $price, $type, $ept, $isDirect, $requiresProd]) {
             $menuItemMap[$name] = MenuItem::create([
                 'item_code' => $code,
                 'name' => $name,
@@ -263,6 +274,8 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
                 'fixed_ept' => $ept,
                 'type' => $type,
                 'is_active' => true,
+                'is_direct_sale' => $isDirect,
+                'requires_production' => $requiresProd,
             ]);
         }
 
@@ -454,6 +467,14 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ]);
         }
 
+        // Link Pepsi/Sprite directly to inventory items
+        if (isset($menuItemMap['Pepsi (Can)']) && isset($itemMap['Pepsi (Can)'])) {
+            $menuItemMap['Pepsi (Can)']->update(['inventory_item_id' => $itemMap['Pepsi (Can)']->id]);
+        }
+        if (isset($menuItemMap['Sprite (Can)']) && isset($itemMap['Sprite (Can)'])) {
+            $menuItemMap['Sprite (Can)']->update(['inventory_item_id' => $itemMap['Sprite (Can)']->id]);
+        }
+
         // ─── 11. Restaurant menu items (link to OTTAAL only; BAR has its own items) ─
         $restaurants = RestaurantMaster::where('is_active', true)->where('name', 'OTTAAL')->get();
         foreach ($restaurants as $rest) {
@@ -465,6 +486,28 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
                     'fixed_ept' => $mi->fixed_ept,
                     'is_active' => true,
                 ]);
+            }
+        }
+        
+        // Also add Cold Drinks, Biryani and Coffee to the BAR outlet
+        $bar = RestaurantMaster::where('name', 'BAR')->first();
+        if ($bar) {
+            foreach ($menuItemMap as $name => $mi) {
+                $categoryName = $mi->category?->name ?? '';
+                if (
+                    in_array($name, ['Pepsi (Can)', 'Sprite (Can)']) || 
+                    $categoryName === 'Biryani' || 
+                    str_contains($name, 'Coffee')
+                ) {
+                    RestaurantMenuItem::firstOrCreate([
+                        'menu_item_id' => $mi->id,
+                        'restaurant_master_id' => $bar->id,
+                    ], [
+                        'price' => $mi->price,
+                        'fixed_ept' => $mi->fixed_ept,
+                        'is_active' => true,
+                    ]);
+                }
             }
         }
 

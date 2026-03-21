@@ -31,5 +31,12 @@ class WaiterSeeder extends Seeder
             $waiter1->syncRoles([$role]);
             $waiter2->syncRoles([$role]);
         }
+
+        // Link to OTTAAL outlet
+        $ottaal = \App\Models\RestaurantMaster::where('name', 'OTTAAL')->first();
+        if ($ottaal) {
+            $waiter1->restaurants()->syncWithoutDetaching([$ottaal->id]);
+            $waiter2->restaurants()->syncWithoutDetaching([$ottaal->id]);
+        }
     }
 }

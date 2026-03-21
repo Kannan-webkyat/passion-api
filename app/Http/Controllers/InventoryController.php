@@ -55,9 +55,8 @@ class InventoryController extends Controller
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $item = InventoryItem::create($validated);
 
-        $cf = floatval($item->conversion_factor ?: 1);
-        $unitCost = $cf > 0 ? (floatval($validated['cost_price'] ?? 0) / $cf) : floatval($validated['cost_price'] ?? 0);
-        $item->update(['cost_price' => round($unitCost, 4)]);
+        $unitCost = round(floatval($validated['cost_price'] ?? 0), 4);
+        $item->update(['cost_price' => $unitCost]);
 
         if ($item->current_stock > 0) {
             $mainStore = \App\Models\InventoryLocation::where('type', 'main_store')->first();
@@ -116,10 +115,9 @@ class InventoryController extends Controller
         $oldStock = $item->current_stock;
         $item->update($validated);
 
-        // Standardize to Issue Unit Price
-        $cf = floatval($item->conversion_factor ?: 1);
-        $unitCost = $cf > 0 ? (floatval($validated['cost_price'] ?? 0) / $cf) : floatval($validated['cost_price'] ?? 0);
-        $item->update(['cost_price' => round($unitCost, 4)]);
+        // Keep as Purchase Unit Price
+        $unitCost = round(floatval($validated['cost_price'] ?? 0), 4);
+        $item->update(['cost_price' => $unitCost]);
 
         // If manual stock edit, sync with Main Store
         if (isset($validated['current_stock']) && $validated['current_stock'] != $oldStock) {
@@ -192,50 +190,55 @@ class InventoryController extends Controller
     {
         $this->checkPermission('manage-inventory');
         $validated = $request->validate([
-            'item_id' => 'required|exists:inventory_items,id',
-            'location_id' => 'required|exists:inventory_locations,id',
-            'quantity' => 'required|numeric|min:0.01',
-            'department_id' => 'required|exists:departments,id',
-            'notes' => 'nullable|string',
+            'item_id'        => 'required|exists:inventory_items,id',
+            'location_id'    => 'required|exists:inventory_locations,id',
+            'quantity'       => 'required|numeric|min:0.01',
+            'to_location_id' => 'nullable|exists:inventory_locations,id',
+            'notes'          => 'nullable|string',
         ]);
 
-        $item = \App\Models\InventoryItem::findOrFail($validated['item_id']);
-        $dept = \App\Models\Department::findOrFail($validated['department_id']);
+        $item        = \App\Models\InventoryItem::findOrFail($validated['item_id']);
+        $sourceLocation = \App\Models\InventoryLocation::findOrFail($validated['location_id']);
+        $destLocation   = isset($validated['to_location_id'])
+            ? \App\Models\InventoryLocation::find($validated['to_location_id'])
+            : null;
 
         DB::beginTransaction();
         try {
-            // 1. Lock Location Stock for update to prevent race conditions
-            $locationStock = DB::table('inventory_item_locations')
-                ->where('inventory_item_id', $item->id)
-                ->where('inventory_location_id', $validated['location_id'])
-                ->lockForUpdate()
-                ->first();
+            // 1. Ensure source row exists (supports negative stock)
+            DB::table('inventory_item_locations')->updateOrInsert(
+                ['inventory_item_id' => $item->id, 'inventory_location_id' => $sourceLocation->id],
+                ['updated_at' => now(), 'created_at' => now()]
+            );
 
-            if (! $locationStock || $locationStock->quantity < $validated['quantity']) {
-                throw new \Exception('Insufficient stock in this location');
-            }
-
-            // 2. Decrement Location Stock (source of truth)
+            // 2. Decrement source location stock
             DB::table('inventory_item_locations')
                 ->where('inventory_item_id', $item->id)
-                ->where('inventory_location_id', $validated['location_id'])
+                ->where('inventory_location_id', $sourceLocation->id)
                 ->decrement('quantity', $validated['quantity']);
 
-            // 3. Log Transaction (with unit_cost for auditing)
-            $unitCost = floatval($item->cost_price ?? 0);
-            $qty = (float) $validated['quantity'];
+            // 3. Log Transaction
+            $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
+            $qty      = (float) $validated['quantity'];
+            $noteStr  = ($validated['notes'] ?? '');
+            $noteStr .= ' (Consumed from '.$sourceLocation->name;
+            if ($destLocation) {
+                $noteStr .= ' → '.$destLocation->name;
+            }
+            $noteStr .= ')';
+
             $tx = \App\Models\InventoryTransaction::create([
-                'inventory_item_id' => $item->id,
-                'inventory_location_id' => $validated['location_id'],
-                'department_id' => $dept->id,
-                'type' => 'out',
-                'quantity' => $qty,
-                'unit_cost' => round($unitCost, 4),
-                'total_cost' => round($qty * $unitCost, 2),
-                'department' => $dept->name, // Keep for legacy
-                'reason' => 'Consumption',
-                'notes' => ($validated['notes'] ?? '').' (Consumed from '.\App\Models\InventoryLocation::find($validated['location_id'])->name.')',
-                'user_id' => auth()->id(),
+                'inventory_item_id'    => $item->id,
+                'inventory_location_id'=> $sourceLocation->id,
+                'department_id'        => $destLocation?->department_id,
+                'type'                 => 'out',
+                'quantity'             => $qty,
+                'unit_cost'            => round($unitCost, 4),
+                'total_cost'           => round($qty * $unitCost, 2),
+                'department'           => $destLocation?->name ?? '',
+                'reason'               => 'Consumption',
+                'notes'                => trim($noteStr),
+                'user_id'              => auth()->id(),
             ]);
 
             InventoryItem::syncStoredCurrentStockFromLocations($item->id);

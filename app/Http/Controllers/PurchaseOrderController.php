@@ -236,14 +236,18 @@ class PurchaseOrderController extends Controller
 
                     // WAC uses sum of locations as on-hand qty. 
                     // Use max(0, stockBefore) to prevent skewed averages when correcting negative stock exceptions.
-                    $stockBefore = \App\Models\InventoryItem::sumQuantityAcrossLocations($item->id);
-                    $onHandForWac = max(0, $stockBefore);
-                    $currentCost = (float) ($item->cost_price ?? 0);
+                    $stockBeforeIssue = \App\Models\InventoryItem::sumQuantityAcrossLocations($item->id);
+                    $onHandForWacIssue = max(0, $stockBeforeIssue);
                     
-                    $denominator = $onHandForWac + $convertedQuantity;
-                    $newCostPrice = $denominator > 0
-                        ? (($onHandForWac * $currentCost) + ($poItem->quantity_ordered * $poUnitPrice)) / $denominator
-                        : $unitCostPerIssue;
+                    // Convert on-hand issue units to purchase units for WAC calculation
+                    $onHandForWacPurchase = $onHandForWacIssue / ($conversionFactor ?: 1);
+                    $currentPurchasePrice = (float) ($item->cost_price ?? 0);
+                    $newPurchaseQty = (float) $poItem->quantity_ordered;
+                    
+                    $denominatorPurchase = $onHandForWacPurchase + $newPurchaseQty;
+                    $newPurchaseCost = $denominatorPurchase > 0
+                        ? (($onHandForWacPurchase * $currentPurchasePrice) + ($newPurchaseQty * $poUnitPrice)) / $denominatorPurchase
+                        : $poUnitPrice;
 
                     // ── 1. Update Location Stock atomically ──
                     DB::table('inventory_item_locations')->updateOrInsert(
@@ -255,7 +259,7 @@ class PurchaseOrderController extends Controller
                         ->where('inventory_location_id', $locationId)
                         ->increment('quantity', $convertedQuantity);
 
-                    $item->update(['cost_price' => round($newCostPrice, 4)]);
+                    $item->update(['cost_price' => round($newPurchaseCost, 4)]);
                     InventoryItem::syncStoredCurrentStockFromLocations($item->id);
 
                     \App\Models\InventoryTransaction::create([

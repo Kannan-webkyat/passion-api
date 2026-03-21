@@ -8,13 +8,14 @@ class MenuItem extends Model
 {
     protected $fillable = [
         'item_code', 'name', 'menu_category_id', 'menu_sub_category_id',
-        'price', 'tax_id', 'fixed_ept', 'type', 'is_active', 'is_direct_sale', 'image',
-        'inventory_item_id',
+        'price', 'tax_id', 'fixed_ept', 'type', 'is_active', 'is_direct_sale', 
+        'requires_production', 'image', 'inventory_item_id',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
         'is_direct_sale' => 'boolean',
+        'requires_production' => 'boolean',
         'price' => 'decimal:2',
     ];
 

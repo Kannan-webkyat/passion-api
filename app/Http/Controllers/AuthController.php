@@ -29,7 +29,7 @@ class AuthController extends Controller
 
         return response()->json([
             'token' => $token,
-            'user' => $user->load('departments'),
+            'user' => $user->load(['departments', 'restaurants']),
             'permissions' => $user->getAllPermissions()->pluck('name'),
             'roles' => $user->getRoleNames(),
         ]);
@@ -45,7 +45,7 @@ class AuthController extends Controller
     public function me(Request $request)
     {
         return response()->json([
-            'user' => $request->user()->load('departments'),
+            'user' => $request->user()->load(['departments', 'restaurants']),
             'permissions' => $request->user()->getAllPermissions()->pluck('name'),
             'roles' => $request->user()->getRoleNames(),
         ]);

@@ -18,7 +18,7 @@ class UserController extends Controller
 
     public function index()
     {
-        return User::with(['roles', 'departments'])->get();
+        return User::with(['roles', 'departments', 'restaurants'])->get();
     }
 
     public function store(Request $request)
@@ -30,6 +30,7 @@ class UserController extends Controller
             'password' => 'required|string|min:8',
             'roles' => 'nullable|array',
             'departments' => 'nullable|array',
+            'restaurant_ids' => 'nullable|array',
         ]);
 
         $user = User::create([
@@ -49,12 +50,16 @@ class UserController extends Controller
             $user->departments()->sync($validated['departments']);
         }
 
-        return response()->json($user->load(['roles', 'departments']), 201);
+        if (isset($validated['restaurant_ids'])) {
+            $user->restaurants()->sync($validated['restaurant_ids']);
+        }
+
+        return response()->json($user->load(['roles', 'departments', 'restaurants']), 201);
     }
 
     public function show(User $user)
     {
-        return $user->load(['roles', 'departments']);
+        return $user->load(['roles', 'departments', 'restaurants']);
     }
 
     public function update(Request $request, User $user)
@@ -66,6 +71,7 @@ class UserController extends Controller
             'password' => 'nullable|string|min:8',
             'roles' => 'nullable|array',
             'departments' => 'nullable|array',
+            'restaurant_ids' => 'nullable|array',
         ]);
 
         if (isset($validated['name'])) {
@@ -95,7 +101,11 @@ class UserController extends Controller
             $user->departments()->sync($validated['departments']);
         }
 
-        return response()->json($user->load(['roles', 'departments']));
+        if (isset($validated['restaurant_ids'])) {
+            $user->restaurants()->sync($validated['restaurant_ids']);
+        }
+
+        return response()->json($user->load(['roles', 'departments', 'restaurants']));
     }
 
     public function destroy(User $user)

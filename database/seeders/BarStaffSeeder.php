@@ -35,5 +35,12 @@ class BarStaffSeeder extends Seeder
         if ($waiterRole) {
             $barWaiter->syncRoles([$waiterRole]);
         }
+
+        // Link to BAR outlet
+        $barOutlet = \App\Models\RestaurantMaster::where('name', 'BAR')->first();
+        if ($barOutlet) {
+            $barCashier->restaurants()->syncWithoutDetaching([$barOutlet->id]);
+            $barWaiter->restaurants()->syncWithoutDetaching([$barOutlet->id]);
+        }
     }
 }

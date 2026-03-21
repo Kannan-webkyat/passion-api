@@ -22,5 +22,11 @@ class KitchenStaffSeeder extends Seeder
         if ($role) {
             $user->assignRole($role);
         }
+
+        // Link to OTTAAL outlet
+        $ottaal = \App\Models\RestaurantMaster::where('name', 'OTTAAL')->first();
+        if ($ottaal) {
+            $user->restaurants()->syncWithoutDetaching([$ottaal->id]);
+        }
     }
 }

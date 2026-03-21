@@ -35,4 +35,10 @@ class User extends Authenticatable
     {
         return $this->belongsToMany(Department::class);
     }
+
+    public function restaurants()
+    {
+        return $this->belongsToMany(RestaurantMaster::class, 'restaurant_user', 'user_id', 'restaurant_master_id')
+            ->withTimestamps();
+    }
 }

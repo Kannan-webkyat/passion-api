@@ -41,12 +41,17 @@ class RecipeIngredient extends Model
     }
 
     /**
-     * Line cost = raw_quantity × ingredient cost_price.
+     * Line cost = raw_quantity * (cost_price / conversion_factor).
      */
     public function getLineCostAttribute(): float
     {
-        $unitPrice = floatval($this->inventoryItem->cost_price ?? 0);
+        $item = $this->inventoryItem;
+        if (!$item) return 0;
+        
+        $unitCost = (float) ($item->cost_price ?? 0);
+        $conv = (float) ($item->conversion_factor ?? 1);
+        if ($conv <= 0) $conv = 1;
 
-        return $this->raw_quantity * $unitPrice;
+        return $this->raw_quantity * ($unitCost / $conv);
     }
 }

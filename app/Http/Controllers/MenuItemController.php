@@ -48,7 +48,8 @@ class MenuItemController extends Controller
             'type' => 'nullable|string',
             'is_active' => 'boolean',
             'is_direct_sale' => 'nullable|boolean',
-            'inventory_item_id' => 'required_if:is_direct_sale,true|nullable|exists:inventory_items,id',
+            'requires_production' => 'nullable|boolean',
+            'inventory_item_id' => 'nullable|exists:inventory_items,id',
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string', // JSON string for FormData
             'variants' => 'nullable|string', // JSON: [{id?, size_label, price, ml_quantity?}]
@@ -102,7 +103,8 @@ class MenuItemController extends Controller
             'type' => 'nullable|string',
             'is_active' => 'boolean',
             'is_direct_sale' => 'nullable|boolean',
-            'inventory_item_id' => 'required_if:is_direct_sale,true|nullable|exists:inventory_items,id',
+            'requires_production' => 'nullable|boolean',
+            'inventory_item_id' => 'nullable|exists:inventory_items,id',
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string',
             'variants' => 'nullable|string',
