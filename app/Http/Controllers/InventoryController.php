@@ -27,7 +27,7 @@ class InventoryController extends Controller
             ->pluck('total', 'inventory_item_id');
 
         foreach ($items as $item) {
-            $item->setAttribute('current_stock', (int) round((float) ($sums[$item->id] ?? 0)));
+            $item->setAttribute('current_stock', (float) ($sums[$item->id] ?? 0));
         }
 
         return response()->json($items);
@@ -46,8 +46,8 @@ class InventoryController extends Controller
             'conversion_factor' => 'required|numeric|min:0.01',
             'vendor_id' => 'nullable|exists:vendors,id',
             'cost_price' => 'nullable|numeric|min:0',
-            'reorder_level' => 'nullable|integer|min:0',
-            'current_stock' => 'nullable|integer|min:0',
+            'reorder_level' => 'nullable|numeric|min:0',
+            'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'description' => 'nullable|string',
         ]);
@@ -88,7 +88,7 @@ class InventoryController extends Controller
     public function show(InventoryItem $item)
     {
         $item->load('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'transactions');
-        $item->setAttribute('current_stock', (int) round(InventoryItem::sumQuantityAcrossLocations($item->id)));
+        $item->setAttribute('current_stock', (float) InventoryItem::sumQuantityAcrossLocations($item->id));
 
         return response()->json($item);
     }
@@ -106,8 +106,8 @@ class InventoryController extends Controller
             'conversion_factor' => 'required|numeric|min:0.01',
             'vendor_id' => 'nullable|exists:vendors,id',
             'cost_price' => 'nullable|numeric|min:0',
-            'reorder_level' => 'nullable|integer|min:0',
-            'current_stock' => 'nullable|integer|min:0',
+            'reorder_level' => 'nullable|numeric|min:0',
+            'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'description' => 'nullable|string',
         ]);
@@ -217,35 +217,56 @@ class InventoryController extends Controller
                 ->where('inventory_location_id', $sourceLocation->id)
                 ->decrement('quantity', $validated['quantity']);
 
-            // 3. Log Transaction
             $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
             $qty      = (float) $validated['quantity'];
-            $noteStr  = ($validated['notes'] ?? '');
-            $noteStr .= ' (Consumed from '.$sourceLocation->name;
-            if ($destLocation) {
-                $noteStr .= ' → '.$destLocation->name;
-            }
-            $noteStr .= ')';
+            $refId    = (string) \Illuminate\Support\Str::uuid();
 
-            $tx = \App\Models\InventoryTransaction::create([
+            // 3. Log OUT Transaction
+            $outTx = \App\Models\InventoryTransaction::create([
                 'inventory_item_id'    => $item->id,
                 'inventory_location_id'=> $sourceLocation->id,
-                'department_id'        => $destLocation?->department_id,
                 'type'                 => 'out',
                 'quantity'             => $qty,
                 'unit_cost'            => round($unitCost, 4),
                 'total_cost'           => round($qty * $unitCost, 2),
-                'department'           => $destLocation?->name ?? '',
-                'reason'               => 'Consumption',
-                'notes'                => trim($noteStr),
+                'reason'               => $destLocation ? 'Transfer' : 'Consumption',
+                'notes'                => $validated['notes'] ?? ($destLocation ? "Transfer to {$destLocation->name}" : "Manual consumption"),
                 'user_id'              => auth()->id(),
+                'reference_id'         => $refId,
+                'reference_type'       => 'requisition',
             ]);
+
+            // 4. Handle Transfer (Increment Destination)
+            if ($destLocation) {
+                DB::table('inventory_item_locations')->updateOrInsert(
+                    ['inventory_item_id' => $item->id, 'inventory_location_id' => $destLocation->id],
+                    ['updated_at' => now(), 'created_at' => now()]
+                );
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', $item->id)
+                    ->where('inventory_location_id', $destLocation->id)
+                    ->increment('quantity', $qty);
+
+                \App\Models\InventoryTransaction::create([
+                    'inventory_item_id'    => $item->id,
+                    'inventory_location_id'=> $destLocation->id,
+                    'type'                 => 'in',
+                    'quantity'             => $qty,
+                    'unit_cost'            => round($unitCost, 4),
+                    'total_cost'           => round($qty * $unitCost, 2),
+                    'reason'               => 'Transfer',
+                    'notes'                => "Received from {$sourceLocation->name}",
+                    'user_id'              => auth()->id(),
+                    'reference_id'         => $refId,
+                    'reference_type'       => 'requisition',
+                ]);
+            }
 
             InventoryItem::syncStoredCurrentStockFromLocations($item->id);
 
             DB::commit();
 
-            return response()->json($tx->load('item'), 201);
+            return response()->json($outTx->load('item'), 201);
         } catch (\Exception $e) {
             DB::rollBack();
 

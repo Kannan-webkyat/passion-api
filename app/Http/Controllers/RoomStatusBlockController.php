@@ -94,6 +94,9 @@ class RoomStatusBlockController extends Controller
             'created_by' => $userId,
         ]);
 
+        // Sync Room status column
+        Room::where('id', $block->room_id)->update(['status' => $block->status]);
+
         return response()->json($block->load('room'), 201);
     }
 
@@ -107,13 +110,24 @@ class RoomStatusBlockController extends Controller
 
         $roomStatusBlock->update($validated);
 
+        // If inactive or status changed, sync room status
+        if ($roomStatusBlock->is_active) {
+            Room::where('id', $roomStatusBlock->room_id)->update(['status' => $roomStatusBlock->status]);
+        } else {
+            Room::where('id', $roomStatusBlock->room_id)->update(['status' => 'available']);
+        }
+
         return response()->json($roomStatusBlock->load('room'));
     }
 
     public function destroy(RoomStatusBlock $roomStatusBlock)
     {
         $this->checkPermission('manage-rooms');
+        $roomId = $roomStatusBlock->room_id;
         $roomStatusBlock->delete();
+
+        // Restore room to available
+        Room::where('id', $roomId)->update(['status' => 'available']);
 
         return response()->json(null, 204);
     }

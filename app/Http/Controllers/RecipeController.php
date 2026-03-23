@@ -187,9 +187,10 @@ class RecipeController extends Controller
 
         $insufficient = [];
         $totalProductionCost = 0;
+        $affectedItemIds = [];
 
         try {
-            DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$totalProductionCost) {
+            DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, &$totalProductionCost, &$affectedItemIds) {
 
                 // ── 0. Pre-flight: check all ingredients have sufficient stock ──────
                 $shortfalls = [];
@@ -223,6 +224,7 @@ class RecipeController extends Controller
                     if (! $item) {
                         continue;
                     }
+                    $affectedItemIds[] = $ing->inventory_item_id;
 
                     $rawQty = round($ing->raw_quantity * $multiplier, 3);
                     $unitCostAtTime = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1);
@@ -259,6 +261,7 @@ class RecipeController extends Controller
                 if ($recipe->menuItem && $recipe->menuItem->inventory_item_id) {
                     $qtyProduced = $validated['quantity_produced'];
                     $finishedItemId = $recipe->menuItem->inventory_item_id;
+                    $affectedItemIds[] = $finishedItemId;
 
                     // Atomic increment for finished goods stock
                     DB::table('inventory_item_locations')->updateOrInsert(
@@ -298,12 +301,19 @@ class RecipeController extends Controller
                 ]);
             });
 
-            foreach ($recipe->ingredients as $ing) {
-                \App\Models\InventoryItem::syncStoredCurrentStockFromLocations($ing->inventory_item_id);
+            // ── SYNC CACHED STOCK ──
+            foreach (array_unique($affectedItemIds) as $itemId) {
+                \App\Models\InventoryItem::syncStoredCurrentStockFromLocations($itemId);
             }
-
         } catch (\Exception $e) {
-            throw $e; // unexpected error — let the default handler take over
+            $data = json_decode($e->getMessage(), true);
+            if (isset($data['__shortfall'])) {
+                return response()->json([
+                    'message' => 'Insufficient stock for production.',
+                    'errors' => $data['errors']
+                ], 422);
+            }
+            throw $e; 
         }
 
         return response()->json(['message' => 'Production logged successfully.', 'reference_id' => $refId]);

@@ -15,8 +15,8 @@ class InventoryItem extends Model
 
     protected $casts = [
         'cost_price' => 'float',
-        'reorder_level' => 'integer',
-        'current_stock' => 'integer',
+        'reorder_level' => 'float',
+        'current_stock' => 'float',
         'conversion_factor' => 'float',
         'tax_id' => 'integer',
         'is_direct_sale' => 'boolean',
@@ -76,7 +76,7 @@ class InventoryItem extends Model
     {
         $sum = self::sumQuantityAcrossLocations($inventoryItemId);
         self::where('id', $inventoryItemId)->update([
-            'current_stock' => (int) round($sum),
+            'current_stock' => round($sum, 3),
         ]);
     }
 

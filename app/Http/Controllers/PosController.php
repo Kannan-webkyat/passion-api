@@ -95,9 +95,10 @@ class PosController extends Controller
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(function ($order) {
-                $kotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
-                $itemCount = $kotItems->sum('quantity');
-                $total = $kotItems->sum(fn ($i) => $i->quantity * $i->unit_price);
+                $activeItems = $order->items()->where('status', 'active')->get();
+                $kotItems = $activeItems->where('kot_sent', true);
+                $itemCount = $activeItems->sum('quantity');
+                $total = $order->total_amount;
                 $readyBatches = $kotItems->filter(fn ($i) => $i->kitchen_ready_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray();
                 $servedBatches = $kotItems->filter(fn ($i) => $i->kitchen_served_at)->pluck('kot_batch')->unique()->sort()->values()->map(fn ($b) => (int) $b)->toArray();
 
@@ -223,40 +224,28 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         $restaurantId = $request->input('restaurant_id');
 
-        // Total portions produced per menu_item (via recipe)
-        $produced = DB::table('recipes')
-            ->leftJoin('production_logs', 'recipes.id', '=', 'production_logs.recipe_id')
-            ->where('recipes.is_active', true)
-            ->where('recipes.requires_production', true)
-            ->select('recipes.menu_item_id', DB::raw('COALESCE(SUM(production_logs.quantity_produced), 0) as total'))
-            ->groupBy('recipes.menu_item_id')
-            ->pluck('total', 'menu_item_id')
-            ->map(fn ($v) => (float) $v);
+        // Instead of global produced/sold, we intelligently look at the exact physical stock 
+        // in the specific stores mapped to this restaurant outlet (Kitchen / Bar).
+        $restaurant = $restaurantId ? \App\Models\RestaurantMaster::find($restaurantId) : null;
+        $locIds = $restaurant 
+            ? array_filter([$restaurant->kitchen_location_id, $restaurant->bar_location_id]) 
+            : [];
 
-        // Total portions already committed (active items in non-void orders)
-        $sold = DB::table('pos_order_items')
-            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-            ->where('pos_orders.status', '!=', 'void')
-            ->where('pos_order_items.status', 'active')
-            ->whereNotNull('pos_order_items.menu_item_id')
-            ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
-            ->groupBy('pos_order_items.menu_item_id')
-            ->pluck('total', 'menu_item_id')
-            ->map(fn ($v) => (float) $v);
-
-        // Add sold from combo items (constituent menu items)
-        $comboSold = DB::table('pos_order_items')
-            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-            ->join('combo_items', 'combo_items.combo_id', '=', 'pos_order_items.combo_id')
-            ->where('pos_orders.status', '!=', 'void')
-            ->where('pos_order_items.status', 'active')
-            ->whereNotNull('pos_order_items.combo_id')
-            ->select('combo_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
-            ->groupBy('combo_items.menu_item_id')
-            ->pluck('total', 'menu_item_id')
-            ->map(fn ($v) => (float) $v);
-        foreach ($comboSold as $mid => $cnt) {
-            $sold->put($mid, ($sold->get($mid, 0) + $cnt));
+        $query = collect();
+        if (!empty($locIds)) {
+            $physicalStock = clone DB::table('inventory_item_locations')
+                ->whereIn('inventory_location_id', $locIds)
+                ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
+                ->groupBy('inventory_item_id')
+                ->pluck('total', 'inventory_item_id')
+                ->map(fn($v) => (float)$v);
+        } else {
+            // Legacy fallback if no location mapped
+            $physicalStock = DB::table('inventory_item_locations')
+                ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
+                ->groupBy('inventory_item_id')
+                ->pluck('total', 'inventory_item_id')
+                ->map(fn($v) => (float)$v);
         }
 
         // When restaurant_id provided: filter by restaurant_menu_items, use per-restaurant price
@@ -277,8 +266,8 @@ class PosController extends Controller
                 ->get()
                 ->keyBy(fn ($rvi) => $rvi->restaurant_menu_item_id.'_'.$rvi->menu_item_variant_id);
 
-            $categories->each(function ($cat) use ($produced, $sold, $rmiByItem, $rviByRmiAndVariant) {
-                $cat->items->each(function ($item) use ($produced, $sold, $rmiByItem, $rviByRmiAndVariant) {
+            $categories->each(function ($cat) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant) {
+                $cat->items->each(function ($item) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant) {
                     $rmi = $rmiByItem->get($item->id);
                     if ($rmi) {
                         $item->price = (string) $rmi->price;
@@ -298,12 +287,17 @@ class PosController extends Controller
                     } else {
                         $item->variants = [];
                     }
-                    if ($produced->has($item->id)) {
-                        $item->available_qty = max(0, $produced[$item->id] - ($sold[$item->id] ?? 0));
+                    $item->requires_production = (bool) $item->requires_production;
+                    if ($item->inventory_item_id) {
+                        $stock = $physicalStock->get($item->inventory_item_id, 0);
+                        if ($item->requires_production) {
+                            $item->available_qty = max(0, $stock); // Strict
+                        } else {
+                            $item->available_qty = null; // Completely hide count for direct sales
+                        }
                     } else {
                         $item->available_qty = null;
                     }
-                    $item->requires_production = (bool) $item->requires_production;
                 });
             });
         } else {
@@ -311,19 +305,24 @@ class PosController extends Controller
                 $q->with(['tax', 'variants'])->where('is_active', true)->orderBy('name');
             }])->get()->filter(fn ($c) => $c->items->isNotEmpty())->values();
 
-            $categories->each(function ($cat) use ($produced, $sold) {
-                $cat->items->each(function ($item) use ($produced, $sold) {
+            $categories->each(function ($cat) use ($physicalStock) {
+                $cat->items->each(function ($item) use ($physicalStock) {
                     if ($item->variants && $item->variants->isNotEmpty()) {
                         $item->variants = $item->variants->map(fn ($v) => ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $v->price])->values();
                     } else {
                         $item->variants = [];
                     }
-                    if ($produced->has($item->id)) {
-                        $item->available_qty = max(0, $produced[$item->id] - ($sold[$item->id] ?? 0));
+                    $item->requires_production = (bool) $item->requires_production;
+                    if ($item->inventory_item_id) {
+                        $stock = $physicalStock->get($item->inventory_item_id, 0);
+                        if ($item->requires_production) {
+                            $item->available_qty = max(0, $stock); // Strict
+                        } else {
+                            $item->available_qty = null; // Completely hide count for direct sales
+                        }
                     } else {
                         $item->available_qty = null;
                     }
-                    $item->requires_production = (bool) $item->requires_production;
                 });
             });
         }
@@ -339,13 +338,13 @@ class PosController extends Controller
             ->where('is_active', true)
             ->orderBy('name')
             ->get()
-            ->map(function ($c) use ($produced, $sold, $restaurantComboPrices) {
+            ->map(function ($c) use ($physicalStock, $restaurantComboPrices) {
                 $availableQty = null;
                 if ($c->menuItems->isNotEmpty()) {
                     $availables = [];
                     foreach ($c->menuItems as $mi) {
-                        if ($produced->has($mi->id)) {
-                            $availables[] = max(0, $produced[$mi->id] - ($sold->get($mi->id, 0)));
+                        if ($mi->inventory_item_id) {
+                            $availables[] = max(0, $physicalStock->get($mi->inventory_item_id, 0));
                         }
                     }
                     if (! empty($availables)) {
@@ -1020,7 +1019,9 @@ class PosController extends Controller
             'tax_exempt' => 'nullable|boolean',
             'tip_amount' => 'nullable|numeric|min:0',
             'delivery_charge' => 'nullable|numeric|min:0',
-            'payments' => 'required|array|min:1',
+            'is_complimentary' => 'nullable|boolean',
+            'complimentary_note' => 'nullable|string|max:500',
+            'payments' => 'required_unless:is_complimentary,true|array',
             'payments.*.method' => 'required|in:cash,card,upi,room_charge',
             'payments.*.amount' => 'required|numeric|min:0.01',
             'payments.*.reference_no' => 'nullable|string',
@@ -1056,20 +1057,25 @@ class PosController extends Controller
             if ($order->order_type !== 'delivery') {
                 $deliveryCharge = 0;
             }
+
+            $isComplimentary = (bool)($validated['is_complimentary'] ?? false);
+            
             $order->update([
-                'discount_type' => $validated['discount_type'] ?? null,
-                'discount_value' => $validated['discount_value'] ?? 0,
+                'discount_type' => $isComplimentary ? 'percent' : ($validated['discount_type'] ?? null),
+                'discount_value' => $isComplimentary ? 100 : ($validated['discount_value'] ?? 0),
                 'service_charge_type' => $validated['service_charge_type'] ?? null,
                 'service_charge_value' => $validated['service_charge_value'] ?? 0,
                 'tax_exempt' => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
                 'tip_amount' => (float) ($validated['tip_amount'] ?? 0),
                 'delivery_charge' => $deliveryCharge,
+                'is_complimentary' => $isComplimentary,
+                'notes' => $isComplimentary ? ($validated['complimentary_note'] ?? $order->notes) : $order->notes,
             ]);
             $this->recalculate($order);
             $order->refresh();
 
-            $paymentsTotal = collect($validated['payments'])->sum('amount');
-            if ($paymentsTotal < $order->total_amount - 0.01) {
+            $paymentsTotal = collect($validated['payments'] ?? [])->sum('amount');
+            if (!$isComplimentary && $paymentsTotal < $order->total_amount - 0.01) {
                 throw new \Illuminate\Http\Exceptions\HttpResponseException(
                     response()->json([
                         'message' => 'Total payments ('.number_format($paymentsTotal, 2).') is less than order total ('.number_format($order->total_amount, 2).').',
@@ -1079,7 +1085,7 @@ class PosController extends Controller
 
             // Record payments
             $order->payments()->delete();
-            foreach ($validated['payments'] as $pay) {
+            foreach ($validated['payments'] ?? [] as $pay) {
                 PosPayment::create([
                     'order_id' => $order->id,
                     'method' => $pay['method'],
@@ -1093,10 +1099,10 @@ class PosController extends Controller
             // Close order
             $order->update(['status' => 'paid', 'closed_at' => now()]);
 
-            // Deduct direct sale (bar) items from inventory
-            $this->deductDirectSaleItems($order);
+            // Ensure ALL active items in the order are deducted from inventory if not already done
+            $this->deductOrderInventoryCompletely($order);
 
-            // Set table to cleaning (dine-in only) — staff will mark available when ready
+            // Set table to cleaning (dine-in only)
             if ($order->table_id) {
                 RestaurantTable::where('id', $order->table_id)->update(['status' => 'cleaning']);
             }
@@ -1673,126 +1679,26 @@ class PosController extends Controller
             return null;
         }
 
-        $refId = $order->id.'-'.$batch;
-        $alreadyDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
-            ->where('reference_id', $refId)
-            ->exists();
-        if ($alreadyDeducted) {
-            return null;
-        }
-
         $batchItems = $order->items()
-            ->with(['menuItem', 'combo.menuItems'])
             ->where('kot_sent', true)
             ->where('status', 'active')
             ->where('kot_batch', $batch)
+            ->where('inventory_deducted', false)
             ->get();
 
-        $result = DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId) {
-            // Exact deductions enabled for full theoretical tracking
-            // Pass 2: Deduct
-            $affectedItemIds = [];
-            foreach ($batchItems as $orderItem) {
-                $menuItemIds = $orderItem->combo_id && $orderItem->combo
-                    ? $orderItem->combo->menuItems->pluck('id')
-                    : ($orderItem->menu_item_id ? collect([$orderItem->menu_item_id]) : collect());
-                $itemLabel = $orderItem->combo_id ? ($orderItem->combo?->name ?? 'Combo') : ($orderItem->menuItem?->name ?? 'item');
-
-                foreach ($menuItemIds as $menuItemId) {
-                    $recipe = Recipe::with('ingredients.inventoryItem')
-                        ->where('menu_item_id', $menuItemId)
-                        ->where('is_active', true)
-                        ->first();
-
-                    // CASE 1: Item has a recipe and is made-to-order (Tea, Omelette)
-                    // -> Deduct raw ingredients
-                    if ($recipe && ! ($recipe->requires_production ?? true)) {
-                        $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
-                        $multiplier = $orderItem->quantity / $yield;
-
-                        foreach ($recipe->ingredients as $ing) {
-                            $item = $ing->inventoryItem;
-                            if (! $item) continue;
-
-                            $rawQty = round($ing->raw_quantity * $multiplier, 3);
-
-                            DB::table('inventory_item_locations')->updateOrInsert(
-                                ['inventory_item_id' => $ing->inventory_item_id, 'inventory_location_id' => $kitchenStore->id],
-                                ['updated_at' => now(), 'created_at' => now()]
-                            );
-
-                            DB::table('inventory_item_locations')
-                                ->where('inventory_item_id', $ing->inventory_item_id)
-                                ->where('inventory_location_id', $kitchenStore->id)
-                                ->decrement('quantity', $rawQty);
-
-                            $affectedItemIds[$ing->inventory_item_id] = true;
-
-                            InventoryTransaction::create([
-                                'inventory_item_id' => $ing->inventory_item_id,
-                                'inventory_location_id' => $kitchenStore->id,
-                                'type' => 'out',
-                                'quantity' => $rawQty,
-                                'unit_cost' => floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1),
-                                'total_cost' => round($rawQty * (floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1)), 2),
-                                'reason' => 'POS Order',
-                                'notes' => 'Order #'.$order->id.' Batch '.$batch.' — '.$itemLabel.' ×'.$orderItem->quantity,
-                                'user_id' => auth()->id(),
-                                'reference_type' => 'pos_order_batch',
-                                'reference_id' => $refId,
-                            ]);
-                        }
-                        continue;
-                    }
-
-                    // CASE 2: Item is either Produced (Biryani) or is a simple Menu Item with a linked inventory ID
-                    // (This covers combos containing direct-sale items + produced items)
-                    $targetMenuItem = MenuItem::find($menuItemId);
-                    if ($targetMenuItem && $targetMenuItem->inventory_item_id) {
-                        $invItem = $targetMenuItem->inventoryItem;
-                        $deductQty = $orderItem->quantity;
-
-                        DB::table('inventory_item_locations')->updateOrInsert(
-                            ['inventory_item_id' => $targetMenuItem->inventory_item_id, 'inventory_location_id' => $kitchenStore->id],
-                            ['updated_at' => now(), 'created_at' => now()]
-                        );
-                        DB::table('inventory_item_locations')
-                            ->where('inventory_item_id', $targetMenuItem->inventory_item_id)
-                            ->where('inventory_location_id', $kitchenStore->id)
-                            ->decrement('quantity', $deductQty);
-
-                        $affectedItemIds[$targetMenuItem->inventory_item_id] = true;
-                        
-                        $unitCost = floatval($invItem->cost_price ?? 0) / floatval($invItem->conversion_factor ?? 1);
-
-                        InventoryTransaction::create([
-                            'inventory_item_id' => $targetMenuItem->inventory_item_id,
-                            'inventory_location_id' => $kitchenStore->id,
-                            'type' => 'out',
-                            'quantity' => $deductQty,
-                            'unit_cost' => $unitCost,
-                            'total_cost' => round($deductQty * $unitCost, 2),
-                            'reason' => 'POS Order (FG/Direct)',
-                            'notes' => 'Order #'.$order->id.' Batch '.$batch.' — '.$targetMenuItem->name.' ×'.$orderItem->quantity,
-                            'user_id' => auth()->id(),
-                            'reference_type' => 'pos_order_batch',
-                            'reference_id' => $refId,
-                        ]);
-                    }
-
-                }
-            }
-
-            return ['affected' => array_keys($affectedItemIds)];
-        });
-
-        // Exact deductions completed
-
-        foreach ($result['affected'] ?? [] as $itemId) {
-            InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+        if ($batchItems->isEmpty()) {
+            return null;
         }
 
-        return null;
+        $refId = (string) $order->id.'-'.$batch; // Define $refId here
+        $result = DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $refId) {
+            foreach ($batchItems as $orderItem) {
+                $this->deductOrderItemInventory($orderItem, $kitchenStore, 'pos_order_batch', $refId);
+            }
+            return ['order_id' => $order->id, 'batch' => $batch];
+        });
+
+        return $result;
     }
 
     // ── Update Kitchen Status ─────────────────────────────────────────────────
@@ -1831,19 +1737,9 @@ class PosController extends Controller
                 ->update(['kitchen_served_at' => now()]);
         }
 
-        // ── Deduct ingredients when kitchen marks the order Ready ─────────────
-        // Skip if using per-batch (already deducted via markBatchReady).
+        // Deduct ingredients when kitchen marks the whole order Ready
         if ($newStatus === 'ready' && $previousStatus !== 'ready') {
-            $perBatchDeducted = InventoryTransaction::where('reference_type', 'pos_order_batch')
-                ->where('reference_id', 'like', (string) $order->id.'-%')
-                ->exists();
-            $legacyDeducted = InventoryTransaction::where('reference_type', 'pos_order')
-                ->where('reference_id', (string) $order->id)
-                ->exists();
-
-            if (! $perBatchDeducted && ! $legacyDeducted) {
-                $this->deductOrderIngredients($order);
-            }
+            $this->deductOrderInventoryCompletely($order);
         }
 
         return response()->json([
@@ -1863,196 +1759,114 @@ class PosController extends Controller
             return;
         }
 
-        $kotItems = $order->items()->with(['menuItem', 'combo.menuItems'])->where('kot_sent', true)->get();
-        $affectedItemIds = [];
+        $kotItems = $order->items()
+            ->where('kot_sent', true)
+            ->where('status', 'active')
+            ->where('inventory_deducted', false)
+            ->get();
 
-        DB::transaction(function () use ($order, $kotItems, $kitchenStore, &$affectedItemIds) {
-            foreach ($kotItems as $orderItem) {
-                $menuItemIds = $orderItem->combo_id && $orderItem->combo
-                    ? $orderItem->combo->menuItems->pluck('id')
-                    : ($orderItem->menu_item_id ? collect([$orderItem->menu_item_id]) : collect());
-                $itemLabel = $orderItem->combo_id ? ($orderItem->combo?->name ?? 'Combo') : ($orderItem->menuItem?->name ?? 'item');
-
-                foreach ($menuItemIds as $menuItemId) {
-                    $recipe = Recipe::with('ingredients.inventoryItem')
-                        ->where('menu_item_id', $menuItemId)
-                        ->where('is_active', true)
-                        ->first();
-
-                    // CASE 1: Item has a recipe and is made-to-order (Tea, Omelette)
-                    if ($recipe && ! ($recipe->requires_production ?? true)) {
-                        $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
-                        $multiplier = $orderItem->quantity / $yield;
-
-                        foreach ($recipe->ingredients as $ing) {
-                            $item = $ing->inventoryItem;
-                            if (! $item) continue;
-
-                            $rawQty = round($ing->raw_quantity * $multiplier, 3);
-
-                            DB::table('inventory_item_locations')->updateOrInsert(
-                                ['inventory_item_id' => $ing->inventory_item_id, 'inventory_location_id' => $kitchenStore->id],
-                                ['updated_at' => now(), 'created_at' => now()]
-                            );
-
-                            DB::table('inventory_item_locations')
-                                ->where('inventory_item_id', $ing->inventory_item_id)
-                                ->where('inventory_location_id', $kitchenStore->id)
-                                ->decrement('quantity', $rawQty);
-
-                            $affectedItemIds[$ing->inventory_item_id] = true;
-
-                            InventoryTransaction::create([
-                                'inventory_item_id' => $ing->inventory_item_id,
-                                'inventory_location_id' => $kitchenStore->id,
-                                'type' => 'out',
-                                'quantity' => $rawQty,
-                                'unit_cost' => floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1),
-                                'total_cost' => round($rawQty * (floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?? 1)), 2),
-                                'reason' => 'POS Order',
-                                'notes' => 'Order #'.$order->id.' — '.$itemLabel.' ×'.$orderItem->quantity,
-                                'user_id' => auth()->id(),
-                                'reference_type' => 'pos_order',
-                                'reference_id' => (string) $order->id,
-                            ]);
-                        }
-                        continue;
-                    }
-
-                    // CASE 2: Item is either Produced (Biryani) or is a simple Menu Item with a linked inventory ID
-                    $targetMenuItem = MenuItem::find($menuItemId);
-                    if ($targetMenuItem && $targetMenuItem->inventory_item_id) {
-                        $invItem = $targetMenuItem->inventoryItem;
-                        $deductQty = $orderItem->quantity;
-
-                        DB::table('inventory_item_locations')->updateOrInsert(
-                            ['inventory_item_id' => $targetMenuItem->inventory_item_id, 'inventory_location_id' => $kitchenStore->id],
-                            ['updated_at' => now(), 'created_at' => now()]
-                        );
-                        DB::table('inventory_item_locations')
-                            ->where('inventory_item_id', $targetMenuItem->inventory_item_id)
-                            ->where('inventory_location_id', $kitchenStore->id)
-                            ->decrement('quantity', $deductQty);
-
-                        $affectedItemIds[$targetMenuItem->inventory_item_id] = true;
-                        
-                        $unitCost = floatval($invItem->cost_price ?? 0) / floatval($invItem->conversion_factor ?? 1);
-
-                        InventoryTransaction::create([
-                            'inventory_item_id' => $targetMenuItem->inventory_item_id,
-                            'inventory_location_id' => $kitchenStore->id,
-                            'type' => 'out',
-                            'quantity' => $deductQty,
-                            'unit_cost' => $unitCost,
-                            'total_cost' => round($deductQty * $unitCost, 2),
-                            'reason' => 'POS Order (FG/Direct)',
-                            'notes' => 'Order #'.$order->id.' — '.$targetMenuItem->name.' ×'.$orderItem->quantity,
-                            'user_id' => auth()->id(),
-                            'reference_type' => 'pos_order',
-                            'reference_id' => (string) $order->id,
-                        ]);
-                    }
-
-                }
-            }
-        });
-        foreach (array_keys($affectedItemIds) as $itemId) {
-            InventoryItem::syncStoredCurrentStockFromLocations($itemId);
-        }
-    }
-
-    /**
-     * Deduct direct sale (bar) items from Bar Store when order is settled.
-     * Uses menu_item.inventory_item_id and variant.ml_quantity.
-     */
-    private function deductDirectSaleItems(PosOrder $order): void
-    {
-        $order->loadMissing('restaurant');
-        $barLocationId = $order->restaurant?->bar_location_id;
-        $barStore = $barLocationId
-            ? InventoryLocation::find($barLocationId)
-            : InventoryLocation::where('name', 'Bar Store')->first();
-
-        if (! $barStore) {
+        if ($kotItems->isEmpty()) {
             return;
         }
 
-        $activeItems = $order->items()
-            ->with(['menuItem.inventoryItem', 'variant'])
-            ->where('status', 'active')
-            ->whereNotNull('menu_item_id')
-            ->get();
-
-        $affectedItemIds = [];
-        foreach ($activeItems as $orderItem) {
-            $menuItem = $orderItem->menuItem;
-            if (! $menuItem || ! $menuItem->is_direct_sale || ! $menuItem->inventory_item_id) {
-                continue;
+        DB::transaction(function () use ($order, $kotItems, $kitchenStore) {
+            foreach ($kotItems as $orderItem) {
+                $this->deductOrderItemInventory($orderItem, $kitchenStore, 'pos_order', (string)$order->id);
             }
+        });
+    }
 
-            $invItem = $menuItem->inventoryItem;
-            if (! $invItem) {
-                continue;
+    /**
+     * One-stop function to ensure EVERY active item in a POS order is deducted from its relevant store.
+     * Safe to call multiple times (uses inventory_deducted flag).
+     */
+    private function deductOrderInventoryCompletely(PosOrder $order): void
+    {
+        $order->loadMissing(['items.menuItem.inventoryItem', 'items.variant', 'items.combo.menuItems.inventoryItem', 'restaurant']);
+        
+        $kitchenStore = $this->getKitchenForOrder($order);
+        
+        // Bar default fallback
+        $barLocationId = $order->restaurant?->bar_location_id;
+        $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::where('name', 'Bar Store')->first();
+
+        foreach ($order->items->where('status', 'active') as $item) {
+            if ($item->inventory_deducted) continue;
+
+            // Determine if it should come from Bar or Kitchen
+            // If it's a direct sale item (Bar items like Pepsi/Beer usually have is_direct_sale = true)
+            $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+            
+            if ($targetStore) {
+                $this->deductOrderItemInventory($item, $targetStore, 'pos_order', (string)$order->id);
             }
+        }
+    }
 
-            $deductQty = 0;
-            if ($orderItem->menu_item_variant_id && $orderItem->variant) {
-                $mlQty = (float) ($orderItem->variant->ml_quantity ?? 0);
-                if ($mlQty > 0) {
-                    $deductQty = $mlQty * $orderItem->quantity;
-                } else {
+    private function deductOrderItemInventory(PosOrderItem $orderItem, InventoryLocation $location, string $refType, string $refId): void
+    {
+        if ($orderItem->inventory_deducted || $orderItem->status !== 'active') return;
+
+        DB::transaction(function() use ($orderItem, $location, $refType, $refId) {
+            $menuItemIds = $orderItem->combo_id && $orderItem->combo
+                ? $orderItem->combo->menuItems->pluck('id')
+                : ($orderItem->menu_item_id ? collect([$orderItem->menu_item_id]) : collect());
+
+            foreach ($menuItemIds as $menuItemId) {
+                $menuItem = MenuItem::with('inventoryItem')->find($menuItemId);
+                if (!$menuItem) continue;
+
+                $recipe = Recipe::with('ingredients.inventoryItem')->where('menu_item_id', $menuItemId)->where('is_active', true)->first();
+
+                if ($recipe && !($recipe->requires_production ?? true)) {
+                    // CASE 1: Made-to-order Recipe (Tea, Coffee)
+                    $yield = max(1, (float)($recipe->yield_quantity ?? 1));
+                    $multiplier = $orderItem->quantity / $yield;
+                    foreach ($recipe->ingredients as $ing) {
+                        $this->executeDeduction($ing->inventory_item_id, $location->id, round($ing->raw_quantity * $multiplier, 3), $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}");
+                    }
+                } elseif ($menuItem->inventory_item_id) {
+                    // CASE 2: Finished Good (Biryani) or Direct Item (Pepsi)
                     $deductQty = $orderItem->quantity;
+                    // Handle variants (ML scale for Liquor)
+                    if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                        $deductQty = $ml * $orderItem->quantity;
+                    }
+                    $this->executeDeduction($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}");
                 }
-            } else {
-                // No variant (beer): deduct 1 Pcs per bottle
-                $deductQty = $orderItem->quantity;
             }
-            if ($deductQty <= 0) {
-                continue;
-            }
+            $orderItem->update(['inventory_deducted' => true]);
+        });
+    }
 
-            $currentStock = (float) (DB::table('inventory_item_locations')
-                ->where('inventory_item_id', $menuItem->inventory_item_id)
-                ->where('inventory_location_id', $barStore->id)
-                ->lockForUpdate()
-                ->value('quantity') ?? 0);
+    private function executeDeduction(int $itemId, int $locId, float $qty, string $refType, string $refId, string $notes): void
+    {
+        if ($qty <= 0) return;
+        
+        DB::table('inventory_item_locations')->updateOrInsert(
+            ['inventory_item_id' => $itemId, 'inventory_location_id' => $locId],
+            ['updated_at' => now(), 'created_at' => now()]
+        );
+        DB::table('inventory_item_locations')->where('inventory_item_id', $itemId)->where('inventory_location_id', $locId)->decrement('quantity', $qty);
 
-            $deduct = $deductQty;
-            if ($deduct <= 0) {
-                continue;
-            }
+        $invItem = InventoryItem::find($itemId);
+        $unitCost = floatval($invItem?->cost_price ?? 0) / floatval($invItem?->conversion_factor ?? 1);
 
-            // Atomic decrement to prevent race conditions during deduction
-            DB::table('inventory_item_locations')->updateOrInsert(
-                ['inventory_item_id' => $menuItem->inventory_item_id, 'inventory_location_id' => $barStore->id],
-                ['updated_at' => now(), 'created_at' => now()]
-            );
+        InventoryTransaction::create([
+            'inventory_item_id' => $itemId,
+            'inventory_location_id' => $locId,
+            'type' => 'out',
+            'quantity' => $qty,
+            'unit_cost' => round($unitCost, 4),
+            'total_cost' => round($qty * $unitCost, 2),
+            'reason' => 'POS Order',
+            'notes' => $notes,
+            'user_id' => auth()->id(),
+            'reference_type' => $refType,
+            'reference_id' => $refId,
+        ]);
 
-            DB::table('inventory_item_locations')
-                ->where('inventory_item_id', $menuItem->inventory_item_id)
-                ->where('inventory_location_id', $barStore->id)
-                ->decrement('quantity', $deduct);
-
-            $affectedItemIds[$menuItem->inventory_item_id] = true;
-
-            $unitCost = floatval($invItem->cost_price ?? 0) / floatval($invItem->conversion_factor ?? 1);
-            InventoryTransaction::create([
-                'inventory_item_id' => $menuItem->inventory_item_id,
-                'inventory_location_id' => $barStore->id,
-                'type' => 'out',
-                'quantity' => $deduct,
-                'unit_cost' => round($unitCost, 4),
-                'total_cost' => round($deduct * $unitCost, 2),
-                'reason' => 'POS Order',
-                'notes' => 'Order #'.$order->id.' — '.($menuItem->name ?? 'Bar item').' ×'.$orderItem->quantity,
-                'user_id' => auth()->id(),
-                'reference_type' => 'pos_order',
-                'reference_id' => (string) $order->id,
-            ]);
-        }
-        foreach (array_keys($affectedItemIds) as $itemId) {
-            InventoryItem::syncStoredCurrentStockFromLocations($itemId);
-        }
+        InventoryItem::syncStoredCurrentStockFromLocations($itemId);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -2063,7 +1877,7 @@ class PosController extends Controller
         // Only count active (non-cancelled) items in totals
         $activeItems = $order->items->where('status', 'active');
         $subtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
-        $taxAmount = $order->tax_exempt ? 0 : $activeItems->sum(fn ($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
+        $taxAmount = ($order->tax_exempt || $order->is_complimentary) ? 0 : $activeItems->sum(fn ($i) => floatval($i->line_total) * (floatval($i->tax_rate) / 100));
 
         $serviceChargeAmount = 0;
         if ($order->service_charge_type === 'percent') {

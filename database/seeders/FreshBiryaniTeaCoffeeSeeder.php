@@ -110,6 +110,7 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
         $catMeat = InventoryCategory::create(['name' => 'Meat & Seafood', 'parent_id' => $fb->id, 'description' => 'Chicken, mutton, fish']);
         $catOils = InventoryCategory::create(['name' => 'Oils & Fats', 'parent_id' => $fb->id, 'description' => 'Cooking oils and ghee']);
         $catBev = InventoryCategory::create(['name' => 'Beverages', 'parent_id' => $fb->id, 'description' => 'Tea, coffee, soft drinks']);
+        $catFG = InventoryCategory::create(['name' => 'Finished Goods', 'parent_id' => $fb->id, 'description' => 'Prepared batch items (e.g. Biryani)']);
 
         // ─── 4. Tax ────────────────────────────────────────────────────────
         $gst5 = InventoryTax::where('rate', 5)->first();
@@ -155,6 +156,10 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ['Pepsi (Can)', 'FB-BV-PP1', $catBev, $v1, 'Pcs', 'Pcs', 1, 30, 2],
             ['Sprite (Can)', 'FB-BV-SP1', $catBev, $v1, 'Pcs', 'Pcs', 1, 30, 2],
             ['JW Black Label', 'FB-BV-JW1', $catBev, $v1, 'Bottle', 'Ml', 750, 4500, 1],
+            // Finished goods
+            ['Chicken Biryani', 'FB-FG-CB1', $catFG, $v1, 'Pcs', 'Pcs', 1, 150, 0],
+            ['Mutton Biryani', 'FB-FG-MB1', $catFG, $v1, 'Pcs', 'Pcs', 1, 250, 0],
+            ['Veg Biryani', 'FB-FG-VB1', $catFG, $v1, 'Pcs', 'Pcs', 1, 100, 0],
         ];
 
         $itemMap = [];
@@ -473,6 +478,17 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
         }
         if (isset($menuItemMap['Sprite (Can)']) && isset($itemMap['Sprite (Can)'])) {
             $menuItemMap['Sprite (Can)']->update(['inventory_item_id' => $itemMap['Sprite (Can)']->id]);
+        }
+
+        // Link Finished Goods directly to inventory items
+        if (isset($menuItemMap['Chicken Biryani']) && isset($itemMap['Chicken Biryani'])) {
+            $menuItemMap['Chicken Biryani']->update(['inventory_item_id' => $itemMap['Chicken Biryani']->id]);
+        }
+        if (isset($menuItemMap['Mutton Biryani']) && isset($itemMap['Mutton Biryani'])) {
+            $menuItemMap['Mutton Biryani']->update(['inventory_item_id' => $itemMap['Mutton Biryani']->id]);
+        }
+        if (isset($menuItemMap['Veg Biryani']) && isset($itemMap['Veg Biryani'])) {
+            $menuItemMap['Veg Biryani']->update(['inventory_item_id' => $itemMap['Veg Biryani']->id]);
         }
 
         // ─── 11. Restaurant menu items (link to OTTAAL only; BAR has its own items) ─

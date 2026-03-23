@@ -44,6 +44,16 @@ class TableReservationController extends Controller
             'notes' => 'nullable|string',
         ]);
 
+        $overlap = TableReservation::where('table_id', $validated['table_id'])
+            ->where('reservation_date', $validated['reservation_date'])
+            ->where('reservation_time', $validated['reservation_time'])
+            ->whereIn('status', ['pending', 'confirmed', 'seated'])
+            ->exists();
+
+        if ($overlap) {
+            return response()->json(['message' => 'Table is already reserved for this date and time.'], 422);
+        }
+
         $reservation = TableReservation::create($validated);
 
         return response()->json($reservation->load('table'), 201);

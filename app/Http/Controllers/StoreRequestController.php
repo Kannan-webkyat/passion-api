@@ -112,8 +112,8 @@ class StoreRequestController extends Controller
     public function reject(StoreRequest $storeRequest)
     {
         $this->checkPermission('manage-inventory');
-        if ($storeRequest->status !== 'pending') {
-            return response()->json(['message' => 'Request already processed'], 422);
+        if (! in_array($storeRequest->status, ['pending', 'approved'])) {
+            return response()->json(['message' => 'Cannot reject a fulfilled request'], 422);
         }
 
         $storeRequest->update([
@@ -130,8 +130,8 @@ class StoreRequestController extends Controller
      */
     public function cancel(StoreRequest $storeRequest)
     {
-        if ($storeRequest->status !== 'pending') {
-            return response()->json(['message' => 'Only pending requests can be cancelled'], 422);
+        if (! in_array($storeRequest->status, ['pending', 'approved'])) {
+            return response()->json(['message' => 'Cannot cancel a fulfilled request'], 422);
         }
 
         $user = auth()->user();

@@ -389,6 +389,11 @@ class BookingController extends Controller
             $bookingData['child_breakfast_count'] = $validated['child_breakfast_count'] ?? 0;
             $bookingData['rate_plan_id'] = $validated['rate_plan_id'] ?? null;
             $bookingData['booking_unit'] = $bookingUnit;
+            
+            // Audit Fix: Only apply group deposit/discount to the FIRST booking in the loop
+            if ($isGroup && $index > 0) {
+                $bookingData['deposit_amount'] = 0;
+            }
 
             // Apply individual room occupancy if provided
             if (isset($roomOccupancy[$roomId])) {
@@ -1331,13 +1336,17 @@ class BookingController extends Controller
         $checkOut = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
         $createdAt = $booking->created_at ? Carbon::parse($booking->created_at) : now();
 
-        $grand = (float) ($booking->total_price ?? 0);
+        $extraCharges = (float) ($booking->extra_charges ?? 0);
+        $roomGrand = (float) ($booking->total_price ?? 0);
+        $grand = $roomGrand + $extraCharges;
         $paid = (float) ($booking->deposit_amount ?? 0);
-        $balance = max(0, $grand - $paid);
+        $balance = $grand - $paid;
+
+        // Breakdown room price into subtotal/tax for display
         $taxRate = (float) ($booking->room?->roomType?->tax?->rate ?? 0);
         $divisor = 1 + ($taxRate > 0 ? $taxRate / 100 : 0);
-        $subTotal = $divisor > 0 ? ($grand / $divisor) : $grand;
-        $taxAmount = max(0, $grand - $subTotal);
+        $roomSubTotal = $divisor > 0 ? ($roomGrand / $divisor) : $roomGrand;
+        $roomTaxAmount = $roomGrand - $roomSubTotal;
 
         $invoiceNo = 'BILL-'.str_pad((string) $booking->id, 6, '0', STR_PAD_LEFT);
         $paymentStatus = strtoupper((string) ($booking->payment_status ?? 'pending'));
@@ -1406,15 +1415,23 @@ class BookingController extends Controller
 
     <table class='totals-table'>
       <tr>
-        <td class='label'>Total (Before Tax)</td>
-        <td class='amount'>INR ".number_format($subTotal, 2)."</td>
+        <td class='label'>Room Charges (Subtotal)</td>
+        <td class='amount'>INR ".number_format($roomSubTotal, 2)."</td>
       </tr>
       <tr>
-        <td class='label'>GST</td>
-        <td class='amount'>INR ".number_format($taxAmount, 2)."</td>
+        <td class='label'>Room Tax</td>
+        <td class='amount'>INR ".number_format($roomTaxAmount, 2)."</td>
       </tr>
       <tr>
-        <td class='label grand'>Grand Total</td>
+        <td class='label font-bold'>Room Total</td>
+        <td class='amount font-bold'>INR ".number_format($roomGrand, 2)."</td>
+      </tr>
+      <tr>
+        <td class='label' style='padding-top: 10px;'>Extra Charges (F&B/Other)</td>
+        <td class='amount' style='padding-top: 10px;'>INR ".number_format($extraCharges, 2)."</td>
+      </tr>
+      <tr style='border-top: 2px solid #000;'>
+        <td class='label grand'>Total Outstanding</td>
         <td class='amount grand'>INR ".number_format($grand, 2)."</td>
       </tr>
       <tr>

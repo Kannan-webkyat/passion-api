@@ -11,7 +11,7 @@ class PosOrder extends Model
         'room_id', 'booking_id', 'customer_name', 'customer_phone', 'delivery_address', 'delivery_channel', 'delivery_charge',
         'covers', 'status', 'kitchen_status', 'current_kot_batch',
         'discount_type', 'discount_value', 'service_charge_type', 'service_charge_value', 'service_charge_amount',
-        'subtotal', 'tax_amount', 'discount_amount', 'tip_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt',
+        'subtotal', 'tax_amount', 'discount_amount', 'tip_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt', 'is_complimentary',
     ];
 
     protected $casts = [
@@ -27,50 +27,51 @@ class PosOrder extends Model
         'delivery_charge' => 'decimal:2',
         'total_amount' => 'decimal:2',
         'tax_exempt' => 'boolean',
+        'is_complimentary' => 'boolean',
     ];
 
     public function table()
     {
-        return $this->belongsTo(RestaurantTable::class, 'table_id');
+        return $this->belongsTo(RestaurantTable::class , 'table_id');
     }
 
     public function restaurant()
     {
-        return $this->belongsTo(RestaurantMaster::class, 'restaurant_id');
+        return $this->belongsTo(RestaurantMaster::class , 'restaurant_id');
     }
 
     public function waiter()
     {
-        return $this->belongsTo(User::class, 'waiter_id');
+        return $this->belongsTo(User::class , 'waiter_id');
     }
 
     public function openedBy()
     {
-        return $this->belongsTo(User::class, 'opened_by');
+        return $this->belongsTo(User::class , 'opened_by');
     }
 
     public function room()
     {
-        return $this->belongsTo(Room::class, 'room_id');
+        return $this->belongsTo(Room::class , 'room_id');
     }
 
     public function booking()
     {
-        return $this->belongsTo(Booking::class, 'booking_id');
+        return $this->belongsTo(Booking::class , 'booking_id');
     }
 
     public function items()
     {
-        return $this->hasMany(PosOrderItem::class, 'order_id');
+        return $this->hasMany(PosOrderItem::class , 'order_id');
     }
 
     public function payments()
     {
-        return $this->hasMany(PosPayment::class, 'order_id');
+        return $this->hasMany(PosPayment::class , 'order_id');
     }
 
     public function refunds()
     {
-        return $this->hasMany(PosOrderRefund::class, 'order_id');
+        return $this->hasMany(PosOrderRefund::class , 'order_id');
     }
 }
