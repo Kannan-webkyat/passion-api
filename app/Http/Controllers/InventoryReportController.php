@@ -275,7 +275,7 @@ class InventoryReportController extends Controller
         $endDate = $request->query('to') ?? $request->query('end_date');
 
         $query = InventoryTransaction::with(['item.issueUom', 'user', 'location'])
-            ->whereIn('reason', ['Wastage', 'Expired', 'Breakage', 'Theft', 'Manual Adjustment', 'Correction'])
+            ->whereIn('reason', ['Wastage', 'Expired', 'Breakage', 'Theft', 'Manual Adjustment', 'Correction', 'Components Stored', 'Assembled from Storage'])
             ->orderBy('created_at', 'desc');
 
         if ($reason && $reason !== 'all') $query->where('reason', $reason);
@@ -284,7 +284,7 @@ class InventoryReportController extends Controller
 
         $results = $query->get();
 
-        $data = $results->map(function($t) {
+        $data = $results->map(function ($t) {
             return [
                 'id' => $t->id,
                 'item_name' => $t->item?->name ?? 'Unknown',
@@ -303,15 +303,15 @@ class InventoryReportController extends Controller
         $summary = [
             'total_loss_value' => $data->sum('total_loss'),
             'total_incidents' => $data->count(),
-            'by_reason' => $data->groupBy('reason')->map(fn($group) => [
+            'by_reason' => $data->groupBy('reason')->map(fn ($group) => [
                 'count' => $group->count(),
-                'value' => $group->sum('total_loss')
-            ])
+                'value' => $group->sum('total_loss'),
+            ]),
         ];
 
         return response()->json([
             'data' => $data,
-            'summary' => $summary
+            'summary' => $summary,
         ]);
     }
 

@@ -91,6 +91,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::patch('pos/orders/{order}', [PosController::class , 'updateOrder']);
     Route::post('pos/orders/{order}/transfer-table', [PosController::class , 'transferTable']);
     Route::put('pos/orders/{order}/items', [PosController::class , 'syncItems']);
+    Route::post('pos/orders/{order}/items/void', [PosController::class , 'voidItems']);
     Route::post('pos/orders/{order}/kot', [PosController::class , 'sendKot']);
     Route::post('pos/orders/{order}/open-bill', [PosController::class , 'openBill']);
     Route::post('pos/orders/{order}/reopen', [PosController::class , 'reopen']);
@@ -145,6 +146,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('inventory/vendors', \App\Http\Controllers\VendorController::class);
     Route::apiResource('inventory/locations', \App\Http\Controllers\InventoryLocationController::class);
     Route::apiResource('inventory/store-requests', \App\Http\Controllers\StoreRequestController::class);
+    Route::post('inventory/adjust-stock', [\App\Http\Controllers\InventoryController::class , 'adjustStock']);
     Route::post('inventory/store-requests/{storeRequest}/approve', [\App\Http\Controllers\StoreRequestController::class , 'approve']);
     Route::post('inventory/store-requests/{storeRequest}/issue', [\App\Http\Controllers\StoreRequestController::class , 'issue']);
     Route::post('inventory/store-requests/{storeRequest}/reject', [\App\Http\Controllers\StoreRequestController::class , 'reject']);

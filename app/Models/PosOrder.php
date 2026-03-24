@@ -12,6 +12,7 @@ class PosOrder extends Model
         'covers', 'status', 'kitchen_status', 'current_kot_batch',
         'discount_type', 'discount_value', 'service_charge_type', 'service_charge_value', 'service_charge_amount',
         'subtotal', 'tax_amount', 'discount_amount', 'tip_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt', 'is_complimentary',
+        'void_reason', 'void_notes', 'voided_by', 'voided_at',
     ];
 
     protected $casts = [
@@ -28,6 +29,7 @@ class PosOrder extends Model
         'total_amount' => 'decimal:2',
         'tax_exempt' => 'boolean',
         'is_complimentary' => 'boolean',
+        'voided_at' => 'datetime',
     ];
 
     public function table()
@@ -73,5 +75,10 @@ class PosOrder extends Model
     public function refunds()
     {
         return $this->hasMany(PosOrderRefund::class , 'order_id');
+    }
+
+    public function voidedBy()
+    {
+        return $this->belongsTo(User::class , 'voided_by');
     }
 }

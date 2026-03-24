@@ -97,7 +97,7 @@ class StoreRequestController extends Controller
     {
         $this->checkPermission('manage-inventory');
         if ($storeRequest->status !== 'pending') {
-            return response()->json(['message' => 'Request already processsed'], 422);
+            return response()->json(['message' => 'Request already processed'], 422);
         }
 
         $storeRequest->update([

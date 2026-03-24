@@ -273,4 +273,78 @@ class InventoryController extends Controller
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
+
+    /**
+     * Stock adjustment (add or reduce) at a specific location.
+     * For wastage, components in fridge, assembled from fridge, corrections, etc.
+     */
+    public function adjustStock(Request $request)
+    {
+        $this->checkPermission('manage-inventory');
+
+        $validated = $request->validate([
+            'inventory_item_id' => 'required|exists:inventory_items,id',
+            'inventory_location_id' => 'required|exists:inventory_locations,id',
+            'quantity' => 'required|numeric',
+            'reason' => 'required|string|in:Wastage,Expired,Breakage,Theft,Staff meal,Manual Adjustment,Correction,Components Stored,Assembled from Storage',
+            'notes' => 'nullable|string|max:500',
+        ]);
+
+        $item = InventoryItem::findOrFail($validated['inventory_item_id']);
+        $location = \App\Models\InventoryLocation::findOrFail($validated['inventory_location_id']);
+        $qty = (float) $validated['quantity'];
+
+        if ($qty == 0) {
+            return response()->json(['message' => 'Quantity cannot be zero.'], 422);
+        }
+
+        $isReduce = $qty < 0;
+        $qtyAbs = abs($qty);
+
+        $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
+        $lineCost = round($qtyAbs * $unitCost, 2);
+
+        DB::beginTransaction();
+        try {
+            DB::table('inventory_item_locations')->updateOrInsert(
+                ['inventory_item_id' => $item->id, 'inventory_location_id' => $location->id],
+                ['updated_at' => now(), 'created_at' => now()]
+            );
+
+            if ($isReduce) {
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', $item->id)
+                    ->where('inventory_location_id', $location->id)
+                    ->decrement('quantity', $qtyAbs);
+            } else {
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', $item->id)
+                    ->where('inventory_location_id', $location->id)
+                    ->increment('quantity', $qtyAbs);
+            }
+
+            InventoryTransaction::create([
+                'inventory_item_id' => $item->id,
+                'inventory_location_id' => $location->id,
+                'type' => $isReduce ? 'out' : 'in',
+                'quantity' => $qtyAbs,
+                'unit_cost' => round($unitCost, 4),
+                'total_cost' => $lineCost,
+                'reason' => $validated['reason'],
+                'notes' => $validated['notes'] ?? ($isReduce ? 'Stock reduced' : 'Stock added'),
+                'user_id' => auth()->id(),
+            ]);
+
+            InventoryItem::syncStoredCurrentStockFromLocations($item->id);
+
+            DB::commit();
+
+            return response()->json([
+                'message' => $isReduce ? 'Stock reduced successfully.' : 'Stock added successfully.',
+            ]);
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
 }
