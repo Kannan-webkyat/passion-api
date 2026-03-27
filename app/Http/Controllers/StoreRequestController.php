@@ -109,19 +109,28 @@ class StoreRequestController extends Controller
         return response()->json($storeRequest);
     }
 
-    public function reject(StoreRequest $storeRequest)
+    public function reject(Request $request, StoreRequest $storeRequest)
     {
         $this->checkPermission('manage-inventory');
         if (! in_array($storeRequest->status, ['pending', 'approved'])) {
             return response()->json(['message' => 'Cannot reject a fulfilled request'], 422);
         }
 
-        $storeRequest->update([
-            'status' => 'rejected',
-            'notes' => $storeRequest->notes.' (Rejected by '.auth()->user()->name.')',
+        $validated = $request->validate([
+            'reason' => 'required|string|max:2000',
         ]);
 
-        return response()->json($storeRequest);
+        $rejector = auth()->user()->name;
+        $reasonLine = trim($validated['reason']);
+        $notesSuffix = ' (Rejected by '.$rejector.'. Reason: '.$reasonLine.')';
+
+        $storeRequest->update([
+            'status' => 'rejected',
+            'rejection_reason' => $reasonLine,
+            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').$notesSuffix,
+        ]);
+
+        return response()->json($storeRequest->load(['department', 'fromLocation', 'toLocation', 'requester', 'items.item']));
     }
 
     /**

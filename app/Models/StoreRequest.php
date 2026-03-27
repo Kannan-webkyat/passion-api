@@ -11,7 +11,7 @@ class StoreRequest extends Model
 
     protected $fillable = [
         'request_number', 'from_location_id', 'to_location_id', 'department_id', 'required_date',
-        'requested_by', 'approved_by', 'status', 'notes',
+        'requested_by', 'approved_by', 'status', 'notes', 'rejection_reason',
         'requested_at', 'approved_at', 'issued_at',
     ];
 
