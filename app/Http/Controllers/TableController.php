@@ -11,7 +11,7 @@ class TableController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if ($user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
     }

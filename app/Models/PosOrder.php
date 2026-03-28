@@ -19,6 +19,8 @@ class PosOrder extends Model
         'opened_at' => 'datetime',
         'closed_at' => 'datetime',
         'business_date' => 'date',
+        'current_kot_batch' => 'integer',
+        'covers' => 'integer',
         'discount_value' => 'decimal:2',
         'service_charge_value' => 'decimal:2',
         'service_charge_amount' => 'decimal:2',

@@ -11,7 +11,7 @@ Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
 Broadcast::channel('pos.restaurant.{restaurantId}', function ($user, $restaurantId) {
     $rid = (int) $restaurantId;
 
-    if ($user->hasRole('Admin')) {
+    if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
         return RestaurantMaster::where('id', $rid)->where('is_active', true)->exists();
     }
 

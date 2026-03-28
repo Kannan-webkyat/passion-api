@@ -35,7 +35,7 @@ class PosController extends Controller
         if (! $user) {
             abort(401, 'Unauthenticated.');
         }
-        if (! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -46,7 +46,7 @@ class PosController extends Controller
         if (! $user) {
             return false;
         }
-        if ($user->hasRole('Admin')) {
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
             return true;
         }
 
@@ -970,6 +970,9 @@ class PosController extends Controller
         if (! $newTable || (int) $newTable->restaurant_master_id !== (int) $order->restaurant_id) {
             return response()->json(['message' => 'Target table must be in the same restaurant.'], 422);
         }
+        if ($newTable->status === 'inactive') {
+            return response()->json(['message' => 'Cannot transfer to an inactive table.'], 422);
+        }
 
         $errorResponse = null;
         DB::transaction(function () use ($order, $newTableId, &$errorResponse) {
@@ -1034,16 +1037,6 @@ class PosController extends Controller
             'last_updated_at' => 'nullable|string',
         ]);
 
-        if (! empty($validated['last_updated_at'])) {
-            $remoteUpdated = $order->updated_at->toIso8601String();
-            if ($remoteUpdated !== $validated['last_updated_at']) {
-                return response()->json([
-                    'message' => 'This order was modified by another terminal. Please reload to see the latest changes.',
-                    'order' => $this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')),
-                ], 409);
-            }
-        }
-
         foreach ($validated['items'] as $i => $row) {
             $hasMenu = array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== '';
             $hasCombo = array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '';
@@ -1067,6 +1060,18 @@ class PosController extends Controller
         DB::transaction(function () use ($order, $validated) {
             // Lock the order to serialize all cart synchronization requests
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+
+            if (! empty($validated['last_updated_at'])) {
+                $remoteUpdated = $order->updated_at->toIso8601String();
+                if ($remoteUpdated !== $validated['last_updated_at']) {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json([
+                            'message' => 'This order was modified by another terminal. Please reload to see the latest changes.',
+                            'order' => $this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')),
+                        ], 409)
+                    );
+                }
+            }
 
             // ── Availability check: prevent overselling produced items (INSIDE transaction) ──
             $produced = DB::table('recipes')
@@ -1705,7 +1710,7 @@ class PosController extends Controller
             }
         }
 
-        $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
+        $hasRoomCharge = collect($validated['payments'] ?? [])->contains('method', 'room_charge');
         if ($hasRoomCharge && ($order->order_type !== 'room_service' || ! $order->booking_id)) {
             return response()->json(['message' => 'Room charge is only available for room service orders with a linked booking.'], 422);
         }
@@ -1719,7 +1724,7 @@ class PosController extends Controller
             }
 
             // If room charge is used, ensure booking is still active/checked-in
-            $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
+            $hasRoomCharge = collect($validated['payments'] ?? [])->contains('method', 'room_charge');
             if ($hasRoomCharge && $order->booking_id) {
                 $booking = Booking::lockForUpdate()->find($order->booking_id);
                 if (! $booking || $booking->status !== 'checked_in') {
@@ -1761,18 +1766,20 @@ class PosController extends Controller
                 );
             }
 
-            // Record payments
+            // Record payments (skip for complimentary — total is 0)
             $order->payments()->delete();
-            foreach ($validated['payments'] ?? [] as $pay) {
-                PosPayment::create([
-                    'order_id' => $order->id,
-                    'business_date' => $businessDate,
-                    'method' => $pay['method'],
-                    'amount' => $pay['amount'],
-                    'reference_no' => $pay['reference_no'] ?? null,
-                    'paid_at' => now(),
-                    'received_by' => auth()->id(),
-                ]);
+            if (! $isComplimentary) {
+                foreach ($validated['payments'] ?? [] as $pay) {
+                    PosPayment::create([
+                        'order_id' => $order->id,
+                        'business_date' => $businessDate,
+                        'method' => $pay['method'],
+                        'amount' => $pay['amount'],
+                        'reference_no' => $pay['reference_no'] ?? null,
+                        'paid_at' => now(),
+                        'received_by' => auth()->id(),
+                    ]);
+                }
             }
 
             // Close order
@@ -1862,9 +1869,11 @@ class PosController extends Controller
             'void_notes' => 'nullable|string|max:500',
         ]);
 
-        DB::transaction(function () use ($order, $validated) {
+        $blocked = false;
+        DB::transaction(function () use ($order, $validated, &$blocked) {
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
             if (! in_array($order->status, ['open', 'billed'])) {
+                $blocked = true;
                 return;
             }
 
@@ -1904,6 +1913,10 @@ class PosController extends Controller
             }
         });
 
+        if ($blocked) {
+            return response()->json(['message' => 'Order can no longer be voided (status changed).'], 422);
+        }
+
         $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
 
         return response()->json(['message' => 'Order voided.']);
@@ -1915,8 +1928,8 @@ class PosController extends Controller
     {
         $this->checkPermission('pos-order');
         $this->authorizeOrderAccess($order);
-        if (in_array($order->status, ['paid', 'void'])) {
-            return response()->json(['message' => 'Cannot void items on a paid or voided order.'], 422);
+        if (in_array($order->status, ['paid', 'void', 'refunded'])) {
+            return response()->json(['message' => 'Cannot void items on a paid, voided or refunded order.'], 422);
         }
         if ($this->isBusinessDateClosedForOrder($order)) {
             return response()->json(['message' => 'Cannot void items: business date is already closed for this outlet.'], 422);
@@ -2451,7 +2464,15 @@ class PosController extends Controller
                 $this->deductOrderItemInventory($item, $targetStore, 'pos_order_line_ready', (string) $item->id);
             }
 
-            PosOrderItem::where('id', $item->id)->update(['kitchen_ready_at' => now()]);
+            $itemUpdates = ['kitchen_ready_at' => now()];
+            if (! $item->kot_started_at) {
+                $itemUpdates['kot_started_at'] = now();
+            }
+            PosOrderItem::where('id', $item->id)->update($itemUpdates);
+
+            if ($order->kitchen_status === 'pending') {
+                $order->update(['kitchen_status' => 'preparing']);
+            }
             $order->refresh();
 
             $allKotItems = $order->items()->where('kot_sent', true)->where('status', 'active')->get();
@@ -2669,6 +2690,17 @@ class PosController extends Controller
         $validated = $request->validate([
             'kitchen_status' => 'required|in:pending,preparing,ready,served',
         ]);
+
+        $allowed = match ($order->kitchen_status) {
+            'pending' => ['preparing'],
+            'preparing' => ['ready'],
+            'ready' => ['served'],
+            'served' => [],
+            default => ['pending', 'preparing', 'ready', 'served'],
+        };
+        if (! in_array($validated['kitchen_status'], $allowed)) {
+            return response()->json(['message' => "Cannot transition from {$order->kitchen_status} to {$validated['kitchen_status']}."], 422);
+        }
 
         if ($this->isBusinessDateClosedForOrder($order)) {
             return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
@@ -2889,19 +2921,10 @@ class PosController extends Controller
             return;
         }
 
-        $exists = DB::table('inventory_item_locations')
-            ->where('inventory_item_id', $itemId)
-            ->where('inventory_location_id', $locId)
-            ->exists();
-        if (! $exists) {
-            DB::table('inventory_item_locations')->insert([
-                'inventory_item_id' => $itemId,
-                'inventory_location_id' => $locId,
-                'quantity' => 0,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-        }
+        DB::table('inventory_item_locations')->updateOrInsert(
+            ['inventory_item_id' => $itemId, 'inventory_location_id' => $locId],
+            ['updated_at' => now()],
+        );
 
         $row = DB::table('inventory_item_locations')
             ->where('inventory_item_id', $itemId)
@@ -2970,7 +2993,7 @@ class PosController extends Controller
         if ($order->service_charge_type === 'percent') {
             $serviceChargeAmount = $subtotal * (floatval($order->service_charge_value ?? 0) / 100);
         } elseif ($order->service_charge_type === 'flat') {
-            $serviceChargeAmount = floatval($order->service_charge_value ?? 0);
+            $serviceChargeAmount = min(floatval($order->service_charge_value ?? 0), $subtotal);
         }
 
         $tipAmount = (float) ($order->tip_amount ?? 0);
