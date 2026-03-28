@@ -7,12 +7,13 @@ use Illuminate\Database\Eloquent\Model;
 class PosPayment extends Model
 {
     protected $fillable = [
-        'order_id', 'method', 'amount', 'reference_no', 'paid_at', 'received_by',
+        'order_id', 'business_date', 'method', 'amount', 'reference_no', 'paid_at', 'received_by',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'paid_at' => 'datetime',
+        'business_date' => 'date',
     ];
 
     public function receiver()

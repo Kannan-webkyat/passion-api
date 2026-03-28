@@ -22,6 +22,7 @@ use App\Models\RestaurantMenuItemVariant;
 use App\Models\RestaurantTable;
 use App\Models\Setting;
 use App\Models\User;
+use App\Services\BusinessDateService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -33,6 +34,28 @@ class PosController extends Controller
         if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
+    }
+
+    /**
+     * Y-m-d business date for locks: prefers stored business_date; for legacy rows uses opened_at with outlet cutoff.
+     */
+    private function businessDateStringForOrder(PosOrder $order): string
+    {
+        $order->loadMissing('restaurant');
+        if ($order->business_date) {
+            return $order->business_date->toDateString();
+        }
+
+        $at = $order->opened_at ?? $order->created_at;
+
+        return BusinessDateService::resolve($order->restaurant, $at);
+    }
+
+    private function isBusinessDateClosedForOrder(PosOrder $order): bool
+    {
+        return PosDayClosing::where('restaurant_id', $order->restaurant_id)
+            ->where('closed_date', $this->businessDateStringForOrder($order))
+            ->exists();
     }
 
     // ── Restaurants ──────────────────────────────────────────────────────────
@@ -133,7 +156,7 @@ class PosController extends Controller
         // Non-admins filtering
         if ($user && ! $user->hasRole('Admin')) {
             $assignedOutletIds = $user->restaurants()->pluck('restaurant_masters.id')->toArray();
-            
+
             if (count($assignedOutletIds) > 0) {
                 // 1. If user has direct assignments, strictly use those.
                 $query->whereIn('id', $assignedOutletIds);
@@ -224,27 +247,27 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         $restaurantId = $request->input('restaurant_id');
 
-        // Instead of global produced/sold, we intelligently look at the exact physical stock 
+        // Instead of global produced/sold, we intelligently look at the exact physical stock
         // in the specific stores mapped to this restaurant outlet (Kitchen / Bar).
         $restaurant = $restaurantId ? \App\Models\RestaurantMaster::find($restaurantId) : null;
-        $locIds = $restaurant 
-            ? array_filter([$restaurant->kitchen_location_id, $restaurant->bar_location_id]) 
+        $locIds = $restaurant
+            ? array_filter([$restaurant->kitchen_location_id, $restaurant->bar_location_id])
             : [];
 
-        if (!empty($locIds)) {
+        if (! empty($locIds)) {
             $physicalStock = DB::table('inventory_item_locations')
                 ->whereIn('inventory_location_id', $locIds)
                 ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
                 ->groupBy('inventory_item_id')
                 ->pluck('total', 'inventory_item_id')
-                ->map(fn($v) => (float)$v);
+                ->map(fn ($v) => (float) $v);
         } else {
             // Legacy fallback if no location mapped
             $physicalStock = DB::table('inventory_item_locations')
                 ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
                 ->groupBy('inventory_item_id')
                 ->pluck('total', 'inventory_item_id')
-                ->map(fn($v) => (float)$v);
+                ->map(fn ($v) => (float) $v);
         }
 
         $reservedByItem = collect();
@@ -365,7 +388,9 @@ class PosController extends Controller
 
                     foreach ($recipes as $recipe) {
                         $portions = (float) $committedPortions->get($recipe->menu_item_id, 0);
-                        if ($portions <= 0) continue;
+                        if ($portions <= 0) {
+                            continue;
+                        }
                         $multiplier = $portions / max(0.001, (float) $recipe->yield_quantity);
                         foreach ($recipe->ingredients as $ing) {
                             $used = round((float) $ing->raw_quantity * $multiplier, 3);
@@ -444,6 +469,27 @@ class PosController extends Controller
             });
         }
 
+        // Hide items that are not sellable (no positive outlet/base/variant price).
+        $categories = $categories
+            ->map(function ($cat) {
+                $cat->items = collect($cat->items)->filter(function ($item) {
+                    $variants = collect($item->variants ?? []);
+                    if ($variants->isNotEmpty()) {
+                        return $variants->contains(function ($v) {
+                            $price = is_array($v) ? ($v['price'] ?? 0) : ($v->price ?? 0);
+
+                            return (float) $price > 0;
+                        });
+                    }
+
+                    return (float) ($item->price ?? 0) > 0;
+                })->values();
+
+                return $cat;
+            })
+            ->filter(fn ($c) => collect($c->items)->isNotEmpty())
+            ->values();
+
         // Build menu item id => available_qty for combo availability
         $availableByMenuId = $categories->flatMap(fn ($cat) => collect($cat->items))
             ->filter(fn ($i) => is_object($i) && isset($i->id))
@@ -480,6 +526,10 @@ class PosController extends Controller
                     ? (string) $restaurantComboPrices[$c->id]
                     : (string) $c->price;
 
+                if ((float) $price <= 0) {
+                    return null;
+                }
+
                 return (object) [
                     'id' => $c->id,
                     'name' => $c->name,
@@ -490,7 +540,7 @@ class PosController extends Controller
                     'combo_id' => $c->id,
                     'menu_items' => $c->menuItems->map(fn ($m) => ['id' => $m->id, 'name' => $m->name])->toArray(),
                 ];
-            });
+            })->filter()->values();
 
         if ($combos->isNotEmpty()) {
             $categories = $categories->push((object) [
@@ -532,26 +582,39 @@ class PosController extends Controller
 
         $validated = $request->validate($rules);
 
+        $restaurant = RestaurantMaster::find($validated['restaurant_id']);
+        $businessDate = BusinessDateService::resolve($restaurant);
+
         $duplicateOrder = null;
-        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder) {
+        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder, $businessDate) {
             if ($orderType === 'dine_in') {
                 // Lock the table to prevent concurrent order creation
                 RestaurantTable::where('id', $validated['table_id'])->lockForUpdate()->first();
-                
+
                 $existing = PosOrder::where('table_id', $validated['table_id'])
                     ->whereIn('status', ['open', 'billed'])
                     ->first();
 
                 if ($existing) {
                     $duplicateOrder = $existing;
+
                     return null;
                 }
+            }
+
+            if (PosDayClosing::where('restaurant_id', $validated['restaurant_id'])->where('closed_date', $businessDate)->exists()) {
+                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                    response()->json([
+                        'message' => 'Cannot open new orders: this business date is already closed for this outlet.',
+                    ], 422)
+                );
             }
 
             $order = PosOrder::create([
                 'order_type' => $orderType,
                 'table_id' => $orderType === 'dine_in' ? $validated['table_id'] : null,
                 'restaurant_id' => $validated['restaurant_id'],
+                'business_date' => $businessDate,
                 'room_id' => $validated['room_id'] ?? null,
                 'booking_id' => $validated['booking_id'] ?? null,
                 'customer_name' => $validated['customer_name'] ?? null,
@@ -643,6 +706,7 @@ class PosController extends Controller
     public function getOrder(PosOrder $order)
     {
         $this->checkPermission('pos-order');
+
         return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
     }
 
@@ -653,6 +717,9 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         if (! in_array($order->status, ['open', 'billed'])) {
             return response()->json(['message' => 'Order is not editable.'], 422);
+        }
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
         }
 
         $rules = [
@@ -732,6 +799,10 @@ class PosController extends Controller
             return response()->json(['message' => 'Order is already at this table.'], 422);
         }
 
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
+
         $newTable = RestaurantTable::find($newTableId);
         if ($newTable->restaurant_master_id != $order->restaurant_id) {
             return response()->json(['message' => 'Target table must be in the same restaurant.'], 422);
@@ -752,6 +823,7 @@ class PosController extends Controller
 
             if ($existingOrder) {
                 $errorResponse = response()->json(['message' => 'Target table already has an active order.'], 422);
+
                 return;
             }
 
@@ -776,6 +848,9 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         if ($order->status !== 'open') {
             return response()->json(['message' => 'Order is billed. Re-open to add or edit items.'], 422);
+        }
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
         }
 
         $validated = $request->validate([
@@ -821,7 +896,7 @@ class PosController extends Controller
         DB::transaction(function () use ($order, $validated) {
             // Lock the order to serialize all cart synchronization requests
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            
+
             // ── Availability check: prevent overselling produced items (INSIDE transaction) ──
             $produced = DB::table('recipes')
                 ->leftJoin('production_logs', 'recipes.id', '=', 'production_logs.recipe_id')
@@ -889,7 +964,9 @@ class PosController extends Controller
 
             foreach ($incomingByItem as $menuItemId => $incomingQty) {
                 $item = \App\Models\MenuItem::find($menuItemId);
-                if (!$item) continue;
+                if (! $item) {
+                    continue;
+                }
 
                 if ($item->inventory_item_id) {
                     // Availability = Physical Stock - Reserved(not deducted) — single source of truth
@@ -927,10 +1004,10 @@ class PosController extends Controller
                     // Type C: made-to-order (KOT item whose recipe is ingredient-based).
                     // menu_item.requires_production=true sends it to KOT; recipe.requires_production=false
                     // means we deduct raw ingredients, not a finished-good SKU.
-                    $mockItems = [ (object) ['menu_item_id' => $menuItemId, 'quantity' => $incomingQty, 'combo_id' => null] ];
+                    $mockItems = [(object) ['menu_item_id' => $menuItemId, 'quantity' => $incomingQty, 'combo_id' => null]];
                     $insufficientIngredients = $this->checkMadeToOrderStock($order, $mockItems);
 
-                    if (!empty($insufficientIngredients)) {
+                    if (! empty($insufficientIngredients)) {
                         $err = $insufficientIngredients[0];
                         throw new \Illuminate\Http\Exceptions\HttpResponseException(
                             response()->json([
@@ -938,6 +1015,7 @@ class PosController extends Controller
                             ], 422)
                         );
                     }
+
                     continue;
                 } elseif ($item->requires_production) {
                     // Legacy batch-produced items tracked only by production logs (no inventory_item_id).
@@ -946,10 +1024,10 @@ class PosController extends Controller
                 } else {
                     // menu_item.requires_production=false + no inventory_item_id + MTO recipe:
                     // item goes to bar/direct path but still needs ingredient check.
-                    $mockItems = [ (object) ['menu_item_id' => $menuItemId, 'quantity' => $incomingQty, 'combo_id' => null] ];
+                    $mockItems = [(object) ['menu_item_id' => $menuItemId, 'quantity' => $incomingQty, 'combo_id' => null]];
                     $insufficientIngredients = $this->checkMadeToOrderStock($order, $mockItems);
 
-                    if (!empty($insufficientIngredients)) {
+                    if (! empty($insufficientIngredients)) {
                         $err = $insufficientIngredients[0];
                         throw new \Illuminate\Http\Exceptions\HttpResponseException(
                             response()->json([
@@ -957,6 +1035,7 @@ class PosController extends Controller
                             ], 422)
                         );
                     }
+
                     continue;
                 }
 
@@ -971,6 +1050,7 @@ class PosController extends Controller
             }
 
             $currentActive = $order->items()->where('status', 'active')->get();
+            $comboTaxCache = [];
 
             $key = fn ($row) => (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '')
                 ? 'c_'.$row['combo_id'].'|'.trim($row['notes'] ?? '')
@@ -998,7 +1078,7 @@ class PosController extends Controller
                     $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
 
                     if ($item->inventory_deducted && $targetStore) {
-                        $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_cancel', (string)$order->id);
+                        $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_cancel', (string) $order->id);
                     }
 
                     if ($item->kot_sent) {
@@ -1027,7 +1107,17 @@ class PosController extends Controller
                         ->where('is_active', true)
                         ->first();
                     $unitPrice = $rc ? floatval($rc->price) : floatval($combo->price);
-                    $taxRate = 0;
+                    if ($unitPrice <= 0) {
+                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                            response()->json([
+                                'message' => "Combo \"{$combo->name}\" has no valid sell price for this outlet. Set pricing under Menu Pricing.",
+                            ], 422)
+                        );
+                    }
+                    if (! array_key_exists((int) $combo->id, $comboTaxCache)) {
+                        $comboTaxCache[(int) $combo->id] = $this->resolveComboTaxRate($combo, (int) $order->restaurant_id);
+                    }
+                    $taxRate = (float) $comboTaxCache[(int) $combo->id];
                     $matching = $currentActive->filter(
                         fn ($i) => $i->combo_id == $row['combo_id']
                             && trim($i->notes ?? '') === trim($notes ?? '')
@@ -1058,6 +1148,13 @@ class PosController extends Controller
                             ->where('restaurant_master_id', $order->restaurant_id)
                             ->first();
                         $unitPrice = $rmi ? floatval($rmi->price) : floatval($menuItem->price);
+                    }
+                    if ($unitPrice <= 0) {
+                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                            response()->json([
+                                'message' => "Item \"{$menuItem->name}\" has no valid sell price for this outlet. Set pricing under Menu Pricing.",
+                            ], 422)
+                        );
                     }
                     $taxRate = floatval($menuItem->tax?->rate ?? 0);
                     $matching = $currentActive->filter(
@@ -1097,6 +1194,8 @@ class PosController extends Controller
                         if ($first) {
                             $first->update([
                                 'quantity' => $qty,
+                                'unit_price' => $unitPrice,
+                                'tax_rate' => $taxRate,
                                 'line_total' => $unitPrice * $qty,
                                 'notes' => $notes,
                             ]);
@@ -1119,7 +1218,7 @@ class PosController extends Controller
                             $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
 
                             if ($item->inventory_deducted && $targetStore) {
-                                $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_reduce', (string)$order->id);
+                                $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_reduce', (string) $order->id);
                             }
 
                             if ($item->kot_sent) {
@@ -1136,7 +1235,7 @@ class PosController extends Controller
                                 $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
 
                                 if ($item->inventory_deducted && $targetStore) {
-                                    $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_partial', (string)$order->id);
+                                    $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_partial', (string) $order->id);
                                 }
 
                                 $item->update(['status' => 'cancelled']);
@@ -1144,6 +1243,8 @@ class PosController extends Controller
                             } else {
                                 $item->update([
                                     'quantity' => $newQty,
+                                    'unit_price' => $unitPrice,
+                                    'tax_rate' => $taxRate,
                                     'line_total' => $unitPrice * $newQty,
                                     'notes' => $notes,
                                 ]);
@@ -1168,18 +1269,21 @@ class PosController extends Controller
         if ($order->status !== 'open') {
             return response()->json(['message' => 'Order is billed. Re-open to add items and send KOT.'], 422);
         }
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
 
         DB::transaction(function () use ($order) {
             // Lock the order to prevent concurrent simultaneous KOT triggers issuing the same batch number
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            
+
             // Only items that require production (not just simple stock deductions) go to KOT display
             $kotQuery = $order->items()
                 ->where('status', 'active')
                 ->where('kot_sent', false)
-                ->where(function($q) {
+                ->where(function ($q) {
                     $q->whereNull('menu_item_id')
-                      ->orWhereHas('menuItem', fn($mq) => $mq->where('requires_production', true));
+                        ->orWhereHas('menuItem', fn ($mq) => $mq->where('requires_production', true));
                 });
 
             if ($kotQuery->exists()) {
@@ -1189,9 +1293,9 @@ class PosController extends Controller
                 $order->items()
                     ->where('status', 'active')
                     ->where('kot_sent', false)
-                    ->where(function($q) {
+                    ->where(function ($q) {
                         $q->whereNull('menu_item_id')
-                          ->orWhereHas('menuItem', fn($mq) => $mq->where('requires_production', true));
+                            ->orWhereHas('menuItem', fn ($mq) => $mq->where('requires_production', true));
                     })
                     ->update(['kot_sent' => true, 'kot_batch' => $batch]);
             }
@@ -1214,14 +1318,18 @@ class PosController extends Controller
     public function openBill(PosOrder $order)
     {
         $this->checkPermission('pos-settle');
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Cannot open bill: business date is already closed for this outlet.'], 422);
+        }
         $errorResponse = null;
         DB::transaction(function () use ($order, &$errorResponse) {
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            
+
             if ($order->status !== 'open') {
                 $errorResponse = response()->json([
                     'message' => 'Order must be open to generate bill.',
                 ], 422);
+
                 return;
             }
             $order->update(['status' => 'billed']);
@@ -1243,11 +1351,12 @@ class PosController extends Controller
             return response()->json(['message' => 'Order already paid.'], 422);
         }
 
-        // ── 1. CHECK IF DATE IS CLOSED ──
-        $today = now()->format('Y-m-d');
-        if (PosDayClosing::where('restaurant_id', $order->restaurant_id)->where('closed_date', $today)->exists()) {
-            return response()->json(['message' => 'Cannot settle new orders for a date that is already closed.'], 422);
+        // ── 1. CHECK IF BUSINESS DATE IS CLOSED (order’s business day, not “today” only) ──
+        $order->loadMissing('restaurant');
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Cannot settle: this order\'s business date is already closed for this outlet.'], 422);
         }
+        $businessDate = $this->businessDateStringForOrder($order);
 
         $validated = $request->validate([
             'discount_type' => 'nullable|in:percent,flat',
@@ -1266,11 +1375,11 @@ class PosController extends Controller
         ]);
 
         // Security check: only allow room-charge if order is linked to a booking (Room Service/Dine-in with Room)
-        if (!empty($validated['payments'])) {
+        if (! empty($validated['payments'])) {
             foreach ($validated['payments'] as $pay) {
-                if ($pay['method'] === 'room_charge' && !$order->booking_id) {
+                if ($pay['method'] === 'room_charge' && ! $order->booking_id) {
                     return response()->json([
-                        'message' => 'Room Charge payment is only available for orders with a linked Checked-in Room.'
+                        'message' => 'Room Charge payment is only available for orders with a linked Checked-in Room.',
                     ], 422);
                 }
             }
@@ -1281,7 +1390,7 @@ class PosController extends Controller
             return response()->json(['message' => 'Room charge is only available for room service orders with a linked booking.'], 422);
         }
 
-        DB::transaction(function () use ($order, $validated) {
+        DB::transaction(function () use ($order, $validated, $businessDate) {
             // Lock the order to prevent concurrent settling/payments
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
             if ($order->status === 'paid') {
@@ -1307,9 +1416,10 @@ class PosController extends Controller
                 $deliveryCharge = 0;
             }
 
-            $isComplimentary = (bool)($validated['is_complimentary'] ?? false);
-            
+            $isComplimentary = (bool) ($validated['is_complimentary'] ?? false);
+
             $order->update([
+                'business_date' => $businessDate,
                 'discount_type' => $isComplimentary ? 'percent' : ($validated['discount_type'] ?? null),
                 'discount_value' => $isComplimentary ? 100 : ($validated['discount_value'] ?? 0),
                 'service_charge_type' => $validated['service_charge_type'] ?? null,
@@ -1324,7 +1434,7 @@ class PosController extends Controller
             $order->refresh();
 
             $paymentsTotal = collect($validated['payments'] ?? [])->sum('amount');
-            if (!$isComplimentary && $paymentsTotal < $order->total_amount - 0.01) {
+            if (! $isComplimentary && $paymentsTotal < $order->total_amount - 0.01) {
                 throw new \Illuminate\Http\Exceptions\HttpResponseException(
                     response()->json([
                         'message' => 'Total payments ('.number_format($paymentsTotal, 2).') is less than order total ('.number_format($order->total_amount, 2).').',
@@ -1337,6 +1447,7 @@ class PosController extends Controller
             foreach ($validated['payments'] ?? [] as $pay) {
                 PosPayment::create([
                     'order_id' => $order->id,
+                    'business_date' => $businessDate,
                     'method' => $pay['method'],
                     'amount' => $pay['amount'],
                     'reference_no' => $pay['reference_no'] ?? null,
@@ -1373,15 +1484,19 @@ class PosController extends Controller
     public function reopen(PosOrder $order)
     {
         $this->checkPermission('pos-manage');
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Cannot re-open: business date is already closed for this outlet.'], 422);
+        }
         $errorResponse = null;
         DB::transaction(function () use ($order, &$errorResponse) {
             // Lock the order to prevent concurrent payments while reopening
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            
+
             if ($order->status !== 'billed') {
                 $errorResponse = response()->json([
                     'message' => 'Only billed (unpaid) orders can be re-opened.',
                 ], 422);
+
                 return;
             }
 
@@ -1389,6 +1504,7 @@ class PosController extends Controller
                 $errorResponse = response()->json([
                     'message' => 'Cannot re-open: order has payments. Void or refund first.',
                 ], 422);
+
                 return;
             }
 
@@ -1412,9 +1528,8 @@ class PosController extends Controller
         }
 
         // ── 1. CHECK IF DATE IS CLOSED ──
-        $orderDate = $order->created_at->format('Y-m-d');
-        if (PosDayClosing::where('restaurant_id', $order->restaurant_id)->where('closed_date', $orderDate)->exists()) {
-            return response()->json(['message' => 'Cannot void orders from a closed date.'], 422);
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Cannot void orders from a closed business date.'], 422);
         }
 
         $validated = $request->validate([
@@ -1453,6 +1568,7 @@ class PosController extends Controller
             foreach ($order->items()->where('status', 'active')->with('menuItem')->get() as $item) {
                 if ($item->kot_started_at || $item->kitchen_ready_at) {
                     $item->update(['status' => 'cancelled']);
+
                     continue;
                 }
                 $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
@@ -1473,6 +1589,9 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         if (in_array($order->status, ['paid', 'void'])) {
             return response()->json(['message' => 'Cannot void items on a paid or voided order.'], 422);
+        }
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Cannot void items: business date is already closed for this outlet.'], 422);
         }
 
         $validated = $request->validate([
@@ -1510,6 +1629,7 @@ class PosController extends Controller
                         'cancelled_by' => auth()->id(),
                         'cancelled_at' => now(),
                     ]);
+
                     continue;
                 }
                 $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
@@ -1539,12 +1659,13 @@ class PosController extends Controller
             return response()->json(['message' => 'Only paid orders can be refunded.'], 422);
         }
 
-        // ── 1. CHECK IF DATE IS CLOSED ──
-        $today = now()->format('Y-m-d');
-        if (PosDayClosing::where('restaurant_id', $order->restaurant_id)->where('closed_date', $today)->exists()) {
-            return response()->json(['message' => 'Cannot process refunds for a date that is already closed.'], 422);
+        // ── 1. CHECK IF ORDER’S BUSINESS DAY IS CLOSED (sealed day — no further refunds) ──
+        $order->loadMissing('restaurant');
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Cannot refund: this order\'s business date is already closed for this outlet.'], 422);
         }
-    
+        // Cash-out / Z-report: attribute refund to the business date when the refund is performed
+        $refundBusinessDate = BusinessDateService::resolve($order->restaurant);
 
         $validated = $request->validate([
             'amount' => 'required|numeric|min:0.01',
@@ -1567,10 +1688,10 @@ class PosController extends Controller
             ], 422);
         }
 
-        DB::transaction(function () use ($order, $validated, $amount) {
+        DB::transaction(function () use ($order, $validated, $amount, $refundBusinessDate) {
             // Lock the order to serialize multiple concurrent refund requests
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            
+
             // Re-verify the refundable amount after acquiring lock
             $currentRefunded = (float) $order->refunds()->sum('amount');
             $currentRefundable = (float) $order->total_amount - $currentRefunded;
@@ -1583,6 +1704,7 @@ class PosController extends Controller
 
             PosOrderRefund::create([
                 'order_id' => $order->id,
+                'business_date' => $refundBusinessDate,
                 'amount' => $amount,
                 'method' => $validated['method'],
                 'reference_no' => $validated['reference_no'] ?? null,
@@ -1621,7 +1743,7 @@ class PosController extends Controller
         if ($restaurantId) {
             // Specific restaurant selected
             $query->where('restaurant_id', $restaurantId);
-        } else if ($user && !$user->hasRole('Admin') && !$user->hasRole('Super Admin')) {
+        } elseif ($user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
             // All assigned outlets selected: restrict to user's mapped restaurants
             $assignedIds = $user->restaurants->pluck('id')->toArray();
             $query->whereIn('restaurant_id', $assignedIds);
@@ -1638,8 +1760,8 @@ class PosController extends Controller
                     stripos($currentScreen->name, 'bar') !== false ||
                     ($currentScreen->department && stripos($currentScreen->department->name, 'bar') !== false) ||
                     ($currentScreen->department && $currentScreen->department->code === 'BAR')
-                )) || (!$currentScreen && $userDept && (
-                    stripos($userDept->name, 'bar') !== false || 
+                )) || (! $currentScreen && $userDept && (
+                    stripos($userDept->name, 'bar') !== false ||
                     $userDept->code === 'BAR'
                 ));
 
@@ -1660,13 +1782,15 @@ class PosController extends Controller
                             return false;
                         }
 
-                        if (!$restaurantId) return true; // Show all in master view
+                        if (! $restaurantId) {
+                            return true;
+                        } // Show all in master view
 
                         // Bar KDS sees items that ARE direct sale (spirits, beer, cocktails)
                         // Kitchen KDS sees items that are NOT direct sale (food, made-to-order)
-                        return $isBarKds 
-                            ? (bool)($item->menuItem?->is_direct_sale ?? false) 
-                            : !(bool)($item->menuItem?->is_direct_sale ?? false);
+                        return $isBarKds
+                            ? (bool) ($item->menuItem?->is_direct_sale ?? false)
+                            : ! (bool) ($item->menuItem?->is_direct_sale ?? false);
                     });
 
                 // Only include items from batches not yet delivered (per-KOT: delivered KOTs disappear)
@@ -1741,6 +1865,10 @@ class PosController extends Controller
         ]);
         $batch = (int) $validated['batch'];
 
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
+
         $batchItems = $order->items()
             ->where('kot_sent', true)
             ->where('status', 'active')
@@ -1779,6 +1907,10 @@ class PosController extends Controller
             'batch' => 'required|integer|min:1',
         ]);
         $batch = (int) $validated['batch'];
+
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
 
         return DB::transaction(function () use ($order, $batch) {
             // Lock the order to prevent concurrent ready deductions for the same batch
@@ -1864,6 +1996,10 @@ class PosController extends Controller
             'batch' => 'required|integer|min:1',
         ]);
         $batch = (int) $validated['batch'];
+
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
 
         $batchItems = $order->items()
             ->where('kot_sent', true)
@@ -2017,6 +2153,7 @@ class PosController extends Controller
                 $targetStore = ($orderItem->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
                 $this->deductOrderItemInventory($orderItem, $targetStore, 'pos_order_batch', $refId);
             }
+
             return ['order_id' => $order->id, 'batch' => $batch];
         });
 
@@ -2030,6 +2167,10 @@ class PosController extends Controller
         $validated = $request->validate([
             'kitchen_status' => 'required|in:pending,preparing,ready,served',
         ]);
+
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
 
         $previousStatus = $order->kitchen_status;
         $newStatus = $validated['kitchen_status'];
@@ -2079,7 +2220,7 @@ class PosController extends Controller
 
         DB::transaction(function () use ($order, $kotItems, $kitchenStore) {
             foreach ($kotItems as $orderItem) {
-                $this->deductOrderItemInventory($orderItem, $kitchenStore, 'pos_order', (string)$order->id);
+                $this->deductOrderItemInventory($orderItem, $kitchenStore, 'pos_order', (string) $order->id);
             }
         });
     }
@@ -2091,46 +2232,52 @@ class PosController extends Controller
     private function deductOrderInventoryCompletely(PosOrder $order): void
     {
         $order->loadMissing(['items.menuItem.inventoryItem', 'items.variant', 'items.combo.menuItems.inventoryItem', 'restaurant']);
-        
+
         $kitchenStore = $this->getKitchenForOrder($order);
-        
+
         // Bar default fallback
         $barLocationId = $order->restaurant?->bar_location_id;
         $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
         foreach ($order->items->where('status', 'active') as $item) {
-            if ($item->inventory_deducted) continue;
+            if ($item->inventory_deducted) {
+                continue;
+            }
 
             // Determine if it should come from Bar or Kitchen
             // If it's a direct sale item (Bar items like Pepsi/Beer usually have is_direct_sale = true)
             $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
-            
+
             if ($targetStore) {
-                $this->deductOrderItemInventory($item, $targetStore, 'pos_order', (string)$order->id);
+                $this->deductOrderItemInventory($item, $targetStore, 'pos_order', (string) $order->id);
             }
         }
     }
 
     private function deductOrderItemInventory(PosOrderItem $orderItem, InventoryLocation $location, string $refType, string $refId): void
     {
-        if ($orderItem->inventory_deducted || $orderItem->status !== 'active') return;
+        if ($orderItem->inventory_deducted || $orderItem->status !== 'active') {
+            return;
+        }
 
-        DB::transaction(function() use ($orderItem, $location, $refType, $refId) {
+        DB::transaction(function () use ($orderItem, $location, $refType, $refId) {
             $menuItemIds = $orderItem->combo_id && $orderItem->combo
                 ? $orderItem->combo->menuItems->pluck('id')
                 : ($orderItem->menu_item_id ? collect([$orderItem->menu_item_id]) : collect());
 
             foreach ($menuItemIds as $menuItemId) {
                 $menuItem = MenuItem::with('inventoryItem')->find($menuItemId);
-                if (!$menuItem) continue;
+                if (! $menuItem) {
+                    continue;
+                }
 
                 $recipe = Recipe::with('ingredients.inventoryItem')->where('menu_item_id', $menuItemId)->where('is_active', true)->first();
 
-                if ($recipe && !($recipe->requires_production ?? true)) {
+                if ($recipe && ! ($recipe->requires_production ?? true)) {
                     // CASE 1: Made-to-order Recipe (Tea, Coffee)
-                    $yield = max(1, (float)($recipe->yield_quantity ?? 1));
+                    $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                     $scale = 1.0;
-                    if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
+                    if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
                         // ml_quantity on recipe items is a portion multiplier (e.g. 2 = double ingredients).
                         // Guard against literal-ml values (e.g. 250 ml) being misapplied as a scale factor.
                         $scale = $ml;
@@ -2143,7 +2290,7 @@ class PosController extends Controller
                     // CASE 2: Finished Good (Biryani) or Direct Item (Pepsi)
                     $deductQty = $orderItem->quantity;
                     // Handle variants (ML scale for Liquor)
-                    if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                    if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
                         $deductQty = $ml * $orderItem->quantity;
                     }
                     $this->executeDeduction($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}");
@@ -2162,21 +2309,23 @@ class PosController extends Controller
     private function reverseInventoryByQuantity(PosOrderItem $orderItem, InventoryLocation $location, float $baseQty, string $refType, string $refId): void
     {
         $orderItem->loadMissing('variant');
-        DB::transaction(function() use ($orderItem, $location, $baseQty, $refType, $refId) {
+        DB::transaction(function () use ($orderItem, $location, $baseQty, $refType, $refId) {
             $menuItemIds = $orderItem->combo_id && $orderItem->combo
                 ? $orderItem->combo->menuItems->pluck('id')
                 : ($orderItem->menu_item_id ? collect([$orderItem->menu_item_id]) : collect());
 
             foreach ($menuItemIds as $menuItemId) {
                 $menuItem = MenuItem::with('inventoryItem')->find($menuItemId);
-                if (!$menuItem) continue;
+                if (! $menuItem) {
+                    continue;
+                }
 
                 $recipe = Recipe::with('ingredients.inventoryItem')->where('menu_item_id', $menuItemId)->where('is_active', true)->first();
 
-                if ($recipe && !($recipe->requires_production ?? true)) {
-                    $yield = max(1, (float)($recipe->yield_quantity ?? 1));
+                if ($recipe && ! ($recipe->requires_production ?? true)) {
+                    $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                     $scale = 1.0;
-                    if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
+                    if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
                         $scale = $ml;
                     }
                     $multiplier = ($baseQty * $scale) / $yield;
@@ -2185,7 +2334,7 @@ class PosController extends Controller
                     }
                 } elseif ($menuItem->inventory_item_id) {
                     $deductQty = $baseQty;
-                    if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                    if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
                         $deductQty = $ml * $baseQty;
                     }
                     $this->executeInventoryIn($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Inventory Reversal (Cancel/Reduce): Order #{$orderItem->order_id}");
@@ -2196,9 +2345,11 @@ class PosController extends Controller
 
     private function executeInventoryIn(int $itemId, int $locId, float $qty, string $refType, string $refId, string $notes): void
     {
-        if ($qty <= 0) return;
+        if ($qty <= 0) {
+            return;
+        }
         DB::table('inventory_item_locations')->where('inventory_item_id', $itemId)->where('inventory_location_id', $locId)->increment('quantity', $qty);
-        
+
         $invItem = InventoryItem::find($itemId);
         $unitCost = floatval($invItem?->cost_price ?? 0) / floatval($invItem?->conversion_factor ?? 1);
 
@@ -2220,8 +2371,10 @@ class PosController extends Controller
 
     private function executeDeduction(int $itemId, int $locId, float $qty, string $refType, string $refId, string $notes): void
     {
-        if ($qty <= 0) return;
-        
+        if ($qty <= 0) {
+            return;
+        }
+
         DB::table('inventory_item_locations')->updateOrInsert(
             ['inventory_item_id' => $itemId, 'inventory_location_id' => $locId],
             ['updated_at' => now(), 'created_at' => now()]
@@ -2253,6 +2406,7 @@ class PosController extends Controller
     private function recalculate(PosOrder $order): void
     {
         $order->refresh();
+        $order->load('items');
         // Only count active (non-cancelled) items in totals
         $activeItems = $order->items->where('status', 'active');
         $subtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
@@ -2274,13 +2428,61 @@ class PosController extends Controller
 
         $tipAmount = (float) ($order->tip_amount ?? 0);
         $deliveryCharge = $order->order_type === 'delivery' ? (float) ($order->delivery_charge ?? 0) : 0;
+        $rawTotal = max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount + $deliveryCharge);
+
+        $order->loadMissing('restaurant');
+        $roundingAmount = 0.0;
+        $finalTotal = $rawTotal;
+        if ($order->is_complimentary) {
+            $finalTotal = 0;
+        } elseif (($order->restaurant?->bill_round_to_nearest_rupee ?? false) && $rawTotal > 0) {
+            $rounded = round($rawTotal, 0, \PHP_ROUND_HALF_UP);
+            $roundingAmount = round($rounded - $rawTotal, 2);
+            $finalTotal = $rounded;
+        }
+
         $order->update([
             'subtotal' => $subtotal,
             'tax_amount' => $taxAmount,
             'service_charge_amount' => $serviceChargeAmount,
             'discount_amount' => $discountAmount,
-            'total_amount' => max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount + $deliveryCharge),
+            'rounding_amount' => $order->is_complimentary ? 0 : $roundingAmount,
+            'total_amount' => $finalTotal,
         ]);
+    }
+
+    /**
+     * Weighted effective tax for combo lines by constituent prices in the selected outlet.
+     */
+    private function resolveComboTaxRate(Combo $combo, int $restaurantId): float
+    {
+        $combo->loadMissing('menuItems.tax');
+        if ($combo->menuItems->isEmpty()) {
+            return 0.0;
+        }
+
+        $rmiByItem = RestaurantMenuItem::where('restaurant_master_id', $restaurantId)
+            ->whereIn('menu_item_id', $combo->menuItems->pluck('id'))
+            ->get()
+            ->keyBy('menu_item_id');
+
+        $taxableBase = 0.0;
+        $taxAmount = 0.0;
+        foreach ($combo->menuItems as $mi) {
+            $base = (float) ($rmiByItem->get($mi->id)?->price ?? $mi->price ?? 0);
+            if ($base <= 0) {
+                continue;
+            }
+            $rate = (float) ($mi->tax?->rate ?? 0);
+            $taxableBase += $base;
+            $taxAmount += $base * ($rate / 100);
+        }
+
+        if ($taxableBase <= 0) {
+            return 0.0;
+        }
+
+        return round(($taxAmount / $taxableBase) * 100, 2);
     }
 
     private function formatOrder(PosOrder $order): array
@@ -2290,6 +2492,7 @@ class PosController extends Controller
             'order_type' => $order->order_type ?? 'dine_in',
             'table_id' => $order->table_id,
             'restaurant_id' => $order->restaurant_id,
+            'business_date' => $order->business_date?->toDateString(),
             'room_id' => $order->room_id,
             'room_number' => $order->room?->room_number ?? null,
             'table_number' => $order->table?->table_number ?? null,
@@ -2318,6 +2521,7 @@ class PosController extends Controller
             'tax_amount' => (float) $order->tax_amount,
             'discount_amount' => (float) $order->discount_amount,
             'tip_amount' => (float) ($order->tip_amount ?? 0),
+            'rounding_amount' => (float) ($order->rounding_amount ?? 0),
             'delivery_charge' => (float) ($order->delivery_charge ?? 0),
             'is_complimentary' => (bool) $order->is_complimentary,
             'updated_at' => $order->updated_at?->toIso8601String(),

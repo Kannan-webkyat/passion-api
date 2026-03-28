@@ -7,12 +7,14 @@ use Illuminate\Database\Eloquent\Model;
 class RestaurantMaster extends Model
 {
     protected $fillable = [
-        'name', 'floor', 'description', 'is_active', 'department_id', 'kitchen_location_id', 'bar_location_id',
+        'name', 'floor', 'description', 'is_active', 'department_id', 'kitchen_location_id', 'bar_location_id', 'business_day_cutoff_time',
+        'bill_round_to_nearest_rupee',
         'address', 'email', 'phone', 'gstin', 'fssai', 'logo_path',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
+        'bill_round_to_nearest_rupee' => 'boolean',
     ];
 
     public function tables()

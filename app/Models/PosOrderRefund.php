@@ -7,13 +7,14 @@ use Illuminate\Database\Eloquent\Model;
 class PosOrderRefund extends Model
 {
     protected $fillable = [
-        'order_id', 'amount', 'method', 'reference_no', 'reason',
+        'order_id', 'business_date', 'amount', 'method', 'reference_no', 'reason',
         'refunded_at', 'refunded_by',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'refunded_at' => 'datetime',
+        'business_date' => 'date',
     ];
 
     public function order()

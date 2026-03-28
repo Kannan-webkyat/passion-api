@@ -79,9 +79,16 @@ class RestaurantMasterController extends Controller
             'phone' => 'nullable|string|max:50',
             'gstin' => 'nullable|string|max:50',
             'fssai' => 'nullable|string|max:50',
+            'business_day_cutoff_time' => 'nullable|date_format:H:i:s',
+            'bill_round_to_nearest_rupee' => 'boolean',
         ];
 
-        return $request->validate($rules);
+        $validated = $request->validate($rules);
+        if (array_key_exists('business_day_cutoff_time', $validated) && $validated['business_day_cutoff_time'] === null) {
+            $validated['business_day_cutoff_time'] = '04:00:00';
+        }
+
+        return $validated;
     }
 
     public function uploadLogo(Request $request, RestaurantMaster $restaurantMaster)

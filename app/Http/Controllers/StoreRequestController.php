@@ -20,6 +20,59 @@ class StoreRequestController extends Controller
         }
     }
 
+    private function reconcileRequestStatus(StoreRequest $storeRequest): void
+    {
+        $storeRequest->load('items');
+        $hasPending = $storeRequest->items->contains(fn ($i) => (float) $i->quantity_pending_acceptance > 0);
+        if ($hasPending) {
+            $storeRequest->status = 'awaiting_acceptance';
+            $storeRequest->save();
+
+            return;
+        }
+
+        $allComplete = $storeRequest->items->every(
+            fn ($i) => (float) $i->quantity_issued >= (float) $i->quantity_requested
+        );
+        if ($allComplete) {
+            $storeRequest->status = 'issued';
+            if (! $storeRequest->issued_at) {
+                $storeRequest->issued_at = now();
+            }
+            $storeRequest->save();
+
+            return;
+        }
+
+        $anyReceived = $storeRequest->items->contains(fn ($i) => (float) $i->quantity_issued > 0);
+        $storeRequest->status = $anyReceived ? 'partially_issued' : 'approved';
+        $storeRequest->save();
+    }
+
+    private function clearPendingIssuance(StoreRequest $storeRequest): void
+    {
+        StoreRequestItem::where('store_request_id', $storeRequest->id)
+            ->where('quantity_pending_acceptance', '>', 0)
+            ->update(['quantity_pending_acceptance' => 0]);
+
+        $sr = StoreRequest::with('items')->findOrFail($storeRequest->id);
+        $this->reconcileRequestStatus($sr);
+    }
+
+    private function userCanAcceptReceive(StoreRequest $storeRequest): bool
+    {
+        $user = auth()->user();
+        if ($user->hasRole('Admin')) {
+            return true;
+        }
+        if ($storeRequest->requested_by === $user->id) {
+            return true;
+        }
+        $userDeptIds = $user->departments()->pluck('departments.id')->toArray();
+
+        return $storeRequest->department_id && in_array($storeRequest->department_id, $userDeptIds);
+    }
+
     public function index()
     {
         $user = auth()->user();
@@ -80,6 +133,7 @@ class StoreRequestController extends Controller
                     'inventory_item_id' => $item['inventory_item_id'],
                     'quantity_requested' => $item['quantity'],
                     'quantity_issued' => 0,
+                    'quantity_pending_acceptance' => 0,
                 ]);
             }
 
@@ -112,6 +166,12 @@ class StoreRequestController extends Controller
     public function reject(Request $request, StoreRequest $storeRequest)
     {
         $this->checkPermission('manage-inventory');
+        if ($storeRequest->status === 'awaiting_acceptance') {
+            return response()->json([
+                'message' => 'Recall the pending issuance before rejecting this requisition.',
+            ], 422);
+        }
+
         if (! in_array($storeRequest->status, ['pending', 'approved'])) {
             return response()->json(['message' => 'Cannot reject a fulfilled request'], 422);
         }
@@ -134,32 +194,8 @@ class StoreRequestController extends Controller
     }
 
     /**
-     * Cancel a requisition (requesting department only).
-     * Only pending requests can be cancelled; only by requester or same department.
+     * Store commits quantities from the main store; stock does not move until the requesting party accepts.
      */
-    public function cancel(StoreRequest $storeRequest)
-    {
-        if (! in_array($storeRequest->status, ['pending', 'approved'])) {
-            return response()->json(['message' => 'Cannot cancel a fulfilled request'], 422);
-        }
-
-        $user = auth()->user();
-        $isRequester = $storeRequest->requested_by === $user->id;
-        $userDeptIds = $user->departments()->pluck('departments.id')->toArray();
-        $isSameDept = $storeRequest->department_id && in_array($storeRequest->department_id, $userDeptIds);
-
-        if (! $isRequester && ! $isSameDept && ! $user->hasRole('Admin')) {
-            return response()->json(['message' => 'Only the requesting department can cancel this requisition'], 403);
-        }
-
-        $storeRequest->update([
-            'status' => 'cancelled',
-            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Cancelled by '.$user->name.')',
-        ]);
-
-        return response()->json($storeRequest);
-    }
-
     public function issue(Request $request, StoreRequest $storeRequest)
     {
         $this->checkPermission('manage-inventory');
@@ -167,7 +203,14 @@ class StoreRequestController extends Controller
             return response()->json(['message' => 'Request must be approved before issuance'], 422);
         }
 
-        $storeRequest->load(['department', 'fromLocation', 'toLocation']);
+        $hasOpenPending = $storeRequest->items()->where('quantity_pending_acceptance', '>', 0)->exists();
+        if ($hasOpenPending) {
+            return response()->json([
+                'message' => 'A batch is already awaiting acceptance. Recall it or wait for the requesting party to accept.',
+            ], 422);
+        }
+
+        $storeRequest->load(['department', 'fromLocation', 'toLocation', 'items.item']);
 
         $validated = $request->validate([
             'items' => 'required|array',
@@ -178,14 +221,21 @@ class StoreRequestController extends Controller
         DB::beginTransaction();
         try {
             foreach ($validated['items'] as $issueData) {
-                $requestItem = StoreRequestItem::findOrFail($issueData['id']);
-                $qtyToIssue = $issueData['quantity_issued'];
+                $requestItem = StoreRequestItem::where('store_request_id', $storeRequest->id)
+                    ->where('id', $issueData['id'])
+                    ->firstOrFail();
 
-                if ($qtyToIssue <= 0) {
+                $qtyToCommit = (float) $issueData['quantity_issued'];
+
+                if ($qtyToCommit <= 0) {
                     continue;
                 }
 
-                // 1. Lock and Verify source location stock
+                $remaining = (float) $requestItem->quantity_requested - (float) $requestItem->quantity_issued;
+                if ($qtyToCommit > $remaining + 0.00001) {
+                    throw new \Exception('Cannot commit more than remaining requested quantity for '.$requestItem->item->name);
+                }
+
                 /** @var object|null $sourceStock */
                 $sourceStock = DB::table('inventory_item_locations')
                     ->where('inventory_item_id', $requestItem->inventory_item_id)
@@ -193,17 +243,70 @@ class StoreRequestController extends Controller
                     ->lockForUpdate()
                     ->first();
 
-                if (! $sourceStock || $sourceStock->quantity < $qtyToIssue) {
+                if (! $sourceStock || (float) $sourceStock->quantity < $qtyToCommit) {
                     throw new \Exception('Insufficient stock in source location for item '.$requestItem->item->name);
                 }
 
-                // 2. Atomically decrement from source location
+                $requestItem->increment('quantity_pending_acceptance', $qtyToCommit);
+            }
+
+            $storeRequest->refresh()->load('items');
+            $this->reconcileRequestStatus($storeRequest);
+
+            DB::commit();
+
+            return response()->json($storeRequest->load('items.item'));
+        } catch (\Exception $e) {
+            DB::rollBack();
+
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Requesting party confirms receipt — stock moves from store to department.
+     */
+    public function accept(StoreRequest $storeRequest)
+    {
+        if ($storeRequest->status !== 'awaiting_acceptance') {
+            return response()->json(['message' => 'Nothing pending acceptance for this request'], 422);
+        }
+
+        if (! $this->userCanAcceptReceive($storeRequest)) {
+            return response()->json(['message' => 'Only the requesting department can accept this delivery'], 403);
+        }
+
+        $storeRequest->load(['department', 'fromLocation', 'toLocation', 'items.item']);
+
+        $hasPending = $storeRequest->items->contains(fn ($i) => (float) $i->quantity_pending_acceptance > 0);
+        if (! $hasPending) {
+            return response()->json(['message' => 'Nothing pending acceptance'], 422);
+        }
+
+        DB::beginTransaction();
+        try {
+            foreach ($storeRequest->items as $requestItem) {
+                $qtyToMove = (float) $requestItem->quantity_pending_acceptance;
+                if ($qtyToMove <= 0) {
+                    continue;
+                }
+
+                /** @var object|null $sourceStock */
+                $sourceStock = DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', $requestItem->inventory_item_id)
+                    ->where('inventory_location_id', $storeRequest->to_location_id)
+                    ->lockForUpdate()
+                    ->first();
+
+                if (! $sourceStock || (float) $sourceStock->quantity < $qtyToMove) {
+                    throw new \Exception('Insufficient stock in source location for item '.$requestItem->item->name);
+                }
+
                 DB::table('inventory_item_locations')
                     ->where('inventory_item_id', $requestItem->inventory_item_id)
                     ->where('inventory_location_id', $storeRequest->to_location_id)
-                    ->decrement('quantity', $qtyToIssue);
+                    ->decrement('quantity', $qtyToMove);
 
-                // 3. Atomically increment for TARGET location (with locking and existence check)
                 DB::table('inventory_item_locations')->updateOrInsert(
                     ['inventory_item_id' => $requestItem->inventory_item_id, 'inventory_location_id' => $storeRequest->from_location_id],
                     ['updated_at' => now(), 'created_at' => now()]
@@ -211,12 +314,11 @@ class StoreRequestController extends Controller
                 DB::table('inventory_item_locations')
                     ->where('inventory_item_id', $requestItem->inventory_item_id)
                     ->where('inventory_location_id', $storeRequest->from_location_id)
-                    ->increment('quantity', $qtyToIssue);
+                    ->increment('quantity', $qtyToMove);
 
-                // 3. Update Request Item
-                $requestItem->increment('quantity_issued', $qtyToIssue);
+                $requestItem->increment('quantity_issued', $qtyToMove);
+                $requestItem->update(['quantity_pending_acceptance' => 0]);
 
-                // 4. Log Transactions (Double Entry) — share a reference_id to link them
                 $refId = (string) Str::uuid();
 
                 InventoryTransaction::create([
@@ -224,7 +326,7 @@ class StoreRequestController extends Controller
                     'inventory_location_id' => $storeRequest->to_location_id,
                     'department_id' => $storeRequest->department_id,
                     'type' => 'out',
-                    'quantity' => $qtyToIssue,
+                    'quantity' => $qtyToMove,
                     'reason' => 'Store Issue',
                     'notes' => 'Issued to '.$storeRequest->fromLocation->name.' (Req: '.$storeRequest->request_number.')',
                     'user_id' => auth()->id(),
@@ -238,7 +340,7 @@ class StoreRequestController extends Controller
                     'inventory_location_id' => $storeRequest->from_location_id,
                     'department_id' => $storeRequest->department_id,
                     'type' => 'in',
-                    'quantity' => $qtyToIssue,
+                    'quantity' => $qtyToMove,
                     'reason' => 'Store Receipt',
                     'notes' => 'Received from '.$storeRequest->toLocation->name.' (Req: '.$storeRequest->request_number.')',
                     'user_id' => auth()->id(),
@@ -248,23 +350,8 @@ class StoreRequestController extends Controller
                 ]);
             }
 
-            // Update Request Status
-            $allIssued = true;
-            $anyIssued = false;
-            foreach ($storeRequest->items as $item) {
-                if ($item->quantity_issued < $item->quantity_requested) {
-                    $allIssued = false;
-                }
-                if ($item->quantity_issued > 0) {
-                    $anyIssued = true;
-                }
-            }
-
-            $storeRequest->status = $allIssued ? 'issued' : ($anyIssued ? 'partially_issued' : 'approved');
-            if ($allIssued) {
-                $storeRequest->issued_at = now();
-            }
-            $storeRequest->save();
+            $storeRequest->refresh()->load('items');
+            $this->reconcileRequestStatus($storeRequest);
 
             DB::commit();
 
@@ -274,5 +361,62 @@ class StoreRequestController extends Controller
 
             return response()->json(['message' => $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Store manager withdraws a committed batch before it is accepted (no stock was moved yet).
+     */
+    public function recallIssue(StoreRequest $storeRequest)
+    {
+        $this->checkPermission('manage-inventory');
+        if ($storeRequest->status !== 'awaiting_acceptance') {
+            return response()->json(['message' => 'No issuance is pending acceptance'], 422);
+        }
+
+        $user = auth()->user();
+        $storeRequest->update([
+            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Issuance recalled by '.$user->name.')',
+        ]);
+        $storeRequest->load('items');
+        $this->clearPendingIssuance($storeRequest);
+
+        return response()->json($storeRequest->fresh()->load(['department', 'fromLocation', 'toLocation', 'requester', 'items.item']));
+    }
+
+    /**
+     * Cancel a requisition (requesting department only).
+     * Pending / approved / awaiting acceptance (clears committed batch only).
+     */
+    public function cancel(StoreRequest $storeRequest)
+    {
+        if (! in_array($storeRequest->status, ['pending', 'approved', 'awaiting_acceptance'])) {
+            return response()->json(['message' => 'Cannot cancel a fulfilled request'], 422);
+        }
+
+        $user = auth()->user();
+        $isRequester = $storeRequest->requested_by === $user->id;
+        $userDeptIds = $user->departments()->pluck('departments.id')->toArray();
+        $isSameDept = $storeRequest->department_id && in_array($storeRequest->department_id, $userDeptIds);
+
+        if (! $isRequester && ! $isSameDept && ! $user->hasRole('Admin')) {
+            return response()->json(['message' => 'Only the requesting department can cancel this requisition'], 403);
+        }
+
+        if ($storeRequest->status === 'awaiting_acceptance') {
+            $storeRequest->update([
+                'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Pending issuance withdrawn by '.$user->name.')',
+            ]);
+            $storeRequest->load('items');
+            $this->clearPendingIssuance($storeRequest);
+
+            return response()->json($storeRequest->fresh()->load(['department', 'fromLocation', 'toLocation', 'requester', 'items.item']));
+        }
+
+        $storeRequest->update([
+            'status' => 'cancelled',
+            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Cancelled by '.$user->name.')',
+        ]);
+
+        return response()->json($storeRequest);
     }
 }

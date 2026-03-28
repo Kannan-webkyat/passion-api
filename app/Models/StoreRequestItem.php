@@ -11,7 +11,7 @@ class StoreRequestItem extends Model
 
     protected $fillable = [
         'store_request_id', 'inventory_item_id',
-        'quantity_requested', 'quantity_issued',
+        'quantity_requested', 'quantity_issued', 'quantity_pending_acceptance',
     ];
 
     public function storeRequest()

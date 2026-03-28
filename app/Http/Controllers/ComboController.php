@@ -26,7 +26,7 @@ class ComboController extends Controller
         $this->checkPermission('manage-restaurant');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'price' => 'required|numeric',
+            'price' => 'nullable|numeric|min:0',
             'fixed_ept' => 'nullable|integer',
             'is_active' => 'boolean',
             'menu_item_ids' => 'required|array',
@@ -36,6 +36,9 @@ class ComboController extends Controller
             'restaurant_prices.*.price' => 'required|numeric|min:0',
         ]);
 
+        if (! isset($validated['price']) || $validated['price'] === null) {
+            $validated['price'] = 0;
+        }
         $combo = Combo::create($validated);
         $combo->menuItems()->sync($request->menu_item_ids);
 
@@ -56,7 +59,7 @@ class ComboController extends Controller
         $this->checkPermission('manage-restaurant');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
-            'price' => 'sometimes|required|numeric',
+            'price' => 'nullable|numeric|min:0',
             'fixed_ept' => 'nullable|integer',
             'is_active' => 'boolean',
             'menu_item_ids' => 'sometimes|required|array',
@@ -65,6 +68,10 @@ class ComboController extends Controller
             'restaurant_prices.*.restaurant_id' => 'required|exists:restaurant_masters,id',
             'restaurant_prices.*.price' => 'required|numeric|min:0',
         ]);
+
+        if (array_key_exists('price', $validated) && $validated['price'] === null) {
+            $validated['price'] = 0;
+        }
 
         $menuCombo->update($validated);
 
