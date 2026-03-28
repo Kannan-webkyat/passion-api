@@ -286,7 +286,7 @@ class PosController extends Controller
             ->withCount('tables');
 
         // Non-admins filtering
-        if ($user && ! $user->hasRole('Admin')) {
+        if ($user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
             $assignedOutletIds = $user->restaurants()->pluck('restaurant_masters.id')->toArray();
 
             if (count($assignedOutletIds) > 0) {
@@ -1106,6 +1106,7 @@ class PosController extends Controller
                 ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
                 ->join('combo_items', 'combo_items.combo_id', '=', 'pos_order_items.combo_id')
                 ->where('pos_orders.status', '!=', 'void')
+                ->where('pos_orders.status', '!=', 'refunded')
                 ->where('pos_order_items.order_id', '!=', $order->id)
                 ->where('pos_order_items.status', 'active')
                 ->whereNotNull('pos_order_items.combo_id')
@@ -1639,6 +1640,9 @@ class PosController extends Controller
         if ($this->isBusinessDateClosedForOrder($order)) {
             return response()->json(['message' => 'Cannot open bill: business date is already closed for this outlet.'], 422);
         }
+        if ($order->items()->where('status', 'active')->doesntExist()) {
+            return response()->json(['message' => 'Cannot bill an order with no active items.'], 422);
+        }
         $errorResponse = null;
         DB::transaction(function () use ($order, &$errorResponse) {
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
@@ -2110,8 +2114,20 @@ class PosController extends Controller
             $query->where('restaurant_id', $restaurantId);
         } elseif ($user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
             // All assigned outlets selected: restrict to user's mapped restaurants
-            $assignedIds = $user->restaurants->pluck('id')->toArray();
-            $query->whereIn('restaurant_id', $assignedIds);
+            $assignedIds = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->toArray();
+            if (! empty($assignedIds)) {
+                $query->whereIn('restaurant_id', $assignedIds);
+            } else {
+                // Fallback to department-based access
+                $deptIds = $user->departments()->pluck('departments.id')->toArray();
+                if (! empty($deptIds)) {
+                    $query->whereHas('restaurant', function ($q) use ($deptIds) {
+                        $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                    });
+                } else {
+                    $query->whereRaw('1 = 0');
+                }
+            }
         }
 
         $orders = $query->orderBy('opened_at')->get()
@@ -2451,10 +2467,12 @@ class PosController extends Controller
                 ]);
             }
 
-            $item->loadMissing('menuItem', 'combo.menuItems', 'variant');
-            $insufficient = $this->checkMadeToOrderStock($order, collect([$item]));
-            if (count($insufficient) > 0) {
-                return response()->json(['message' => 'Insufficient stock.', 'errors' => $insufficient], 422);
+            if (! $item->inventory_deducted) {
+                $item->loadMissing('menuItem', 'combo.menuItems', 'variant');
+                $insufficient = $this->checkMadeToOrderStock($order, collect([$item]));
+                if (count($insufficient) > 0) {
+                    return response()->json(['message' => 'Insufficient stock.', 'errors' => $insufficient], 422);
+                }
             }
 
             $order->loadMissing('restaurant');
@@ -2716,6 +2734,20 @@ class PosController extends Controller
         return DB::transaction(function () use ($order, $newStatus) {
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
             $previousStatus = $order->kitchen_status;
+
+            // Re-validate transition against the now-locked authoritative status
+            $allowedFromLocked = match ($previousStatus) {
+                'pending'   => ['preparing'],
+                'preparing' => ['ready'],
+                'ready'     => ['served'],
+                'served'    => [],
+                default     => ['pending', 'preparing', 'ready', 'served'],
+            };
+            if (! in_array($newStatus, $allowedFromLocked)) {
+                return response()->json([
+                    'message' => "Cannot transition from {$previousStatus} to {$newStatus}.",
+                ], 422);
+            }
 
             if ($newStatus === 'served') {
                 $kotNotReady = $order->items()
