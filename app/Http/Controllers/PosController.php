@@ -1009,6 +1009,11 @@ class PosController extends Controller
             return $errorResponse;
         }
 
+        $order = PosOrder::where('id', $order->id)->first();
+        if (! $order) {
+            return response()->json(['message' => 'Order not found after transfer.'], 404);
+        }
+
         $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
 
         return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));

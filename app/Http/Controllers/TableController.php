@@ -18,6 +18,7 @@ class TableController extends Controller
 
     public function index()
     {
+        $this->checkPermission('manage-tables');
         return response()->json(
             RestaurantTable::with(['category', 'restaurantMaster'])->get()
         );
@@ -43,6 +44,7 @@ class TableController extends Controller
 
     public function show(RestaurantTable $table)
     {
+        $this->checkPermission('manage-tables');
         return response()->json($table->load(['category', 'restaurantMaster']));
     }
 
