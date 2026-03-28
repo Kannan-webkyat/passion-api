@@ -94,6 +94,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::put('pos/orders/{order}/items', [PosController::class, 'syncItems']);
     Route::post('pos/orders/{order}/items/void', [PosController::class, 'voidItems']);
     Route::post('pos/orders/{order}/kot', [PosController::class, 'sendKot']);
+    Route::post('pos/orders/{order}/kot-hold-items', [PosController::class, 'setKotHoldItems']);
+    Route::post('pos/orders/{order}/kot-fire-items', [PosController::class, 'fireKotItems']);
     Route::post('pos/orders/{order}/open-bill', [PosController::class, 'openBill']);
     Route::post('pos/orders/{order}/reopen', [PosController::class, 'reopen']);
     Route::post('pos/orders/{order}/settle', [PosController::class, 'settle']);
@@ -110,6 +112,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::patch('pos/orders/{order}/kitchen-status', [PosController::class, 'updateKitchenStatus']);
     Route::post('pos/orders/{order}/start-kot-prep', [PosController::class, 'startKotPrep']);
     Route::post('pos/orders/{order}/mark-batch-ready', [PosController::class, 'markBatchReady']);
+    Route::post('pos/orders/{order}/mark-order-item-ready', [PosController::class, 'markOrderItemReady']);
+    Route::post('pos/orders/{order}/mark-order-item-served', [PosController::class, 'markOrderItemServed']);
     Route::post('pos/orders/{order}/mark-batch-delivered', [PosController::class, 'markBatchDelivered']);
 
     // F&B Module (Menu Configuration)

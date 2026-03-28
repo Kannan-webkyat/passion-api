@@ -8,7 +8,7 @@ class PosOrder extends Model
 {
     protected $fillable = [
         'order_type', 'table_id', 'restaurant_id', 'business_date', 'waiter_id', 'opened_by',
-        'room_id', 'booking_id', 'customer_name', 'customer_phone', 'delivery_address', 'delivery_channel', 'delivery_charge',
+        'room_id', 'booking_id', 'customer_name', 'customer_phone', 'customer_gstin', 'delivery_address', 'delivery_channel', 'delivery_charge',
         'covers', 'status', 'kitchen_status', 'current_kot_batch',
         'discount_type', 'discount_value', 'service_charge_type', 'service_charge_value', 'service_charge_amount',
         'subtotal', 'tax_amount', 'discount_amount', 'tip_amount', 'rounding_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt', 'is_complimentary',

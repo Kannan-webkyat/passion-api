@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\PosRestaurantUpdated;
 use App\Models\RestaurantTable;
 use Illuminate\Http\Request;
 
@@ -48,6 +49,7 @@ class TableController extends Controller
     public function update(Request $request, RestaurantTable $table)
     {
         $this->checkPermission('manage-tables');
+        $oldStatus = $table->status;
         $validated = $request->validate([
             'table_number' => 'sometimes|required|string|max:255',
             'restaurant_master_id' => 'sometimes|required|exists:restaurant_masters,id',
@@ -59,6 +61,12 @@ class TableController extends Controller
         ]);
 
         $table->update($validated);
+
+        if (isset($validated['status']) && $validated['status'] !== $oldStatus && $table->restaurant_master_id) {
+            if (config('broadcasting.default') !== 'null') {
+                event(new PosRestaurantUpdated((int) $table->restaurant_master_id));
+            }
+        }
 
         return response()->json($table->load(['category', 'restaurantMaster']));
     }
