@@ -81,6 +81,7 @@ class RestaurantMasterController extends Controller
             'fssai' => 'nullable|string|max:50',
             'business_day_cutoff_time' => 'nullable|date_format:H:i:s',
             'bill_round_to_nearest_rupee' => 'boolean',
+            'receipt_show_tax_breakdown' => 'boolean',
         ];
 
         $validated = $request->validate($rules);

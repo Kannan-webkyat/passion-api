@@ -556,11 +556,15 @@ class PosController extends Controller
                 }
             }
 
-            $categories->each(function ($cat) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut) {
-                $cat->items->each(function ($item) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut) {
+            $kitchenStoreForMenu = $this->getKitchenLocationForRestaurant($restaurant);
+            $barStoreForMenu = $this->getBarLocationForRestaurant($restaurant);
+
+            $categories->each(function ($cat) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut, $reservedByItem, $kitchenStoreForMenu, $barStoreForMenu) {
+                $cat->items->each(function ($item) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut, $reservedByItem, $kitchenStoreForMenu, $barStoreForMenu) {
                     $rmi = $rmiByItem->get($item->id);
                     if ($rmi) {
                         $item->price = (string) $rmi->price;
+                        $item->price_tax_inclusive = (bool) ($rmi->price_tax_inclusive ?? true);
                     }
                     if ($item->variants && $item->variants->isNotEmpty()) {
                         $item->variants = $item->variants->map(function ($v) use ($rmi, $rviByRmiAndVariant) {
@@ -580,7 +584,17 @@ class PosController extends Controller
                     $item->requires_production = (bool) $item->requires_production;
                     if ($item->inventory_item_id) {
                         $stock = $physicalStock->get($item->inventory_item_id, 0);
-                        $item->available_qty = max(0, $stock);
+                        $targetStore = $this->resolveInventoryDeductionStore($item, $kitchenStoreForMenu, $barStoreForMenu);
+                        if ($targetStore) {
+                            $phys = (float) (DB::table('inventory_item_locations')
+                                ->where('inventory_location_id', $targetStore->id)
+                                ->where('inventory_item_id', $item->inventory_item_id)
+                                ->value('quantity') ?? 0);
+                            $res = (float) ($reservedByItem->get($item->inventory_item_id, 0));
+                            $item->available_qty = max(0, $phys - $res);
+                        } else {
+                            $item->available_qty = max(0, $stock);
+                        }
                     } else {
                         $item->available_qty = $madeToOrderSoldOut->get($item->id, false) ? 0 : null;
                     }
@@ -636,17 +650,18 @@ class PosController extends Controller
             ->mapWithKeys(fn ($i) => [$i->id => $i->available_qty ?? null]);
 
         // Append combos as a special category
-        $restaurantComboPrices = $restaurantId
+        $restaurantCombosByComboId = $restaurantId
             ? RestaurantCombo::where('restaurant_master_id', $restaurantId)
                 ->where('is_active', true)
-                ->pluck('price', 'combo_id')
+                ->get()
+                ->keyBy('combo_id')
             : collect();
 
         $combos = Combo::with('menuItems.tax')
             ->where('is_active', true)
             ->orderBy('name')
             ->get()
-            ->map(function ($c) use ($physicalStock, $restaurantComboPrices, $availableByMenuId, $restaurantId) {
+            ->map(function ($c) use ($physicalStock, $restaurantCombosByComboId, $availableByMenuId, $restaurantId) {
                 $availableQty = null;
                 if ($c->menuItems->isNotEmpty()) {
                     $availables = [];
@@ -662,8 +677,9 @@ class PosController extends Controller
                         $availableQty = (int) floor(min($availables));
                     }
                 }
-                $price = $restaurantComboPrices->has($c->id)
-                    ? (string) $restaurantComboPrices[$c->id]
+                $rcRow = $restaurantCombosByComboId->get($c->id);
+                $price = $rcRow
+                    ? (string) $rcRow->price
                     : (string) $c->price;
 
                 if ((float) $price <= 0) {
@@ -679,6 +695,7 @@ class PosController extends Controller
                     'name' => $c->name,
                     'price' => $price,
                     'tax_rate' => $comboTaxRate,
+                    'price_tax_inclusive' => $rcRow ? (bool) ($rcRow->price_tax_inclusive ?? true) : true,
                     'type' => 'combo',
                     'item_code' => 'COMBO-'.$c->id,
                     'available_qty' => $availableQty,
@@ -739,7 +756,7 @@ class PosController extends Controller
         $businessDate = BusinessDateService::resolve($restaurant);
 
         $duplicateOrder = null;
-        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder, $businessDate) {
+        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder, $businessDate, $restaurant) {
             if ($orderType === 'dine_in') {
                 // Lock the table to prevent concurrent order creation
                 RestaurantTable::where('id', $validated['table_id'])->lockForUpdate()->first();
@@ -778,6 +795,8 @@ class PosController extends Controller
                 'waiter_id' => auth()->id(),
                 'opened_by' => auth()->id(),
                 'tax_exempt' => (bool) ($validated['tax_exempt'] ?? false),
+                'prices_tax_inclusive' => true,
+                'receipt_show_tax_breakdown' => (bool) ($restaurant->receipt_show_tax_breakdown ?? true),
                 'covers' => $validated['covers'],
                 'status' => 'open',
                 'opened_at' => now(),
@@ -1257,7 +1276,7 @@ class PosController extends Controller
                     $kitchenStore = $this->getKitchenForOrder($order);
                     $barLocationId = $order->restaurant?->bar_location_id;
                     $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-                    $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                    $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
 
                     if ($item->inventory_deducted && $targetStore) {
                         $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_cancel', (string) $order->id);
@@ -1288,6 +1307,9 @@ class PosController extends Controller
                         ->where('restaurant_master_id', $order->restaurant_id)
                         ->where('is_active', true)
                         ->first();
+                    $priceTaxInclusive = $rc
+                        ? (bool) ($rc->price_tax_inclusive ?? true)
+                        : (bool) ($order->prices_tax_inclusive ?? true);
                     $unitPrice = $rc ? floatval($rc->price) : floatval($combo->price);
                     if ($unitPrice <= 0) {
                         throw new \Illuminate\Http\Exceptions\HttpResponseException(
@@ -1344,6 +1366,7 @@ class PosController extends Controller
                         );
                     }
                     $taxRate = floatval($menuItem->tax?->rate ?? 0);
+                    $priceTaxInclusive = (bool) ($rmi->price_tax_inclusive ?? true);
                     $matching = $currentActive->filter(
                         fn ($i) => $i->menu_item_id == $row['menu_item_id']
                             && ($i->menu_item_variant_id ?? null) == $variantId
@@ -1364,6 +1387,7 @@ class PosController extends Controller
                     'quantity' => $q,
                     'unit_price' => $u,
                     'tax_rate' => $taxRate,
+                    'price_tax_inclusive' => $priceTaxInclusive,
                     'line_total' => $u * $q,
                     'kot_sent' => false,
                     'kot_hold' => false,
@@ -1384,6 +1408,7 @@ class PosController extends Controller
                                 'quantity' => $qty,
                                 'unit_price' => $unitPrice,
                                 'tax_rate' => $taxRate,
+                                'price_tax_inclusive' => $priceTaxInclusive,
                                 'line_total' => $unitPrice * $qty,
                                 'notes' => $notes,
                             ]);
@@ -1403,7 +1428,7 @@ class PosController extends Controller
                             $kitchenStore = $this->getKitchenForOrder($order);
                             $barLocationId = $order->restaurant?->bar_location_id;
                             $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-                            $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                            $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
 
                             if ($item->inventory_deducted && $targetStore) {
                                 $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_reduce', (string) $order->id);
@@ -1421,7 +1446,7 @@ class PosController extends Controller
                                 $kitchenStore = $this->getKitchenForOrder($order);
                                 $barLocationId = $order->restaurant?->bar_location_id;
                                 $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-                                $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
 
                                 if ($wasDeducted && $targetStore) {
                                     $this->reverseInventoryByQuantity($item, $targetStore, $toReduce, 'pos_order_sync_partial', (string) $order->id);
@@ -1442,6 +1467,7 @@ class PosController extends Controller
                                     'quantity' => $newQty,
                                     'unit_price' => $unitPrice,
                                     'tax_rate' => $taxRate,
+                                    'price_tax_inclusive' => $priceTaxInclusive,
                                     'line_total' => $unitPrice * $newQty,
                                     'notes' => $notes,
                                 ]);
@@ -1914,7 +1940,7 @@ class PosController extends Controller
 
                     continue;
                 }
-                $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
                 if ($item->inventory_deducted && $targetStore) {
                     $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_void', (string) $order->id);
                 }
@@ -1987,7 +2013,7 @@ class PosController extends Controller
 
                     continue;
                 }
-                $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
                 if ($item->inventory_deducted && $targetStore) {
                     $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_item_void', (string) $order->id);
                 }
@@ -2483,7 +2509,7 @@ class PosController extends Controller
                 : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
             if (! $item->inventory_deducted && $kitchenStore) {
-                $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
                 $this->deductOrderItemInventory($item, $targetStore, 'pos_order_line_ready', (string) $item->id);
             }
 
@@ -2568,11 +2594,12 @@ class PosController extends Controller
         });
     }
 
-    private function getKitchenForOrder(PosOrder $order): ?InventoryLocation
+    private function getKitchenLocationForRestaurant(?RestaurantMaster $restaurant): ?InventoryLocation
     {
-        $order->loadMissing('restaurant');
-        $restaurant = $order->restaurant;
-        if ($restaurant?->kitchen_location_id) {
+        if (! $restaurant) {
+            return null;
+        }
+        if ($restaurant->kitchen_location_id) {
             $loc = InventoryLocation::find($restaurant->kitchen_location_id);
             if ($loc) {
                 return $loc;
@@ -2580,8 +2607,58 @@ class PosController extends Controller
         }
 
         return InventoryLocation::where('type', 'kitchen_store')
-            ->where('department_id', $restaurant?->department_id)
+            ->where('department_id', $restaurant->department_id)
             ->first();
+    }
+
+    private function getBarLocationForRestaurant(?RestaurantMaster $restaurant): ?InventoryLocation
+    {
+        if (! $restaurant) {
+            return null;
+        }
+        if ($restaurant->bar_location_id) {
+            $loc = InventoryLocation::find($restaurant->bar_location_id);
+            if ($loc) {
+                return $loc;
+            }
+        }
+
+        return InventoryLocation::where('type', 'bar_store')
+            ->where('department_id', $restaurant->department_id)
+            ->first();
+    }
+
+    private function getKitchenForOrder(PosOrder $order): ?InventoryLocation
+    {
+        $order->loadMissing('restaurant');
+
+        return $this->getKitchenLocationForRestaurant($order->restaurant);
+    }
+
+    /**
+     * Bar store is for finished-good SKUs (bottles, cans). Ingredient-based made-to-order
+     * recipes (tea, coffee, etc.) always use kitchen stock even when is_direct_sale is true.
+     */
+    private function resolveInventoryDeductionStore(
+        ?MenuItem $menuItem,
+        ?InventoryLocation $kitchenStore,
+        ?InventoryLocation $barStore
+    ): ?InventoryLocation {
+        if (! $menuItem) {
+            return $kitchenStore ?? $barStore;
+        }
+        $recipe = Recipe::query()
+            ->where('menu_item_id', $menuItem->id)
+            ->where('is_active', true)
+            ->first();
+        if ($recipe && ! ($recipe->requires_production ?? true)) {
+            return $kitchenStore;
+        }
+        if ($menuItem->is_direct_sale && $barStore) {
+            return $barStore;
+        }
+
+        return $kitchenStore;
     }
 
     /**
@@ -2624,7 +2701,8 @@ class PosController extends Controller
                     continue;
                 }
 
-                $targetStore = ($menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                // Ingredient MTO: stock is always at kitchen / prep location, not bar shelf.
+                $targetStore = $kitchenStore;
 
                 $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                 $scale = 1.0;
@@ -2693,8 +2771,7 @@ class PosController extends Controller
         $refId = (string) $order->id.'-'.$batch;
         $result = DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $barStore, $refId) {
             foreach ($batchItems as $orderItem) {
-                // Bar (direct-sale) items deduct from bar store; all others from kitchen store
-                $targetStore = ($orderItem->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+                $targetStore = $this->resolveInventoryDeductionStore($orderItem->menuItem, $kitchenStore, $barStore);
                 $this->deductOrderItemInventory($orderItem, $targetStore, 'pos_order_batch', $refId);
             }
 
@@ -2823,9 +2900,7 @@ class PosController extends Controller
                 continue;
             }
 
-            // Determine if it should come from Bar or Kitchen
-            // If it's a direct sale item (Bar items like Pepsi/Beer usually have is_direct_sale = true)
-            $targetStore = ($item->menuItem?->is_direct_sale && $barStore) ? $barStore : $kitchenStore;
+            $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
 
             if ($targetStore) {
                 $this->deductOrderItemInventory($item, $targetStore, 'pos_order', (string) $order->id);
@@ -2935,10 +3010,12 @@ class PosController extends Controller
 
         $invItem = InventoryItem::find($itemId);
         $unitCost = floatval($invItem?->cost_price ?? 0) / floatval($invItem?->conversion_factor ?? 1);
+        $location = InventoryLocation::find($locId);
 
         InventoryTransaction::create([
             'inventory_item_id' => $itemId,
             'inventory_location_id' => $locId,
+            'department_id' => $location?->department_id,
             'type' => 'in',
             'quantity' => $qty,
             'unit_cost' => round($unitCost, 4),
@@ -2986,10 +3063,12 @@ class PosController extends Controller
 
         $invItem = InventoryItem::find($itemId);
         $unitCost = floatval($invItem?->cost_price ?? 0) / floatval($invItem?->conversion_factor ?? 1);
+        $location = InventoryLocation::find($locId);
 
         InventoryTransaction::create([
             'inventory_item_id' => $itemId,
             'inventory_location_id' => $locId,
+            'department_id' => $location?->department_id,
             'type' => 'out',
             'quantity' => $qty,
             'unit_cost' => round($unitCost, 4),
@@ -3020,11 +3099,23 @@ class PosController extends Controller
             $discountAmount = min(floatval($order->discount_value), $subtotal);
         }
 
-        // GST: tax is computed on post-discount amount (pro-rata per line)
         $discountRatio = $subtotal > 0 ? ($discountAmount / $subtotal) : 0;
-        $taxAmount = ($order->tax_exempt || $order->is_complimentary) ? 0 : $activeItems->sum(
-            fn ($i) => floatval($i->line_total) * (1 - $discountRatio) * (floatval($i->tax_rate) / 100)
-        );
+
+        // GST: per-line inclusive (sell price includes tax) vs exclusive (tax on top). Mixed carts supported.
+        if ($order->tax_exempt || $order->is_complimentary) {
+            $taxAmount = 0.0;
+        } else {
+            $taxAmount = 0.0;
+            foreach ($activeItems as $i) {
+                $eff = floatval($i->line_total) * (1 - $discountRatio);
+                $r = floatval($i->tax_rate);
+                if ($this->linePriceTaxInclusive($i, $order)) {
+                    $taxAmount += $r > 0 ? $eff * ($r / (100 + $r)) : 0;
+                } else {
+                    $taxAmount += $eff * ($r / 100);
+                }
+            }
+        }
 
         $serviceChargeAmount = 0;
         if ($order->service_charge_type === 'percent') {
@@ -3035,7 +3126,25 @@ class PosController extends Controller
 
         $tipAmount = (float) ($order->tip_amount ?? 0);
         $deliveryCharge = $order->order_type === 'delivery' ? (float) ($order->delivery_charge ?? 0) : 0;
-        $rawTotal = max(0, $subtotal + $taxAmount + $serviceChargeAmount - $discountAmount + $tipAmount + $deliveryCharge);
+
+        if ($order->is_complimentary) {
+            $rawTotal = 0.0;
+        } elseif ($order->tax_exempt) {
+            $linePaySum = $activeItems->sum(fn ($i) => floatval($i->line_total) * (1 - $discountRatio));
+            $rawTotal = max(0, $linePaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge);
+        } else {
+            $linePaySum = 0.0;
+            foreach ($activeItems as $i) {
+                $eff = floatval($i->line_total) * (1 - $discountRatio);
+                $r = floatval($i->tax_rate);
+                if ($this->linePriceTaxInclusive($i, $order)) {
+                    $linePaySum += $eff;
+                } else {
+                    $linePaySum += $eff * (1 + $r / 100);
+                }
+            }
+            $rawTotal = max(0, $linePaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge);
+        }
 
         $roundingAmount = 0.0;
         $finalTotal = $rawTotal;
@@ -3060,8 +3169,23 @@ class PosController extends Controller
         ]);
     }
 
+    /** Per-line sell price includes tax (restaurant_menu_items / snapshot); falls back to order outlet default. */
+    private function linePriceTaxInclusive(PosOrderItem $item, PosOrder $order): bool
+    {
+        if ($item->price_tax_inclusive !== null) {
+            return (bool) $item->price_tax_inclusive;
+        }
+
+        return (bool) ($order->prices_tax_inclusive ?? true);
+    }
+
     /**
-     * Weighted effective tax for combo lines by constituent prices in the selected outlet.
+     * Single effective GST % for the combo line so recalculate() can use the same
+     * inclusive/exclusive formulas as normal items.
+     *
+     * Blends embedded tax from each component using outlet prices and each RMI's
+     * price_tax_inclusive (defaults to inclusive). Avoids the old bug of treating
+     * inclusive MRPs as pre-tax bases (which inflated the effective rate).
      */
     private function resolveComboTaxRate(Combo $combo, int $restaurantId): float
     {
@@ -3075,23 +3199,42 @@ class PosController extends Controller
             ->get()
             ->keyBy('menu_item_id');
 
-        $taxableBase = 0.0;
-        $taxAmount = 0.0;
+        $grossSum = 0.0;
+        $taxSum = 0.0;
+
         foreach ($combo->menuItems as $mi) {
-            $base = (float) ($rmiByItem->get($mi->id)?->price ?? $mi->price ?? 0);
+            $rmi = $rmiByItem->get($mi->id);
+            $base = (float) ($rmi?->price ?? $mi->price ?? 0);
             if ($base <= 0) {
                 continue;
             }
-            $rate = (float) ($mi->tax?->rate ?? 0);
-            $taxableBase += $base;
-            $taxAmount += $base * ($rate / 100);
+            $r = (float) ($mi->tax?->rate ?? 0);
+            $inclusive = (bool) ($rmi?->price_tax_inclusive ?? true);
+
+            if ($inclusive) {
+                $grossSum += $base;
+                if ($r > 0) {
+                    $taxSum += $base * ($r / (100 + $r));
+                }
+            } else {
+                $grossSum += $base * (1 + $r / 100);
+                if ($r > 0) {
+                    $taxSum += $base * ($r / 100);
+                }
+            }
         }
 
-        if ($taxableBase <= 0) {
+        if ($grossSum <= 0 || $taxSum <= 0) {
             return 0.0;
         }
 
-        return round(($taxAmount / $taxableBase) * 100, 2);
+        $net = $grossSum - $taxSum;
+        if ($net <= 1e-6) {
+            return 0.0;
+        }
+
+        // R such that grossSum * R/(100+R) = taxSum  =>  R = 100 * taxSum / net
+        return round((100.0 * $taxSum) / $net, 2);
     }
 
     private function formatOrder(PosOrder $order): array
@@ -3139,6 +3282,8 @@ class PosController extends Controller
             'closed_at' => $order->closed_at,
             'notes' => $order->notes,
             'tax_exempt' => (bool) ($order->tax_exempt ?? false),
+            'prices_tax_inclusive' => (bool) ($order->prices_tax_inclusive ?? true),
+            'receipt_show_tax_breakdown' => (bool) ($order->receipt_show_tax_breakdown ?? true),
             'void_reason' => $order->void_reason,
             'void_notes' => $order->void_notes,
             'voided_by' => $order->voided_by,
@@ -3158,6 +3303,7 @@ class PosController extends Controller
                 'unit_price' => (float) $i->unit_price,
                 'tax_rate' => (float) $i->tax_rate,
                 'tax_name' => $i->menuItem?->tax?->name ?? null,
+                'price_tax_inclusive' => $i->price_tax_inclusive === null ? null : (bool) $i->price_tax_inclusive,
                 'line_total' => (float) $i->line_total,
                 'kot_sent' => $i->kot_sent,
                 'kot_hold' => (bool) ($i->kot_hold ?? false),

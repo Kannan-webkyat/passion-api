@@ -121,6 +121,8 @@ class MenuItemSyncService
                 'is_active' => (bool) ($row['is_active'] ?? true),
             ];
 
+            $data['price_tax_inclusive'] = true;
+
             // Only touch EPT when the client sends `fixed_ept`; otherwise preserve (Menu Pricing PUT
             // often sends price-only payloads from older clients — must not wipe config-set EPT).
             if (array_key_exists('fixed_ept', $row)) {

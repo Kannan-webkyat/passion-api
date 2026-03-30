@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryTransaction;
+use App\Models\PosOrder;
+use App\Models\PosOrderItem;
 
 class StockMovementController extends Controller
 {
@@ -53,6 +55,53 @@ class StockMovementController extends Controller
             }
         }
 
-        return response()->json($query->latest()->get());
+        $rows = $query->latest()->get();
+        $rows->each(function (InventoryTransaction $tx) {
+            $tx->setAttribute(
+                'outlet_name',
+                $this->resolvePosOutletName($tx->reference_type, $tx->reference_id)
+            );
+        });
+
+        return response()->json($rows);
+    }
+
+    /**
+     * POS movements store reference_type + reference_id; resolve consuming outlet (restaurant) name.
+     */
+    private function resolvePosOutletName(?string $referenceType, $referenceId): ?string
+    {
+        if ($referenceType === null || $referenceId === null || $referenceId === '') {
+            return null;
+        }
+
+        $refId = (string) $referenceId;
+
+        if (in_array($referenceType, ['pos_order', 'pos_order_sync_cancel', 'pos_order_sync_reduce', 'pos_order_sync_partial', 'pos_order_void', 'pos_order_item_void'], true)) {
+            $orderId = (int) $refId;
+
+            return $orderId > 0 ? $this->outletNameForOrderId($orderId) : null;
+        }
+
+        if ($referenceType === 'pos_order_batch') {
+            $orderId = (int) explode('-', $refId, 2)[0];
+
+            return $orderId > 0 ? $this->outletNameForOrderId($orderId) : null;
+        }
+
+        if ($referenceType === 'pos_order_line_ready') {
+            $item = PosOrderItem::with('order.restaurant')->find((int) $refId);
+
+            return $item?->order?->restaurant?->name;
+        }
+
+        return null;
+    }
+
+    private function outletNameForOrderId(int $orderId): ?string
+    {
+        $order = PosOrder::with('restaurant')->find($orderId);
+
+        return $order?->restaurant?->name;
     }
 }

@@ -501,6 +501,7 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
                     'price' => $mi->price,
                     'fixed_ept' => $mi->fixed_ept,
                     'is_active' => true,
+                    'price_tax_inclusive' => true,
                 ]);
             }
         }
@@ -522,6 +523,7 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
                         'price' => $mi->price,
                         'fixed_ept' => $mi->fixed_ept,
                         'is_active' => true,
+                        'price_tax_inclusive' => true,
                     ]);
                 }
             }

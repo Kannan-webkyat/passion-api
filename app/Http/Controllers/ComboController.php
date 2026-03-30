@@ -34,6 +34,7 @@ class ComboController extends Controller
             'restaurant_prices' => 'nullable|array',
             'restaurant_prices.*.restaurant_id' => 'required|exists:restaurant_masters,id',
             'restaurant_prices.*.price' => 'required|numeric|min:0',
+            'restaurant_prices.*.price_tax_inclusive' => 'boolean',
         ]);
 
         if (! isset($validated['price']) || $validated['price'] === null) {
@@ -67,6 +68,7 @@ class ComboController extends Controller
             'restaurant_prices' => 'nullable|array',
             'restaurant_prices.*.restaurant_id' => 'required|exists:restaurant_masters,id',
             'restaurant_prices.*.price' => 'required|numeric|min:0',
+            'restaurant_prices.*.price_tax_inclusive' => 'boolean',
         ]);
 
         if (array_key_exists('price', $validated) && $validated['price'] === null) {
@@ -111,15 +113,22 @@ class ComboController extends Controller
             if ($restaurantId <= 0) {
                 continue;
             }
+            $existing = RestaurantCombo::where('combo_id', $combo->id)
+                ->where('restaurant_master_id', $restaurantId)
+                ->first();
+
+            $data = [
+                'price' => $rp['price'],
+                'is_active' => true,
+            ];
+            $data['price_tax_inclusive'] = true;
+
             RestaurantCombo::updateOrCreate(
                 [
                     'combo_id' => $combo->id,
                     'restaurant_master_id' => $restaurantId,
                 ],
-                [
-                    'price' => $rp['price'],
-                    'is_active' => true,
-                ]
+                $data
             );
         }
     }

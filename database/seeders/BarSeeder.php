@@ -205,9 +205,9 @@ class BarSeeder extends Seeder
                 'inventory_item_id' => $invItem?->id
             ]);
 
-            $rmi = RestaurantMenuItem::firstOrCreate(
+            $rmi = RestaurantMenuItem::updateOrCreate(
                 ['menu_item_id' => $mi->id, 'restaurant_master_id' => $barOutlet->id],
-                ['price' => 0, 'fixed_ept' => 0, 'is_active' => true]
+                ['price' => 0, 'fixed_ept' => 0, 'is_active' => true, 'price_tax_inclusive' => true]
             );
             foreach ($variants as $i => [$label, $basePrice, $mlQty]) {
                 $v = MenuItemVariant::updateOrCreate(
@@ -261,7 +261,7 @@ class BarSeeder extends Seeder
             $restPrice = $priceMultiplier($barOutlet, (float) $basePrice);
             RestaurantMenuItem::updateOrCreate(
                 ['menu_item_id' => $mi->id, 'restaurant_master_id' => $barOutlet->id],
-                ['price' => $restPrice, 'fixed_ept' => 0, 'is_active' => true]
+                ['price' => $restPrice, 'fixed_ept' => 0, 'is_active' => true, 'price_tax_inclusive' => true]
             );
         }
 
