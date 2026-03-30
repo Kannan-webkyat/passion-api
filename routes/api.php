@@ -91,6 +91,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('pos/orders/{order}', [PosController::class, 'getOrder']);
     Route::patch('pos/orders/{order}', [PosController::class, 'updateOrder']);
     Route::post('pos/orders/{order}/transfer-table', [PosController::class, 'transferTable']);
+    Route::post('pos/orders/{order}/merge', [PosController::class, 'merge']);
     Route::put('pos/orders/{order}/items', [PosController::class, 'syncItems']);
     Route::post('pos/orders/{order}/items/void', [PosController::class, 'voidItems']);
     Route::post('pos/orders/{order}/kot', [PosController::class, 'sendKot']);

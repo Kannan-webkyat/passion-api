@@ -1602,6 +1602,141 @@ class PosController extends Controller
         return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
     }
 
+    // ── Merge checks (combine table orders) ───────────────────────────────────
+
+    /**
+     * Merge one or more OPEN dine-in orders into a target order.
+     *
+     * Industry-standard behavior:
+     * - Move active items to the target check
+     * - Void the source check(s) with an audit note "Merged into Order #X"
+     * - Free source table(s); target table remains occupied
+     */
+    public function merge(Request $request, PosOrder $order)
+    {
+        $this->checkPermission('pos-order');
+        $this->authorizeOrderAccess($order);
+
+        if ($order->order_type !== 'dine_in') {
+            return response()->json(['message' => 'Only dine-in orders can be merged.'], 422);
+        }
+        if ($order->status !== 'open') {
+            return response()->json(['message' => 'Only open orders can be merged.'], 422);
+        }
+        if ($this->isBusinessDateClosedForOrder($order)) {
+            return response()->json(['message' => 'Business date is already closed for this outlet.'], 422);
+        }
+
+        $validated = $request->validate([
+            'source_order_ids' => 'required|array|min:1',
+            'source_order_ids.*' => 'required|integer|exists:pos_orders,id',
+        ]);
+
+        $targetId = (int) $order->id;
+        $sourceIds = collect($validated['source_order_ids'])
+            ->map(fn ($v) => (int) $v)
+            ->filter(fn ($id) => $id > 0 && $id !== $targetId)
+            ->unique()
+            ->values();
+
+        if ($sourceIds->isEmpty()) {
+            return response()->json(['message' => 'Select at least one other open table order to merge.'], 422);
+        }
+
+        $errorResponse = null;
+        $mergedSources = [];
+
+        DB::transaction(function () use (&$order, $targetId, $sourceIds, &$errorResponse, &$mergedSources) {
+            /** @var PosOrder $target */
+            $target = PosOrder::where('id', $targetId)->lockForUpdate()->first();
+            if (! $target || $target->status !== 'open' || $target->order_type !== 'dine_in') {
+                $errorResponse = response()->json(['message' => 'Target order is no longer mergeable.'], 422);
+                return;
+            }
+
+            $sources = PosOrder::whereIn('id', $sourceIds)->lockForUpdate()->get();
+            if ($sources->count() !== $sourceIds->count()) {
+                $errorResponse = response()->json(['message' => 'One or more source orders no longer exist.'], 422);
+                return;
+            }
+
+            // Validate sources
+            foreach ($sources as $src) {
+                if ($src->id === $targetId) {
+                    continue;
+                }
+                if ($src->order_type !== 'dine_in') {
+                    $errorResponse = response()->json(['message' => 'Can only merge dine-in orders.'], 422);
+                    return;
+                }
+                if ($src->status !== 'open') {
+                    $errorResponse = response()->json(['message' => 'Only open orders can be merged.'], 422);
+                    return;
+                }
+                if ((int) $src->restaurant_id !== (int) $target->restaurant_id) {
+                    $errorResponse = response()->json(['message' => 'Can only merge orders from the same outlet.'], 422);
+                    return;
+                }
+            }
+
+            // Lock involved tables to prevent concurrent order creation/transfers
+            $tableIds = collect([$target->table_id])
+                ->merge($sources->pluck('table_id'))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+            foreach ($tableIds as $tid) {
+                RestaurantTable::where('id', $tid)->lockForUpdate()->first();
+            }
+
+            // Move active items from sources into target
+            foreach ($sources as $src) {
+                if ($src->id === $targetId) continue;
+
+                $moved = PosOrderItem::where('order_id', $src->id)
+                    ->where('status', 'active')
+                    ->update(['order_id' => $targetId]);
+
+                // Void the source order as "merged"
+                $src->update([
+                    'status' => 'void',
+                    'closed_at' => now(),
+                    'void_reason' => 'Duplicate',
+                    'void_notes' => trim(($src->void_notes ? $src->void_notes.' ' : '')."Merged into Order #{$targetId}"),
+                    'voided_by' => auth()->id(),
+                    'voided_at' => now(),
+                ]);
+
+                if ($src->table_id) {
+                    RestaurantTable::where('id', $src->table_id)->update(['status' => 'available']);
+                }
+
+                $mergedSources[] = ['id' => $src->id, 'moved_items' => (int) $moved];
+            }
+
+            // Keep target occupied and recalculate totals
+            $target->touch();
+            $this->recalculate($target);
+            $order = $target;
+        });
+
+        if ($errorResponse) {
+            return $errorResponse;
+        }
+
+        // Notify clients (tables list + order view)
+        $fresh = $order->fresh();
+        $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
+        foreach ($mergedSources as $ms) {
+            $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) ($ms['id'] ?? null));
+        }
+
+        // Return merged order in the standard order payload shape (same as GET /pos/orders/:id).
+        // This keeps the client logic consistent (`items` always present).
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+    }
+
     /**
      * Fire held (or selected) unsent lines — one batch number for this fire.
      */
