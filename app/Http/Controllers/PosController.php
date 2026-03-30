@@ -1408,70 +1408,60 @@ class PosController extends Controller
 
                 if ($totalCurrent < $qty) {
                     $delta = $qty - $totalCurrent;
-                    $sent = $matching->first(fn ($i) => $i->kot_sent);
-                    if ($sent) {
-                        PosOrderItem::create($createAttrs($delta, $unitPrice));
+                    $unsent = $matching->first(fn ($i) => ! $i->kot_sent);
+                    if ($unsent) {
+                        $unsent->update([
+                            'quantity' => $unsent->quantity + $delta,
+                            'unit_price' => $unitPrice,
+                            'tax_rate' => $taxRate,
+                            'price_tax_inclusive' => $priceTaxInclusive,
+                            'line_total' => $unitPrice * ($unsent->quantity + $delta),
+                            'notes' => $notes,
+                        ]);
                     } else {
-                        $first = $matching->first();
-                        if ($first) {
-                            $first->update([
-                                'quantity' => $qty,
-                                'unit_price' => $unitPrice,
-                                'tax_rate' => $taxRate,
-                                'price_tax_inclusive' => $priceTaxInclusive,
-                                'line_total' => $unitPrice * $qty,
-                                'notes' => $notes,
-                            ]);
-                        } else {
-                            PosOrderItem::create($createAttrs($qty, $unitPrice));
-                        }
+                        PosOrderItem::create($createAttrs($delta, $unitPrice));
                     }
                 } else {
                     $toReduce = $totalCurrent - $qty;
-                    foreach ($matching->sortBy('kot_sent') as $item) {
+                    // Prioritize cancellation: unsent first, then pending, started, ready, and finally served last.
+                    $sortedMatching = $matching->sortBy(function ($item) {
+                        if (! $item->kot_sent) return 0;
+                        if (! $item->kot_started_at && ! $item->kitchen_ready_at && ! $item->kitchen_served_at) return 1;
+                        if (! $item->kitchen_ready_at && ! $item->kitchen_served_at) return 2;
+                        if (! $item->kitchen_served_at) return 3;
+                        return 4;
+                    });
+                    
+                    foreach ($sortedMatching as $item) {
                         if ($toReduce <= 0) {
                             break;
                         }
                         if ($item->quantity <= $toReduce) {
                             $toReduce -= $item->quantity;
 
-                            $kitchenStore = $this->getKitchenForOrder($order);
-                            $barLocationId = $order->restaurant?->bar_location_id;
-                            $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-                            $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
-
-                            if ($item->inventory_deducted && $targetStore) {
-                                $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_reduce', (string) $order->id);
-                            }
-
                             if ($item->kot_sent) {
-                                $item->update(['status' => 'cancelled']);
+                                $name = $item->menuItem ? $item->menuItem->name : 'Item';
+                                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                                    response()->json(['message' => "Cannot silently remove '{$name}' from the cart because it has already been sent to the kitchen. Please use the Void feature instead."], 422)
+                                );
                             } else {
-                                $item->delete();
-                            }
-                        } else {
-                            $newQty = $item->quantity - $toReduce;
-                            if ($item->kot_sent) {
-                                $wasDeducted = $item->inventory_deducted;
                                 $kitchenStore = $this->getKitchenForOrder($order);
                                 $barLocationId = $order->restaurant?->bar_location_id;
                                 $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
                                 $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
 
-                                if ($wasDeducted && $targetStore) {
-                                    $this->reverseInventoryByQuantity($item, $targetStore, $toReduce, 'pos_order_sync_partial', (string) $order->id);
+                                if ($item->inventory_deducted && $targetStore) {
+                                    $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_reduce', (string) $order->id);
                                 }
-
-                                $item->update(['status' => 'cancelled']);
-                                $newLine = PosOrderItem::create($createAttrs($newQty, $unitPrice));
-                                $newLine->update([
-                                    'kot_sent' => true,
-                                    'kot_batch' => $item->kot_batch,
-                                    'kot_started_at' => $item->kot_started_at,
-                                    'kitchen_ready_at' => $item->kitchen_ready_at,
-                                    'kitchen_served_at' => $item->kitchen_served_at,
-                                    'inventory_deducted' => $wasDeducted,
-                                ]);
+                                $item->delete();
+                            }
+                        } else {
+                            $newQty = $item->quantity - $toReduce;
+                            if ($item->kot_sent) {
+                                $name = $item->menuItem ? $item->menuItem->name : 'Item';
+                                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                                    response()->json(['message' => "Cannot reduce quantity of '{$name}' because it has already been sent to the kitchen. Please use the Void feature instead."], 422)
+                                );
                             } else {
                                 $item->update([
                                     'quantity' => $newQty,
@@ -1694,8 +1684,30 @@ class PosController extends Controller
             foreach ($sources as $src) {
                 if ($src->id === $targetId) continue;
 
-                $moved = PosOrderItem::where('order_id', $src->id)
+                $sourceBatches = PosOrderItem::where('order_id', $src->id)
                     ->where('status', 'active')
+                    ->whereNotNull('kot_batch')
+                    ->distinct('kot_batch')
+                    ->pluck('kot_batch');
+
+                $moved = 0;
+                foreach ($sourceBatches as $srcBatch) {
+                    $target->increment('current_kot_batch');
+                    $newBatch = $target->current_kot_batch;
+
+                    $moved += PosOrderItem::where('order_id', $src->id)
+                        ->where('status', 'active')
+                        ->where('kot_batch', $srcBatch)
+                        ->update([
+                            'order_id' => $targetId,
+                            'kot_batch' => $newBatch
+                        ]);
+                }
+
+                // Move any unsent items
+                $moved += PosOrderItem::where('order_id', $src->id)
+                    ->where('status', 'active')
+                    ->whereNull('kot_batch')
                     ->update(['order_id' => $targetId]);
 
                 // Void the source order as "merged"
