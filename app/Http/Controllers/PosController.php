@@ -499,13 +499,17 @@ class PosController extends Controller
 
             // Made-to-order Sold Out: items without inventory_item_id but with recipe (requires_production=false)
             $madeToOrderSoldOut = collect();
-            if ($kitchenStock->isNotEmpty()) {
+            // Use kitchen_location_id, not kitchenStock->isNotEmpty(): when the kitchen has no
+            // inventory_item_locations rows yet (or all ingredients are at 0 with no rows), the map
+            // is empty but we must still treat recipe ingredients as 0 available → sold out.
+            if ($kitchenLocationId) {
                 $noInvItemIds = MenuItem::whereIn('id', $rmiByItem->keys())
                     ->whereNull('inventory_item_id')
                     ->pluck('id')
                     ->toArray();
                 $recipes = Recipe::whereIn('menu_item_id', $noInvItemIds)
                     ->where('requires_production', false)
+                    ->where('is_active', true)
                     ->with('ingredients')
                     ->get();
 
@@ -544,8 +548,14 @@ class PosController extends Controller
 
                 foreach ($recipes as $recipe) {
                     $multiplier = 1 / max(0.001, (float) $recipe->yield_quantity);
+                    $ings = $recipe->ingredients;
+                    if ($ings->isEmpty()) {
+                        $madeToOrderSoldOut->put($recipe->menu_item_id, true);
+
+                        continue;
+                    }
                     $soldOut = false;
-                    foreach ($recipe->ingredients as $ing) {
+                    foreach ($ings as $ing) {
                         $needQty = (float) $ing->raw_quantity * $multiplier;
                         if ($adjustedKitchenStock->get($ing->inventory_item_id, 0) < $needQty) {
                             $soldOut = true;
@@ -3146,16 +3156,12 @@ class PosController extends Controller
             $rawTotal = max(0, $linePaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge);
         }
 
-        $roundingAmount = 0.0;
-        $finalTotal = $rawTotal;
         if ($order->is_complimentary) {
-            $finalTotal = 0;
+            $finalTotal = 0.0;
             $serviceChargeAmount = 0;
             $tipAmount = 0;
-        } elseif ($rawTotal > 0) {
-            $rounded = round($rawTotal, 0, \PHP_ROUND_HALF_UP);
-            $roundingAmount = round($rounded - $rawTotal, 2);
-            $finalTotal = $rounded;
+        } else {
+            $finalTotal = round(max(0, $rawTotal), 2);
         }
 
         $order->update([
@@ -3164,7 +3170,7 @@ class PosController extends Controller
             'service_charge_amount' => round($serviceChargeAmount, 2),
             'discount_amount' => round($discountAmount, 2),
             'tip_amount' => $tipAmount,
-            'rounding_amount' => $order->is_complimentary ? 0 : $roundingAmount,
+            'rounding_amount' => 0,
             'total_amount' => $finalTotal,
         ]);
     }

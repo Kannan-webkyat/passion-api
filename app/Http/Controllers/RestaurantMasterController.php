@@ -72,7 +72,7 @@ class RestaurantMasterController extends Controller
             'description' => 'nullable|string',
             'is_active' => 'boolean',
             'department_id' => 'nullable|exists:departments,id',
-            'kitchen_location_id' => 'nullable|exists:inventory_locations,id',
+            'kitchen_location_id' => 'required|exists:inventory_locations,id',
             'bar_location_id' => 'nullable|exists:inventory_locations,id',
             'address' => 'nullable|string|max:1000',
             'email' => 'nullable|email|max:255',
@@ -80,7 +80,6 @@ class RestaurantMasterController extends Controller
             'gstin' => 'nullable|string|max:50',
             'fssai' => 'nullable|string|max:50',
             'business_day_cutoff_time' => 'nullable|date_format:H:i:s',
-            'bill_round_to_nearest_rupee' => 'boolean',
             'receipt_show_tax_breakdown' => 'boolean',
         ];
 

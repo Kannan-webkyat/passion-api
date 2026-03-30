@@ -94,7 +94,7 @@ class StoreRequestController extends Controller
     {
         $validated = $request->validate([
             'from_location_id' => 'required|exists:inventory_locations,id',
-            'to_location_id' => 'required|exists:inventory_locations,id',
+            'to_location_id' => 'required|exists:inventory_locations,id|different:from_location_id',
             'required_date' => 'nullable|date',
             'notes' => 'nullable|string',
             'items' => 'required|array|min:1',
