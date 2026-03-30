@@ -2132,6 +2132,7 @@ class PosController extends Controller
             'order_item_ids.*' => 'required|integer|exists:pos_order_items,id',
             'cancel_reason' => 'required|string|in:Wrong item,Guest declined,Duplicate,Spoiled,Other',
             'cancel_notes' => 'nullable|string|max:500',
+            'void_quantity' => 'nullable|numeric|min:0.01',
         ]);
 
         $items = PosOrderItem::where('order_id', $order->id)
@@ -2151,15 +2152,48 @@ class PosController extends Controller
             ? InventoryLocation::find($barLocationId)
             : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
-        DB::transaction(function () use ($items, $order, $kitchenStore, $barStore, $validated) {
+        $voidQuantity = $validated['void_quantity'] ?? null;
+
+        DB::transaction(function () use ($items, $order, $kitchenStore, $barStore, $validated, $voidQuantity) {
             PosOrder::where('id', $order->id)->lockForUpdate()->first();
 
+            $remainingQuantityToVoid = $voidQuantity;
+
             foreach ($items as $item) {
+                if ($remainingQuantityToVoid !== null && $remainingQuantityToVoid <= 0) {
+                    break;
+                }
+
                 $item->refresh();
                 if ($item->status !== 'active') {
                     continue;
                 }
-                if ($item->kot_started_at || $item->kitchen_ready_at) {
+
+                $qtyToVoidThisRow = $item->quantity;
+                if ($remainingQuantityToVoid !== null && $item->quantity > $remainingQuantityToVoid) {
+                    $qtyToVoidThisRow = $remainingQuantityToVoid;
+                }
+
+                if ($qtyToVoidThisRow < $item->quantity) {
+                    // Partially void: Split row
+                    $cancelItem = $item->replicate();
+                    $cancelItem->quantity = $qtyToVoidThisRow;
+                    $cancelItem->total_price = round(($item->total_price / $item->quantity) * $qtyToVoidThisRow, 2);
+                    $cancelItem->status = 'cancelled';
+                    $cancelItem->cancel_reason = $validated['cancel_reason'];
+                    $cancelItem->cancel_notes = $validated['cancel_notes'] ?? null;
+                    $cancelItem->cancelled_by = auth()->id();
+                    $cancelItem->cancelled_at = now();
+                    $cancelItem->save();
+
+                    // Reduce original active row
+                    $item->quantity -= $qtyToVoidThisRow;
+                    $item->total_price -= $cancelItem->total_price;
+                    $item->save();
+
+                    $processItem = $cancelItem;
+                } else {
+                    // Fully void this row
                     $item->update([
                         'status' => 'cancelled',
                         'cancel_reason' => $validated['cancel_reason'],
@@ -2167,20 +2201,22 @@ class PosController extends Controller
                         'cancelled_by' => auth()->id(),
                         'cancelled_at' => now(),
                     ]);
+                    $processItem = $item;
+                }
 
+                if ($remainingQuantityToVoid !== null) {
+                    $remainingQuantityToVoid -= $qtyToVoidThisRow;
+                }
+
+                // Handle inventory reversal on the actively voided slice
+                if ($processItem->kot_started_at || $processItem->kitchen_ready_at) {
+                    // Already cooked/cooking - do not reverse inventory, it's wasted
                     continue;
                 }
-                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
-                if ($item->inventory_deducted && $targetStore) {
-                    $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_item_void', (string) $order->id);
+                $targetStore = $this->resolveInventoryDeductionStore($processItem->menuItem, $kitchenStore, $barStore);
+                if ($processItem->inventory_deducted && $targetStore) {
+                    $this->reverseOrderItemInventory($processItem, $targetStore, 'pos_order_item_void', (string) $order->id);
                 }
-                $item->update([
-                    'status' => 'cancelled',
-                    'cancel_reason' => $validated['cancel_reason'],
-                    'cancel_notes' => $validated['cancel_notes'] ?? null,
-                    'cancelled_by' => auth()->id(),
-                    'cancelled_at' => now(),
-                ]);
             }
             $this->recalculate($order);
         });
