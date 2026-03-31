@@ -262,6 +262,13 @@ class BookingController extends Controller
         $checkOutAt = isset($validated['check_out']) ? Carbon::parse($validated['check_out']) : null;
         $status = $validated['status'] ?? 'confirmed';
 
+        // New reservations only from today onward (hotel calendar day in app timezone).
+        if ($checkInAt->copy()->startOfDay()->lt(Carbon::today())) {
+            return response()->json([
+                'message' => 'Check-in cannot be in the past. New reservations must start on or after today.',
+            ], 422);
+        }
+
         if ($bookingUnit === 'day') {
             if (! $checkOutAt) {
                 return response()->json(['message' => 'check_out is required for day bookings.'], 422);
@@ -864,7 +871,7 @@ class BookingController extends Controller
         $conflictSegment = BookingSegment::with(['booking.room.roomType'])
             ->where('room_id', $roomId)
             ->where('booking_id', '!=', $booking->id)
-            ->where('status', '!=', 'cancelled')
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
             ->where('check_in_at', '<', Carbon::parse($newCheckOut)->startOfDay())
             ->where('check_out_at', '>', Carbon::parse($oldCheckOut)->startOfDay())
             ->orderBy('check_in', 'asc')
@@ -876,6 +883,24 @@ class BookingController extends Controller
                 'message' => 'Room Conflict Detected',
                 'conflict' => $conflict,
                 'suggestion' => 'Move future reservation or move current guest.',
+            ], 409);
+        }
+
+        // Block extension into dates where the room is on hold
+        $holdBlock = RoomStatusBlock::where('room_id', $roomId)
+            ->where('is_active', true)
+            ->where('status', 'on_hold')
+            ->where('start_date', '<', $newCheckOut)
+            ->where('end_date', '>', $oldCheckOut)
+            ->first();
+
+        if ($holdBlock) {
+            return response()->json([
+                'message' => 'Room On Hold',
+                'on_hold' => true,
+                'hold_reason' => $holdBlock->note,
+                'hold_start' => $holdBlock->start_date,
+                'hold_end' => $holdBlock->end_date,
             ], 409);
         }
 
@@ -1075,6 +1100,39 @@ class BookingController extends Controller
             $segmentTotal += $segmentSubtotal * ($rt->tax->rate / 100);
         }
 
+        // End the stay in the current room at $oldCheckOut (same as booking.check_out) before adding
+        // the new room segment. Otherwise the previous segment can still extend into the extension
+        // window and overlap the new segment — same guest on two rooms for the same dates / OVERLAP.
+        $lastSegment = $booking->segments()->orderByDesc('check_out')->orderByDesc('check_out_at')->first();
+        $oldCheckOutCarbon = Carbon::parse($oldCheckOut)->startOfDay();
+        if (! $lastSegment) {
+            $lastSegment = BookingSegment::create([
+                'booking_id' => $booking->id,
+                'room_id' => $booking->room_id,
+                'check_in' => $booking->check_in,
+                'check_out' => $oldCheckOutCarbon->toDateString(),
+                'check_in_at' => $booking->check_in_at ?? Carbon::parse($booking->check_in)->startOfDay(),
+                'check_out_at' => $oldCheckOutCarbon,
+                'rate_plan_id' => $booking->rate_plan_id,
+                'adults_count' => $booking->adults_count,
+                'children_count' => $booking->children_count,
+                'extra_beds_count' => $booking->extra_beds_count,
+                'total_price' => $booking->total_price,
+                'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
+            ]);
+        } else {
+            $lastSegment->update([
+                'check_out' => $oldCheckOutCarbon->toDateString(),
+                'check_out_at' => $oldCheckOutCarbon,
+            ]);
+        }
+
+        if ((int) $newRoomId === (int) $lastSegment->room_id) {
+            return response()->json([
+                'message' => 'Select a different room for the extended nights than the room the guest is in now.',
+            ], 422);
+        }
+
         // Add segment — inherit the parent booking's status so a checked_in guest
         // shows as "occupied" (not "reserved") on the room chart for the new room.
         $segmentStatus = $booking->status === 'checked_in' ? 'checked_in' : 'confirmed';
@@ -1082,9 +1140,9 @@ class BookingController extends Controller
         $newSegment = BookingSegment::create([
             'booking_id' => $booking->id,
             'room_id' => $newRoomId,
-            'check_in' => $oldCheckOut,
+            'check_in' => $oldCheckOutCarbon->toDateString(),
             'check_out' => $newCheckOut,
-            'check_in_at' => Carbon::parse($oldCheckOut)->startOfDay(),
+            'check_in_at' => $oldCheckOutCarbon,
             'check_out_at' => Carbon::parse($newCheckOut)->startOfDay(),
             'rate_plan_id' => $ratePlan ? $ratePlan->id : null,
             'adults_count' => $booking->adults_count,
@@ -1107,7 +1165,7 @@ class BookingController extends Controller
             'notes' => $notes,
         ]);
 
-        return response()->json($booking->load(['segments.room', 'creator']));
+        return response()->json($booking->load(['segments.room.roomType', 'creator']));
     }
 
     public function reservationVoucher(Request $request, Booking $booking)
@@ -1472,7 +1530,9 @@ class BookingController extends Controller
     {
         $request->validate([
             'check_in' => 'required|date',
-            'check_out' => 'required|date|after:check_in',
+            // Do not use after:check_in — hourly bookings often share the same calendar date for
+            // check_in / check_out while actual times live in ISO datetimes (or check_in_at / check_out_at).
+            'check_out' => 'required|date',
             'room_type_id' => 'nullable|exists:room_types,id',
             'exclude_booking_id' => 'nullable|integer',
             'exclude_room_id' => 'nullable|integer',
@@ -1480,6 +1540,19 @@ class BookingController extends Controller
 
         $checkInAt = Carbon::parse($request->check_in);
         $checkOutAt = Carbon::parse($request->check_out);
+
+        if ($checkOutAt->lessThanOrEqualTo($checkInAt)) {
+            $inStr = (string) $request->check_in;
+            $outStr = (string) $request->check_out;
+            // Hourly / same calendar day: legacy rows may only store yyyy-MM-dd for both fields.
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $inStr) && $inStr === $outStr) {
+                $checkOutAt = $checkInAt->copy()->endOfDay();
+            } else {
+                return response()->json([
+                    'message' => 'check_out must be after check_in.',
+                ], 422);
+            }
+        }
         $checkInDate = $checkInAt->toDateString();
         $checkOutDateExclusive = $this->dateEndExclusiveFromDateTime($checkOutAt);
         $typeId = $request->room_type_id;

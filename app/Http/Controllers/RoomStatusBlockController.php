@@ -25,7 +25,7 @@ class RoomStatusBlockController extends Controller
             'start' => 'nullable|date',
             'end' => 'nullable|date|after_or_equal:start',
             'room_id' => 'nullable|exists:rooms,id',
-            'status' => 'nullable|in:maintenance,dirty,cleaning',
+            'status' => 'nullable|in:maintenance,dirty,cleaning,on_hold',
             'is_active' => 'nullable|boolean',
         ]);
 
@@ -49,10 +49,12 @@ class RoomStatusBlockController extends Controller
         $this->checkPermission('manage-rooms');
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
-            'status' => 'required|in:maintenance,dirty,cleaning',
+            'status' => 'required|in:maintenance,dirty,cleaning,on_hold',
             'start_date' => 'required|date',
             'end_date' => 'required|date|after:start_date',
-            'note' => 'nullable|string|max:255',
+            'note' => $request->input('status') === 'on_hold'
+                ? 'required|string|max:255'
+                : 'nullable|string|max:255',
         ]);
 
         // Do not allow blocking a room if it already has a reservation segment in this period.
