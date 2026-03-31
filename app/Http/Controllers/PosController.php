@@ -2046,7 +2046,7 @@ class PosController extends Controller
 
     public function void(Request $request, PosOrder $order)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         $this->authorizeOrderAccess($order);
         if (in_array($order->status, ['paid', 'refunded', 'void'])) {
             return response()->json(['message' => 'Cannot void a paid, refunded, or already-voided order.'], 422);
@@ -2231,7 +2231,7 @@ class PosController extends Controller
 
     public function refund(Request $request, PosOrder $order)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         $this->authorizeOrderAccess($order);
         if (! in_array($order->status, ['paid', 'refunded'])) {
             return response()->json(['message' => 'Only paid orders can be refunded.'], 422);

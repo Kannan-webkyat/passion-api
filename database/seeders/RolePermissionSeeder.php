@@ -19,10 +19,7 @@ class RolePermissionSeeder extends Seeder
             'view-rooms',
             'reservation',
             'manage-inventory',
-            'manage-restaurant',
-            'manage-restaurants',
             'manage-tables',
-            'manage-bar',
             'view-reports',
             'manage-users',
             'manage-settings',
@@ -30,6 +27,11 @@ class RolePermissionSeeder extends Seeder
             'kitchen-production',
             'pos-order',
             'pos-settle',
+            'pos-void-item',
+            'pos-discount',
+            'pos-reopen-order',
+            'pos-day-closing',
+            'pos-manage',
         ];
 
         foreach ($permissions as $permission) {
@@ -47,21 +49,21 @@ class RolePermissionSeeder extends Seeder
         $inventoryManager->syncPermissions(['manage-inventory']);
 
         $restaurantStaff = Role::firstOrCreate(['name' => 'Restaurant Staff']);
-        $restaurantStaff->syncPermissions(['manage-restaurant', 'manage-restaurants', 'manage-tables', 'pos-order', 'pos-settle', 'create-requisition']);
+        $restaurantStaff->syncPermissions(['manage-tables', 'pos-order', 'pos-settle', 'create-requisition']);
 
         $cashier = Role::firstOrCreate(['name' => 'Cashier']);
         $cashier->syncPermissions(['pos-order', 'pos-settle']);
 
         $barStaff = Role::firstOrCreate(['name' => 'Bar Staff']);
-        $barStaff->syncPermissions(['manage-bar', 'create-requisition']);
+        $barStaff->syncPermissions(['create-requisition']);
 
         $kitchenStaff = Role::firstOrCreate(['name' => 'Kitchen Staff']);
         $kitchenStaff->syncPermissions(['kitchen-production', 'create-requisition']);
 
         $waiter = Role::firstOrCreate(['name' => 'Waiter']);
-        $waiter->syncPermissions(['manage-restaurant', 'pos-order']);
+        $waiter->syncPermissions(['pos-order']);
 
         $seniorWaiter = Role::firstOrCreate(['name' => 'Senior Waiter']);
-        $seniorWaiter->syncPermissions(['manage-restaurant', 'pos-order']);
+        $seniorWaiter->syncPermissions(['pos-order', 'pos-void-item', 'pos-reopen-order', 'pos-manage']);
     }
 }

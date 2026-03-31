@@ -22,7 +22,7 @@ class MenuSubCategoryController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         $validated = $request->validate([
             'menu_category_id' => 'required|exists:menu_categories,id',
             'name' => 'required|string|max:255',
@@ -42,7 +42,7 @@ class MenuSubCategoryController extends Controller
 
     public function update(Request $request, MenuSubCategory $menuSubCategory)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         $validated = $request->validate([
             'menu_category_id' => 'sometimes|required|exists:menu_categories,id',
             'name' => 'sometimes|required|string|max:255',
@@ -57,7 +57,7 @@ class MenuSubCategoryController extends Controller
 
     public function destroy(MenuSubCategory $menuSubCategory)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         
         try {
             $menuSubCategory->delete();

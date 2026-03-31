@@ -26,7 +26,7 @@ class DayClosingController extends Controller
      */
     public function preview(Request $request)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'date' => 'required|date',
@@ -56,7 +56,7 @@ class DayClosingController extends Controller
      */
     public function close(Request $request)
     {
-        $this->checkPermission('manage-restaurant');
+        $this->checkPermission('pos-manage');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'date' => 'required|date',

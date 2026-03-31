@@ -28,7 +28,7 @@ class RestaurantMasterController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-restaurants');
+        $this->checkPermission('pos-manages');
         $validated = $this->validateRestaurant($request);
         $restaurant = RestaurantMaster::create($validated);
 
@@ -42,7 +42,7 @@ class RestaurantMasterController extends Controller
 
     public function update(Request $request, RestaurantMaster $restaurantMaster)
     {
-        $this->checkPermission('manage-restaurants');
+        $this->checkPermission('pos-manages');
         $validated = $this->validateRestaurant($request);
         $restaurantMaster->update($validated);
 
@@ -51,7 +51,7 @@ class RestaurantMasterController extends Controller
 
     public function destroy(RestaurantMaster $restaurantMaster)
     {
-        $this->checkPermission('manage-restaurants');
+        $this->checkPermission('pos-manages');
         try {
             $restaurantMaster->delete();
 
