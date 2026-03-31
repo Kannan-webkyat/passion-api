@@ -16,7 +16,7 @@ class RatePlan extends Model
         'grace_minutes',
         'overtime_step_minutes',
         'overtime_hour_price',
-        'includes_breakfast',
+        'meal_plan_type',
         'is_active',
         'price_modifiers',
     ];
@@ -25,7 +25,7 @@ class RatePlan extends Model
         'base_price' => 'decimal:2',
         'package_price' => 'decimal:2',
         'overtime_hour_price' => 'decimal:2',
-        'includes_breakfast' => 'boolean',
+        'meal_plan_type' => 'string',
         'is_active' => 'boolean',
         'price_modifiers' => 'array',
     ];
