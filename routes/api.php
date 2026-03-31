@@ -16,6 +16,7 @@ use App\Http\Controllers\RecipeController;
 use App\Http\Controllers\RestaurantMasterController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\RoomController;
+use App\Http\Controllers\HousekeepingController;
 use App\Http\Controllers\RoomStatusBlockController;
 use App\Http\Controllers\RoomTypeController;
 use App\Http\Controllers\SettingController;
@@ -45,6 +46,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('permissions', [RoleController::class, 'permissions']);
 
     // Bookings & Room Chart
+    Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
+
     Route::get('bookings/chart', [BookingController::class, 'chart']);
     Route::get('bookings/summary', [BookingController::class, 'summary']);
     Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
