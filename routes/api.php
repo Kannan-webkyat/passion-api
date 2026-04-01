@@ -107,6 +107,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('pos/orders/{order}/settle', [PosController::class, 'settle']);
     Route::post('pos/orders/{order}/void', [PosController::class, 'void']);
     Route::post('pos/orders/{order}/refund', [PosController::class, 'refund']);
+    Route::get('pos/reports/sales', [PosController::class, 'salesReport']);
+    Route::get('pos/reports/sales/export', [PosController::class, 'salesReportExport']);
+    Route::get('pos/reports/sales/orders', [PosController::class, 'salesReportOrders']);
 
     // Day Closing
     Route::get('pos/day-closing/preview', [DayClosingController::class, 'preview']);

@@ -26,6 +26,8 @@ use App\Models\User;
 use App\Services\BusinessDateService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PosController extends Controller
 {
@@ -324,6 +326,311 @@ class PosController extends Controller
         ];
 
         return response()->json($config);
+    }
+
+    // ── POS Reports ──────────────────────────────────────────────────────────
+
+    /**
+     * Sales summary report (paid orders) with payment breakdown.
+     *
+     * Query params:
+     * - from (Y-m-d) required
+     * - to (Y-m-d) required
+     * - restaurant_id optional (filters to one outlet)
+     */
+    public function salesReport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $restaurantId = $validated['restaurant_id'] ?? null;
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        // Limit outlets for non-admin users when restaurant_id is not provided.
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        // Force a specific outlet if none provided and user has access to some
+        if (!$restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (!$restaurantId) {
+            return response()->json(['data' => [], 'summary' => null, 'payments' => []]);
+        }
+
+        // ── 1. Calculate Consolidated Totals for Dashboard ──
+        $baseOrdersQ = DB::table('pos_orders')
+            ->whereIn('status', ['paid', 'refunded'])
+            ->where('restaurant_id', (int)$restaurantId)
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to);
+
+        $agg = (clone $baseOrdersQ)->select(
+            DB::raw('COUNT(*) as orders_count'),
+            DB::raw('SUM(total_amount) as total_amount'),
+            DB::raw('SUM(subtotal) as subtotal'),
+            DB::raw('SUM(tax_amount) as tax_amount'),
+            DB::raw('SUM(discount_amount) as discount_amount'),
+            DB::raw('SUM(service_charge_amount) as service_charge_amount'),
+            DB::raw('SUM(tip_amount) as tip_amount'),
+            DB::raw('SUM(delivery_charge) as delivery_charge')
+        )->first();
+
+        $voidedQ = DB::table('pos_orders')
+            ->where('status', 'void')
+            ->where('restaurant_id', (int)$restaurantId)
+            ->whereDate('voided_at', '>=', $from)
+            ->whereDate('voided_at', '<=', $to);
+
+        $voidedCount = (int)$voidedQ->count();
+        $voidedAmount = (float)$voidedQ->sum('total_amount');
+
+        $refundsQ = DB::table('pos_order_refunds')
+            ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
+            ->where('pos_orders.restaurant_id', (int)$restaurantId)
+            ->whereDate('pos_order_refunds.business_date', '>=', $from)
+            ->whereDate('pos_order_refunds.business_date', '<=', $to);
+        
+        $totalRefundedAmount = (float)$refundsQ->sum('pos_order_refunds.amount');
+        $refundsByMethod = $refundsQ->select('pos_order_refunds.method', DB::raw('SUM(pos_order_refunds.amount) as amount'))
+            ->groupBy('pos_order_refunds.method')
+            ->get()
+            ->pluck('amount', 'method');
+
+        $aggData = $agg ?? (object)[
+            'orders_count' => 0, 'total_amount' => 0, 'subtotal' => 0,
+            'tax_amount' => 0, 'discount_amount' => 0,
+            'service_charge_amount' => 0, 'tip_amount' => 0, 'delivery_charge' => 0,
+        ];
+        $aggTotal = (float)$aggData->total_amount;
+        $summary = [
+            'orders_count' => (int)$aggData->orders_count,
+            'subtotal' => (float)$aggData->subtotal,
+            'tax_amount' => (float)$aggData->tax_amount,
+            'discount_amount' => (float)$aggData->discount_amount,
+            'service_charge_amount' => (float)$aggData->service_charge_amount,
+            'tip_amount' => (float)$aggData->tip_amount,
+            'delivery_charge' => (float)$aggData->delivery_charge,
+            'total_amount' => $aggTotal,
+            'voided_count' => $voidedCount,
+            'voided_amount' => $voidedAmount,
+            'total_refunded' => $totalRefundedAmount,
+            'net_realized' => $aggTotal - $totalRefundedAmount
+        ];
+
+        // ── 2. Payment Breakdown for Dashboard ──
+        $orderIds = $baseOrdersQ->pluck('id')->all();
+        $payByMethod = [];
+        if (!empty($orderIds)) {
+            $payByMethod = DB::table('pos_payments')
+                ->whereIn('order_id', $orderIds)
+                ->select('method', DB::raw('SUM(amount) as amount'), DB::raw('COUNT(*) as count'))
+                ->groupBy('method')
+                ->get()
+                ->map(function($p) use ($refundsByMethod) {
+                    $refAmt = (float)($refundsByMethod[$p->method] ?? 0);
+                    return [
+                        'method' => $p->method,
+                        'gross_amount' => (float)$p->amount,
+                        'refund_amount' => $refAmt,
+                        'net_amount' => (float)$p->amount - $refAmt,
+                        'count' => $p->count
+                    ];
+                });
+        }
+
+        // ── 3. Paginated Bills for Table ──
+        $ordersQ = PosOrder::whereIn('status', ['paid', 'refunded', 'void'])
+            ->where('restaurant_id', (int)$restaurantId)
+            ->where(function($q) use ($from, $to) {
+                $q->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to)
+                  ->orWhere(function($sq) use ($from, $to) {
+                      $sq->where('status', 'void')->whereDate('voided_at', '>=', $from)->whereDate('voided_at', '<=', $to);
+                  });
+            })
+            ->with(['waiter:id,name', 'refunds', 'restaurant:id,name']);
+
+        $paginated = $ordersQ->orderBy('id', 'desc')->paginate(50);
+        
+        $data = collect($paginated->items())->map(function($o) {
+            return [
+                'id' => $o->id,
+                'business_date' => $o->business_date,
+                'waiter' => $o->waiter?->name ?? '—',
+                'restaurant' => $o->restaurant?->name ?? '—',
+                'order_type' => $o->order_type ?? 'dine_in',
+                'status' => $o->status,
+                'total_amount' => (float)$o->total_amount,
+                'refunded_amount' => (float)$o->refunds->sum('amount'),
+                'closed_at' => $o->closed_at?->toDateTimeString(),
+                'voided_at' => $o->voided_at?->toDateTimeString(),
+            ];
+        });
+
+        return response()->json([
+            'summary' => $summary,
+            'payments' => $payByMethod,
+            'data' => $data,
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'total' => $paginated->total()
+            ]
+        ]);
+    }
+
+    /**
+     * Export Sales Report (CSV/PDF)
+     */
+    public function salesReportExport(Request $request)
+    {
+        $this->checkPermission('pos-manage');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $type = $request->query('type', 'csv');
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int)$restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $restaurant = RestaurantMaster::findOrFail($restaurantId);
+
+        $orders = PosOrder::whereIn('status', ['paid', 'refunded', 'void'])
+            ->where('restaurant_id', (int)$restaurantId)
+            ->where(function($q) use ($from, $to) {
+                $q->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to)
+                  ->orWhere(function($sq) use ($from, $to) {
+                      $sq->where('status', 'void')->whereDate('voided_at', '>=', $from)->whereDate('voided_at', '<=', $to);
+                  });
+            })
+            ->with(['waiter:id,name', 'refunds', 'restaurant:id,name'])
+            ->orderBy('id', 'desc')
+            ->get();
+
+        if ($type === 'pdf') {
+            $summary = [
+                'count' => $orders->count(),
+                'net' => $orders->sum('total_amount'),
+                'refunds' => $orders->map(fn($o) => $o->refunds->sum('amount'))->sum(),
+            ];
+            $pdf = Pdf::loadView('reports.sales', [
+                'orders' => $orders,
+                'restaurant' => $restaurant,
+                'from' => $from,
+                'to' => $to,
+                'summary' => $summary
+            ]);
+            return $pdf->download("sales_report_{$from}_to_{$to}.pdf");
+        }
+
+        // Default: CSV (also serves as Excel)
+        $fileName = "sales_report_{$from}_to_{$to}.csv";
+        $headers = [
+            "Content-type"        => "text/csv",
+            "Content-Disposition" => "attachment; filename=$fileName",
+            "Pragma"              => "no-cache",
+            "Cache-Control"       => "must-revalidate, post-check=0, pre-check=0",
+            "Expires"             => "0"
+        ];
+
+        $columns = ['Bill #', 'Date', 'Staff', 'Outlet', 'Type', 'Status', 'Amount', 'Refunded'];
+
+        $callback = function() use($orders, $columns) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $columns);
+
+            foreach ($orders as $o) {
+                fputcsv($file, [
+                    '#' . $o->id,
+                    $o->business_date . ' ' . ($o->closed_at ?: $o->voided_at),
+                    $o->waiter?->name ?? '—',
+                    $o->restaurant?->name ?? '—',
+                    $o->order_type ?? 'dine_in',
+                    $o->status,
+                    $o->total_amount,
+                    $o->refunds->sum('amount')
+                ]);
+            }
+
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Get individual orders for a report drill-down audit
+     */
+    public function salesReportOrders(Request $request)
+    {
+        $this->checkPermission('pos-manage');
+        $date = $request->input('date');
+        $restaurantId = $request->input('restaurant_id');
+
+        if (! $date || ! $restaurantId) {
+            return response()->json(['message' => 'date and restaurant_id are required.'], 422);
+        }
+
+        $orders = PosOrder::where('restaurant_id', $restaurantId)
+            ->whereDate('business_date', $date)
+            ->whereIn('status', ['paid', 'refunded', 'void'])
+            ->with(['waiter:id,name', 'openedBy:id,name', 'voidedBy:id,name', 'refunds'])
+            ->orderBy('closed_at', 'desc')
+            ->get()
+            ->map(function ($o) {
+                return [
+                    'id' => $o->id,
+                    'customer_name' => $o->customer_name,
+                    'waiter_name' => $o->waiter?->name ?? '—',
+                    'opened_by' => $o->openedBy?->name ?? '—',
+                    'closed_at' => $o->closed_at?->toDateTimeString(),
+                    'voided_at' => $o->voided_at?->toDateTimeString(),
+                    'voided_by' => $o->voidedBy?->name ?? '—',
+                    'status' => $o->status,
+                    'total_amount' => (float) $o->total_amount,
+                    'tax_amount' => (float) $o->tax_amount,
+                    'refunded_amount' => (float) $o->refunds->sum('amount'),
+                    'refund_count' => $o->refunds->count(),
+                ];
+            });
+
+        return response()->json($orders);
     }
 
     // ── Tables with live order status ─────────────────────────────────────────
@@ -3281,75 +3588,95 @@ class PosController extends Controller
     private function recalculate(PosOrder $order): void
     {
         $order->refresh();
-        $order->load('items');
-        $activeItems = $order->items->where('status', 'active');
-        $subtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
+        $order->load(['items' => function ($q) {
+            $q->where('status', 'active');
+        }]);
 
+        $activeItems = $order->items;
+        
+        // 1. Calculate Gross Sum (Menu Prices * Qty)
+        $grossSubtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
+
+        // 2. Calculate Order-level Discount
         $discountAmount = 0;
         if ($order->discount_type === 'percent') {
-            $discountAmount = $subtotal * (floatval($order->discount_value) / 100);
+            $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
         } elseif ($order->discount_type === 'flat') {
-            $discountAmount = min(floatval($order->discount_value), $subtotal);
+            $discountAmount = min(floatval($order->discount_value ?? 0), $grossSubtotal);
         }
 
-        $discountRatio = $subtotal > 0 ? ($discountAmount / $subtotal) : 0;
+        $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
+        
+        // 3. Extract Tax and calculate true Net Subtotal
+        $totalTaxAmount = 0.0;
+        $totalNetTaxable = 0.0;
 
-        // GST: per-line inclusive (sell price includes tax) vs exclusive (tax on top). Mixed carts supported.
-        if ($order->tax_exempt || $order->is_complimentary) {
-            $taxAmount = 0.0;
-        } else {
-            $taxAmount = 0.0;
-            foreach ($activeItems as $i) {
-                $eff = floatval($i->line_total) * (1 - $discountRatio);
-                $r = floatval($i->tax_rate);
+        foreach ($activeItems as $i) {
+            $effGross = floatval($i->line_total) * (1 - $discountRatio);
+            $r = floatval($i->tax_rate);
+            
+            if ($order->tax_exempt || $order->is_complimentary) {
+                // If tax exempt, the whole effective amount is net taxable base
+                $totalTaxAmount += 0.0;
+                $totalNetTaxable += $effGross;
+            } else {
                 if ($this->linePriceTaxInclusive($i, $order)) {
-                    $taxAmount += $r > 0 ? $eff * ($r / (100 + $r)) : 0;
+                    // Extraction: Base = Gross / (1 + r/100)
+                    $lineTax = $r > 0 ? $effGross * ($r / (100 + $r)) : 0;
+                    $lineNet = $effGross - $lineTax;
+                    $totalTaxAmount += $lineTax;
+                    $totalNetTaxable += $lineNet;
                 } else {
-                    $taxAmount += $eff * ($r / 100);
+                    // Addition: Tax = Base * r/100
+                    $lineTax = $effGross * ($r / 100);
+                    $lineNet = $effGross;
+                    $totalTaxAmount += $lineTax;
+                    $totalNetTaxable += $lineNet;
                 }
             }
         }
 
+        // 4. Other charges (Service Charge, Tips, Delivery)
+        // Usually, Service Charge is calculated on the Gross Subtotal
         $serviceChargeAmount = 0;
         if ($order->service_charge_type === 'percent') {
-            $serviceChargeAmount = $subtotal * (floatval($order->service_charge_value ?? 0) / 100);
+            $serviceChargeAmount = $grossSubtotal * (floatval($order->service_charge_value ?? 0) / 100);
         } elseif ($order->service_charge_type === 'flat') {
-            $serviceChargeAmount = min(floatval($order->service_charge_value ?? 0), $subtotal);
+            $serviceChargeAmount = min(floatval($order->service_charge_value ?? 0), $grossSubtotal);
         }
 
         $tipAmount = (float) ($order->tip_amount ?? 0);
         $deliveryCharge = $order->order_type === 'delivery' ? (float) ($order->delivery_charge ?? 0) : 0;
 
-        if ($order->is_complimentary) {
-            $rawTotal = 0.0;
-        } elseif ($order->tax_exempt) {
-            $linePaySum = $activeItems->sum(fn ($i) => floatval($i->line_total) * (1 - $discountRatio));
-            $rawTotal = max(0, $linePaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge);
-        } else {
-            $linePaySum = 0.0;
-            foreach ($activeItems as $i) {
-                $eff = floatval($i->line_total) * (1 - $discountRatio);
-                $r = floatval($i->tax_rate);
-                if ($this->linePriceTaxInclusive($i, $order)) {
-                    $linePaySum += $eff;
-                } else {
-                    $linePaySum += $eff * (1 + $r / 100);
-                }
-            }
-            $rawTotal = max(0, $linePaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge);
-        }
-
+        // 5. Final Total Order Amount
         if ($order->is_complimentary) {
             $finalTotal = 0.0;
             $serviceChargeAmount = 0;
             $tipAmount = 0;
+            $totalTaxAmount = 0;
         } else {
-            $finalTotal = round(max(0, $rawTotal), 2);
+            // Gross Total = Items (After Discount) + Tax (if extra) + Extras
+            // Note: If inclusive, Tax is already in effGross, but linePaySum calculation below is clearer
+            $billPaySum = $activeItems->sum(function($i) use ($discountRatio, $order) {
+                $eff = floatval($i->line_total) * (1 - $discountRatio);
+                $r = floatval($i->tax_rate);
+                if ($this->linePriceTaxInclusive($i, $order)) {
+                    return $eff;
+                } else {
+                    return $eff * (1 + $r / 100);
+                }
+            });
+            
+            if ($order->tax_exempt) {
+                $billPaySum = $activeItems->sum(fn($i) => floatval($i->line_total) * (1 - $discountRatio));
+            }
+
+            $finalTotal = round($billPaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge, 2);
         }
 
         $order->update([
-            'subtotal' => $subtotal,
-            'tax_amount' => round($taxAmount, 2),
+            'subtotal' => round($totalNetTaxable, 2), // Now stores True Net Taxable
+            'tax_amount' => round($totalTaxAmount, 2),
             'service_charge_amount' => round($serviceChargeAmount, 2),
             'discount_amount' => round($discountAmount, 2),
             'tip_amount' => $tipAmount,
