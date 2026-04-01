@@ -50,6 +50,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
 
+    Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);
     Route::get('bookings/chart', [BookingController::class, 'chart']);
     Route::get('bookings/summary', [BookingController::class, 'summary']);
     Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
@@ -74,6 +75,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Settings (receipt defaults)
     Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
     Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
+    Route::get('settings/global', [SettingController::class, 'globalConfig']);
+    Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);

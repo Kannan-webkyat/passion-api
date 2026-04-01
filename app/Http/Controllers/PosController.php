@@ -239,8 +239,8 @@ class PosController extends Controller
         $request->validate(['restaurant_id' => 'required|exists:restaurant_masters,id']);
         $this->authorizeRestaurantId((int) $request->restaurant_id);
 
-        $orders = PosOrder::with(['room'])
-            ->where('restaurant_id', $request->restaurant_id)
+        $orders = PosOrder::query()->with(['room'])
+            ->where('restaurant_id', '=', $request->restaurant_id)
             ->whereIn('order_type', ['takeaway', 'room_service', 'delivery', 'walk_in'])
             ->whereIn('status', ['open', 'billed'])
             ->orderBy('created_at', 'desc')

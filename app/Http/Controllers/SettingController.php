@@ -46,4 +46,29 @@ class SettingController extends Controller
 
         return response()->json(Setting::getReceiptDefaults());
     }
+
+    public function globalConfig()
+    {
+        return response()->json([
+            'check_in_time' => Setting::get('standard_check_in_time', '14:00'),
+            'check_out_time' => Setting::get('standard_check_out_time', '11:00'),
+        ]);
+    }
+
+    public function updateGlobalConfig(Request $request)
+    {
+        $this->checkPermission('manage-settings');
+        $validated = $request->validate([
+            'check_in_time' => 'required|date_format:H:i',
+            'check_out_time' => 'required|date_format:H:i',
+        ]);
+
+        Setting::set('standard_check_in_time', $validated['check_in_time']);
+        Setting::set('standard_check_out_time', $validated['check_out_time']);
+
+        return response()->json([
+            'message' => 'Global configuration updated successfully.',
+            'settings' => $validated
+        ]);
+    }
 }

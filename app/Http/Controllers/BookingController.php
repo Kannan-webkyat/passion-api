@@ -7,6 +7,7 @@ use App\Models\BookingGroup;
 use App\Models\BookingSegment;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
+use App\Models\Setting;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -95,7 +96,7 @@ class BookingController extends Controller
         $roomType = $booking->room?->roomType;
         $plan = $roomType?->ratePlans?->firstWhere('id', $booking->rate_plan_id);
         if (! $plan) {
-            return (float) ($booking->total_price ?? 0);
+            return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
         }
 
         $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
@@ -108,7 +109,9 @@ class BookingController extends Controller
         $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
         $taxRate = (float) ($roomType?->tax?->rate ?? 0);
 
-        return round($beforeTax * (1 + ($taxRate / 100)), 2);
+        $grand = round($beforeTax * (1 + ($taxRate / 100)), 2);
+
+        return $grand + (float) ($booking->extra_charges ?? 0);
     }
 
     public function index(Request $request)
@@ -120,6 +123,34 @@ class BookingController extends Controller
             })
             ->orderBy('check_in')
             ->get();
+    }
+
+    public function guestSearch(Request $request)
+    {
+        $phone = $request->query('phone');
+        if (!$phone || strlen($phone) < 4) {
+            return response()->json(['message' => 'Provide at least 4 digits to search.'], 422);
+        }
+
+        /** @var \App\Models\Booking|null $booking */
+        $booking = Booking::query()->where('phone', 'like', "%{$phone}%")
+            ->orderByDesc('created_at')
+            ->first();
+
+        if (!$booking instanceof Booking) {
+            return response()->json(['message' => 'No guest found with this phone number.'], 404);
+        }
+
+        return response()->json([
+            'first_name' => $booking->first_name,
+            'last_name' => $booking->last_name,
+            'email' => $booking->email,
+            'phone' => $booking->phone,
+            'city' => $booking->city,
+            'country' => $booking->country,
+            'guest_identity_types' => $booking->guest_identity_types,
+            'guest_identities' => $booking->guest_identities,
+        ]);
     }
 
     public function chart(Request $request)
@@ -782,10 +813,43 @@ class BookingController extends Controller
         $user = $request->user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
         $auditMsg = "[Early CI: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+        
+        $rt = $booking->room?->roomType;
+        $standardTime = Setting::get('standard_check_in_time', '14:00');
+        $fee = 0;
+        $units = "";
+
+        if ($rt && $time < $standardTime) {
+            $policyTime = Carbon::createFromFormat('H:i', $standardTime);
+            $actualTime = Carbon::createFromFormat('H:i', $time);
+            $totalGapMins = $policyTime->diffInMinutes($actualTime);
+            
+            $bufferMins = (int) ($rt->early_check_in_buffer_minutes ?? 0);
+            $billableMins = max(0, $totalGapMins - $bufferMins);
+
+            if ($billableMins > 0) {
+                if ($rt->early_check_in_type === 'per_hour') {
+                    $billableHours = ceil($billableMins / 60);
+                    $fee = $billableHours * (float) $rt->early_check_in_fee;
+                    $units = "({$billableHours}h)";
+                } elseif ($rt->early_check_in_type === 'per_minute') {
+                    $fee = $billableMins * (float) $rt->early_check_in_fee;
+                    $units = "({$billableMins}m)";
+                } else { // flat_fee or other
+                    $fee = (float) $rt->early_check_in_fee;
+                }
+            }
+        }
+
+        if ($fee > 0) {
+            $auditMsg .= " Fee: ₹{$fee} {$units} applied.";
+        }
+        
         $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
 
         $booking->update([
             'early_checkin_time' => $time,
+            'extra_charges' => (float) ($booking->extra_charges ?? 0) + $fee,
             'notes' => $notes,
         ]);
 
@@ -825,10 +889,43 @@ class BookingController extends Controller
         $user = $request->user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
         $auditMsg = "[Late CO: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+
+        $rt = $booking->room?->roomType;
+        $standardTime = Setting::get('standard_check_out_time', '11:00');
+        $fee = 0;
+        $units = "";
+
+        if ($rt && $time > $standardTime) {
+            $policyTime = Carbon::createFromFormat('H:i', $standardTime);
+            $actualTime = Carbon::createFromFormat('H:i', $time);
+            $totalGapMins = $actualTime->diffInMinutes($policyTime);
+
+            $bufferMins = (int) ($rt->late_check_out_buffer_minutes ?? 0);
+            $billableMins = max(0, $totalGapMins - $bufferMins);
+
+            if ($billableMins > 0) {
+                if ($rt->late_check_out_type === 'per_hour') {
+                    $billableHours = ceil($billableMins / 60);
+                    $fee = $billableHours * (float) $rt->late_check_out_fee;
+                    $units = "({$billableHours}h)";
+                } elseif ($rt->late_check_out_type === 'per_minute') {
+                    $fee = $billableMins * (float) $rt->late_check_out_fee;
+                    $units = "({$billableMins}m)";
+                } else { // flat_fee
+                    $fee = (float) $rt->late_check_out_fee;
+                }
+            }
+        }
+
+        if ($fee > 0) {
+            $auditMsg .= " Fee: ₹{$fee} {$units} applied.";
+        }
+
         $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
 
         $booking->update([
             'late_checkout_time' => $time,
+            'extra_charges' => (float) ($booking->extra_charges ?? 0) + $fee,
             'notes' => $notes,
         ]);
 
@@ -1560,12 +1657,12 @@ class BookingController extends Controller
         $excludeRoomId = $request->exclude_room_id;
 
         $rooms = Room::with('roomType')
-            ->where('is_active', true)
+            ->where('is_active', '=', true)
             ->when($excludeRoomId, function ($q) use ($excludeRoomId) {
                 $q->where('id', '!=', $excludeRoomId);
             })
             ->when($typeId, function ($q) use ($typeId) {
-                $q->where('room_type_id', $typeId);
+                $q->where('room_type_id', '=', $typeId);
             })
             // Room type active is optional; keeping as extra safety
             ->whereHas('roomType', function ($q) {
