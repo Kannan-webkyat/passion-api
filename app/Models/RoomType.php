@@ -18,6 +18,10 @@ class RoomType extends Model
         'child_dinner_price',
         'child_age_limit',
         'extra_bed_cost',
+        'early_check_in_fee',
+        'early_check_in_type',
+        'late_check_out_fee',
+        'late_check_out_type',
         'base_occupancy',
         'capacity',
         'extra_bed_capacity',
@@ -36,6 +40,8 @@ class RoomType extends Model
         'child_lunch_price' => 'decimal:2',
         'adult_dinner_price' => 'decimal:2',
         'child_dinner_price' => 'decimal:2',
+        'early_check_in_fee' => 'decimal:2',
+        'late_check_out_fee' => 'decimal:2',
     ];
 
     public function rooms()
