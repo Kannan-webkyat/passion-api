@@ -52,7 +52,7 @@ class RoomStatusBlockController extends Controller
             'status' => 'required|in:maintenance,dirty,cleaning,on_hold',
             'start_date' => 'required|date',
             'end_date' => 'required|date|after:start_date',
-            'note' => $request->input('status') === 'on_hold'
+            'note' => in_array($request->input('status'), ['on_hold', 'maintenance'], true)
                 ? 'required|string|max:255'
                 : 'nullable|string|max:255',
         ]);
