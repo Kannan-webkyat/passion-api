@@ -45,4 +45,9 @@ class PosOrderItem extends Model
     {
         return $this->belongsTo(PosOrder::class, 'order_id');
     }
+
+    public function cancelledBy()
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
+    }
 }

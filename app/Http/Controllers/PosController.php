@@ -514,11 +514,1109 @@ class PosController extends Controller
     }
 
     /**
+     * POS refund register (audit / reconciliation): one row per refund.
+     *
+     * Query: from, to, restaurant_id (optional), page
+     */
+    public function refundsAdjustmentsReport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+            'page' => 'nullable|integer|min:1',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $restaurantId = $validated['restaurant_id'] ?? null;
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            return response()->json([
+                'summary' => ['entry_count' => 0, 'amount_total' => 0],
+                'data' => [],
+                'meta' => ['current_page' => 1, 'last_page' => 1, 'total' => 0],
+            ]);
+        }
+
+        $perPage = 50;
+
+        $base = PosOrderRefund::query()
+            ->whereHas('order', fn ($q) => $q->where('restaurant_id', (int) $restaurantId))
+            ->where(function ($q) use ($from, $to) {
+                $q->where(function ($q2) use ($from, $to) {
+                    $q2->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to);
+                })->orWhere(function ($legacy) use ($from, $to) {
+                    $legacy->whereNull('business_date')
+                        ->whereDate('refunded_at', '>=', $from)
+                        ->whereDate('refunded_at', '<=', $to);
+                });
+            });
+
+        $amountTotal = (float) (clone $base)->sum('amount');
+        $entryCount = (clone $base)->count();
+
+        $paginated = (clone $base)
+            ->with(['order.restaurant:id,name', 'order.waiter:id,name', 'refundedBy:id,name'])
+            ->orderByDesc('refunded_at')
+            ->orderByDesc('id')
+            ->paginate($perPage);
+
+        $data = collect($paginated->items())->map(function ($r) {
+            $o = $r->order;
+
+            return [
+                'id' => $r->id,
+                'order_id' => $r->order_id,
+                'refund_business_date' => $r->business_date?->format('Y-m-d'),
+                'refunded_at' => $r->refunded_at?->toDateTimeString(),
+                'amount' => (float) $r->amount,
+                'method' => $r->method,
+                'reference_no' => $r->reference_no,
+                'reason' => $r->reason,
+                'order_business_date' => $o?->business_date?->format('Y-m-d'),
+                'restaurant' => $o?->restaurant?->name ?? '—',
+                'customer_name' => $o?->customer_name ?? null,
+                'customer_gstin' => $o?->customer_gstin ?? null,
+                'waiter' => $o?->waiter?->name ?? '—',
+                'refunded_by' => $r->refundedBy?->name ?? '—',
+            ];
+        });
+
+        return response()->json([
+            'summary' => ['entry_count' => $entryCount, 'amount_total' => $amountTotal],
+            'data' => $data,
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'total' => $paginated->total(),
+            ],
+        ]);
+    }
+
+    /**
+     * Export refund register (CSV / PDF).
+     */
+    public function refundsAdjustmentsExport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $type = $request->query('type', 'csv');
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
+
+        $rows = PosOrderRefund::query()
+            ->whereHas('order', fn ($q) => $q->where('restaurant_id', (int) $restaurantId))
+            ->where(function ($q) use ($from, $to) {
+                $q->where(function ($q2) use ($from, $to) {
+                    $q2->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to);
+                })->orWhere(function ($legacy) use ($from, $to) {
+                    $legacy->whereNull('business_date')
+                        ->whereDate('refunded_at', '>=', $from)
+                        ->whereDate('refunded_at', '<=', $to);
+                });
+            })
+            ->with(['order.waiter:id,name', 'refundedBy:id,name'])
+            ->orderByDesc('refunded_at')
+            ->orderByDesc('id')
+            ->get();
+
+        if ($type === 'pdf') {
+            $pdf = Pdf::loadView('reports.refunds_adjustments', [
+                'rows' => $rows,
+                'restaurant' => $restaurant,
+                'from' => $from,
+                'to' => $to,
+            ]);
+
+            return $pdf->download("refund_register_{$from}_to_{$to}.pdf");
+        }
+
+        $fileName = "refund_register_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $columns = ['Refund ID', 'Order #', 'Customer Name', 'GSTIN', 'Refund date', 'Refunded at', 'Amount', 'Method', 'Reference', 'Reason', 'Order date', 'Staff', 'Refunded by'];
+        $callback = function () use ($rows, $columns) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $columns);
+            foreach ($rows as $r) {
+                $o = $r->order;
+                fputcsv($file, [
+                    $r->id,
+                    $r->order_id,
+                    $o?->customer_name ?? '—',
+                    $o?->customer_gstin ?? '—',
+                    $r->business_date?->format('Y-m-d') ?? '',
+                    $r->refunded_at?->format('Y-m-d H:i') ?? '',
+                    $r->amount,
+                    $r->method,
+                    $r->reference_no,
+                    $r->reason,
+                    $o?->business_date?->format('Y-m-d') ?? '',
+                    $o?->waiter?->name ?? '—',
+                    $r->refundedBy?->name ?? '—',
+                ]);
+            }
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Voids & discounts: void bills, void lines, or bill-level discounts (manager / LP review).
+     *
+     * Query: from, to, restaurant_id (optional), section=void_bills|void_items|discounts, page
+     */
+    public function voidsDiscountsReport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+            'section' => 'required|in:void_bills,void_items,discounts',
+            'page' => 'nullable|integer|min:1',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $section = $validated['section'];
+        $restaurantId = $validated['restaurant_id'] ?? null;
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            return response()->json([
+                'section' => $section,
+                'summary' => ['entry_count' => 0, 'amount_total' => 0],
+                'data' => [],
+                'meta' => ['current_page' => 1, 'last_page' => 1, 'total' => 0],
+            ]);
+        }
+
+        $perPage = 50;
+        $rid = (int) $restaurantId;
+
+        if ($section === 'void_bills') {
+            $base = PosOrder::query()
+                ->where('status', 'void')
+                ->where('restaurant_id', $rid)
+                ->where(function ($q) use ($from, $to) {
+                    $q->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to)
+                        ->orWhere(function ($sq) use ($from, $to) {
+                            $sq->whereDate('voided_at', '>=', $from)->whereDate('voided_at', '<=', $to);
+                        });
+                });
+
+            $amountTotal = (float) (clone $base)->sum('total_amount');
+            $entryCount = (clone $base)->count();
+
+            $paginated = (clone $base)
+                ->with(['restaurant:id,name', 'waiter:id,name', 'voidedBy:id,name'])
+                ->orderByDesc('voided_at')
+                ->orderByDesc('id')
+                ->paginate($perPage);
+
+            $dates = collect($paginated->items())->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
+            $closingMap = $this->posDayClosingMapForDates($rid, $dates);
+
+            $data = collect($paginated->items())->map(function ($o) use ($closingMap) {
+                $bd = $o->business_date?->format('Y-m-d');
+                $close = $bd ? ($closingMap[$bd] ?? null) : null;
+
+                return [
+                    'id' => $o->id,
+                    'business_date' => $bd,
+                    'voided_at' => $o->voided_at?->toDateTimeString(),
+                    'total_amount' => (float) $o->total_amount,
+                    'void_reason' => $o->void_reason,
+                    'void_notes' => $o->void_notes,
+                    'order_type' => $o->order_type ?? 'dine_in',
+                    'restaurant' => $o->restaurant?->name ?? '—',
+                    'waiter' => $o->waiter?->name ?? '—',
+                    'voided_by' => $o->voidedBy?->name ?? '—',
+                    'day_close_at' => $close['day_closed_at'] ?? null,
+                    'day_close_by' => $close['day_closed_by'] ?? null,
+                ];
+            });
+
+            return response()->json([
+                'section' => $section,
+                'summary' => ['entry_count' => $entryCount, 'amount_total' => $amountTotal],
+                'data' => $data,
+                'meta' => [
+                    'current_page' => $paginated->currentPage(),
+                    'last_page' => $paginated->lastPage(),
+                    'total' => $paginated->total(),
+                ],
+            ]);
+        }
+
+        if ($section === 'void_items') {
+            $base = PosOrderItem::query()
+                ->where('status', 'cancelled')
+                ->whereNotNull('cancelled_at')
+                ->whereHas('order', fn ($q) => $q->where('restaurant_id', $rid))
+                ->whereDate('cancelled_at', '>=', $from)
+                ->whereDate('cancelled_at', '<=', $to);
+
+            $amountTotal = (float) (clone $base)->sum('line_total');
+            $entryCount = (clone $base)->count();
+
+            $paginated = (clone $base)
+                ->with(['order', 'order.restaurant:id,name', 'order.waiter:id,name', 'menuItem:id,name', 'combo:id,name', 'cancelledBy:id,name'])
+                ->orderByDesc('cancelled_at')
+                ->orderByDesc('id')
+                ->paginate($perPage);
+
+            $orderDates = [];
+            foreach ($paginated->items() as $item) {
+                $bd = $item->order?->business_date?->format('Y-m-d');
+                if ($bd) {
+                    $orderDates[$bd] = true;
+                }
+            }
+            $closingMap = $this->posDayClosingMapForDates($rid, array_keys($orderDates));
+
+            $data = collect($paginated->items())->map(function ($item) use ($closingMap) {
+                $o = $item->order;
+                $lineName = $item->menuItem?->name ?? ($item->combo?->name ? 'Combo: '.$item->combo->name : '—');
+                $bd = $o?->business_date?->format('Y-m-d');
+                $close = $bd ? ($closingMap[$bd] ?? null) : null;
+
+                return [
+                    'id' => $item->id,
+                    'order_id' => $item->order_id,
+                    'cancelled_at' => $item->cancelled_at?->toDateTimeString(),
+                    'line_total' => (float) $item->line_total,
+                    'quantity' => (float) $item->quantity,
+                    'cancel_reason' => $item->cancel_reason,
+                    'cancel_notes' => $item->cancel_notes,
+                    'item_name' => $lineName,
+                    'business_date' => $bd,
+                    'restaurant' => $o?->restaurant?->name ?? '—',
+                    'waiter' => $o?->waiter?->name ?? '—',
+                    'cancelled_by' => $item->cancelledBy?->name ?? '—',
+                    'day_close_at' => $close['day_closed_at'] ?? null,
+                    'day_close_by' => $close['day_closed_by'] ?? null,
+                ];
+            });
+
+            return response()->json([
+                'section' => $section,
+                'summary' => ['entry_count' => $entryCount, 'amount_total' => $amountTotal],
+                'data' => $data,
+                'meta' => [
+                    'current_page' => $paginated->currentPage(),
+                    'last_page' => $paginated->lastPage(),
+                    'total' => $paginated->total(),
+                ],
+            ]);
+        }
+
+        // discounts
+        $base = PosOrder::query()
+            ->whereIn('status', ['paid', 'refunded'])
+            ->where('restaurant_id', $rid)
+            ->where(function ($q) {
+                $q->where('discount_amount', '>', 0.005)
+                    ->orWhere('is_complimentary', true);
+            })
+            ->where(function ($q) use ($from, $to) {
+                $q->where(function ($q2) use ($from, $to) {
+                    $q2->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to);
+                })->orWhere(function ($sq) use ($from, $to) {
+                    $sq->whereDate('closed_at', '>=', $from)->whereDate('closed_at', '<=', $to);
+                });
+            });
+
+        $amountTotal = (float) (clone $base)->sum('discount_amount');
+        $entryCount = (clone $base)->count();
+
+        $paginated = (clone $base)
+            ->with(['restaurant:id,name', 'waiter:id,name', 'discountApprovedBy:id,name'])
+            ->orderByDesc('closed_at')
+            ->orderByDesc('id')
+            ->paginate($perPage);
+
+        $dates = collect($paginated->items())->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
+        $closingMap = $this->posDayClosingMapForDates($rid, $dates);
+
+        $data = collect($paginated->items())->map(function ($o) use ($closingMap) {
+            $bd = $o->business_date?->format('Y-m-d');
+            $close = $bd ? ($closingMap[$bd] ?? null) : null;
+
+            return [
+                'id' => $o->id,
+                'business_date' => $bd,
+                'closed_at' => $o->closed_at?->toDateTimeString(),
+                'discount_amount' => (float) $o->discount_amount,
+                'discount_type' => $o->discount_type,
+                'discount_value' => (float) ($o->discount_value ?? 0),
+                'is_complimentary' => (bool) $o->is_complimentary,
+                'bill_total' => (float) $o->total_amount,
+                'order_type' => $o->order_type ?? 'dine_in',
+                'restaurant' => $o->restaurant?->name ?? '—',
+                'waiter' => $o->waiter?->name ?? '—',
+                'approved_by' => $o->discountApprovedBy?->name ?? '—',
+                'approved_at' => $o->discount_approved_at?->toDateTimeString(),
+                'day_close_at' => $close['day_closed_at'] ?? null,
+                'day_close_by' => $close['day_closed_by'] ?? null,
+            ];
+        });
+
+        return response()->json([
+            'section' => $section,
+            'summary' => ['entry_count' => $entryCount, 'amount_total' => $amountTotal],
+            'data' => $data,
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'total' => $paginated->total(),
+            ],
+        ]);
+    }
+
+    /**
+     * Export voids & discounts (CSV / PDF).
+     */
+    public function voidsDiscountsExport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $section = $request->query('section', 'void_bills');
+        $type = $request->query('type', 'csv');
+
+        if (! in_array($section, ['void_bills', 'void_items', 'discounts'], true)) {
+            abort(422, 'Invalid section.');
+        }
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
+        $rid = (int) $restaurantId;
+
+        if ($section === 'void_bills') {
+            $rows = PosOrder::query()
+                ->where('status', 'void')
+                ->where('restaurant_id', $rid)
+                ->where(function ($q) use ($from, $to) {
+                    $q->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to)
+                        ->orWhere(function ($sq) use ($from, $to) {
+                            $sq->whereDate('voided_at', '>=', $from)->whereDate('voided_at', '<=', $to);
+                        });
+                })
+                ->with(['waiter:id,name', 'voidedBy:id,name'])
+                ->orderByDesc('voided_at')
+                ->orderByDesc('id')
+                ->get();
+        } elseif ($section === 'void_items') {
+            $rows = PosOrderItem::query()
+                ->where('status', 'cancelled')
+                ->whereNotNull('cancelled_at')
+                ->whereHas('order', fn ($q) => $q->where('restaurant_id', $rid))
+                ->whereDate('cancelled_at', '>=', $from)
+                ->whereDate('cancelled_at', '<=', $to)
+                ->with(['order', 'order.waiter:id,name', 'menuItem:id,name', 'combo:id,name', 'cancelledBy:id,name'])
+                ->orderByDesc('cancelled_at')
+                ->orderByDesc('id')
+                ->get();
+        } else {
+            $rows = PosOrder::query()
+                ->whereIn('status', ['paid', 'refunded'])
+                ->where('restaurant_id', $rid)
+                ->where(function ($q) {
+                    $q->where('discount_amount', '>', 0.005)
+                        ->orWhere('is_complimentary', true);
+                })
+                ->where(function ($q) use ($from, $to) {
+                    $q->where(function ($q2) use ($from, $to) {
+                        $q2->whereDate('business_date', '>=', $from)->whereDate('business_date', '<=', $to);
+                    })->orWhere(function ($sq) use ($from, $to) {
+                        $sq->whereDate('closed_at', '>=', $from)->whereDate('closed_at', '<=', $to);
+                    });
+                })
+                ->with(['waiter:id,name', 'discountApprovedBy:id,name'])
+                ->orderByDesc('closed_at')
+                ->orderByDesc('id')
+                ->get();
+        }
+
+        if ($type === 'pdf') {
+            $closingMap = [];
+            if ($section === 'void_bills' || $section === 'discounts') {
+                $dates = $rows->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
+                $closingMap = $this->posDayClosingMapForDates($rid, $dates);
+            } elseif ($section === 'void_items') {
+                $orderDates = [];
+                foreach ($rows as $item) {
+                    $bd = $item->order?->business_date?->format('Y-m-d');
+                    if ($bd) {
+                        $orderDates[$bd] = true;
+                    }
+                }
+                $closingMap = $this->posDayClosingMapForDates($rid, array_keys($orderDates));
+            }
+
+            $pdf = Pdf::loadView('reports.voids_discounts', [
+                'rows' => $rows,
+                'restaurant' => $restaurant,
+                'from' => $from,
+                'to' => $to,
+                'section' => $section,
+                'closingMap' => $closingMap,
+            ]);
+
+            return $pdf->download("voids_discounts_{$section}_{$from}_to_{$to}.pdf");
+        }
+
+        $fileName = "voids_discounts_{$section}_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        if ($section === 'void_bills') {
+            $dates = $rows->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
+            $closingMap = $this->posDayClosingMapForDates($rid, $dates);
+            $columns = ['Bill #', 'Business date', 'Voided at', 'Amount', 'Type', 'Reason', 'Notes', 'Staff', 'Voided by', 'Day close at', 'Day close by'];
+            $callback = function () use ($rows, $columns, $closingMap) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $columns);
+                foreach ($rows as $o) {
+                    $bd = $o->business_date?->format('Y-m-d');
+                    $close = $bd ? ($closingMap[$bd] ?? null) : null;
+                    fputcsv($file, [
+                        $o->id,
+                        $o->business_date?->format('Y-m-d') ?? '',
+                        $o->voided_at?->format('Y-m-d H:i') ?? '',
+                        $o->total_amount,
+                        $o->order_type ?? '',
+                        $o->void_reason,
+                        $o->void_notes,
+                        $o->waiter?->name ?? '—',
+                        $o->voidedBy?->name ?? '—',
+                        $close['day_closed_at'] ?? '',
+                        $close['day_closed_by'] ?? '',
+                    ]);
+                }
+                fclose($file);
+            };
+        } elseif ($section === 'void_items') {
+            $orderDates = [];
+            foreach ($rows as $item) {
+                $bd = $item->order?->business_date?->format('Y-m-d');
+                if ($bd) {
+                    $orderDates[$bd] = true;
+                }
+            }
+            $closingMap = $this->posDayClosingMapForDates($rid, array_keys($orderDates));
+            $columns = ['Item ID', 'Order #', 'Business date', 'Cancelled at', 'Item', 'Qty', 'Line total', 'Reason', 'Notes', 'Staff', 'Cancelled by', 'Day close at', 'Day close by'];
+            $callback = function () use ($rows, $columns, $closingMap) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $columns);
+                foreach ($rows as $item) {
+                    $o = $item->order;
+                    $lineName = $item->menuItem?->name ?? ($item->combo?->name ? 'Combo: '.$item->combo->name : '—');
+                    $bd = $o?->business_date?->format('Y-m-d');
+                    $close = $bd ? ($closingMap[$bd] ?? null) : null;
+                    fputcsv($file, [
+                        $item->id,
+                        $item->order_id,
+                        $bd ?? '',
+                        $item->cancelled_at?->format('Y-m-d H:i') ?? '',
+                        $lineName,
+                        $item->quantity,
+                        $item->line_total,
+                        $item->cancel_reason,
+                        $item->cancel_notes,
+                        $o?->waiter?->name ?? '—',
+                        $item->cancelledBy?->name ?? '—',
+                        $close['day_closed_at'] ?? '',
+                        $close['day_closed_by'] ?? '',
+                    ]);
+                }
+                fclose($file);
+            };
+        } else {
+            $dates = $rows->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
+            $closingMap = $this->posDayClosingMapForDates($rid, $dates);
+            $columns = ['Bill #', 'Business date', 'Closed at', 'Discount', 'Type', 'Value', 'Complimentary', 'Bill total', 'Order type', 'Staff', 'Approved by', 'Approved at', 'Day close at', 'Day close by'];
+            $callback = function () use ($rows, $columns, $closingMap) {
+                $file = fopen('php://output', 'w');
+                fputcsv($file, $columns);
+                foreach ($rows as $o) {
+                    $bd = $o->business_date?->format('Y-m-d');
+                    $close = $bd ? ($closingMap[$bd] ?? null) : null;
+                    fputcsv($file, [
+                        $o->id,
+                        $o->business_date?->format('Y-m-d') ?? '',
+                        $o->closed_at?->format('Y-m-d H:i') ?? '',
+                        $o->discount_amount,
+                        $o->discount_type,
+                        $o->discount_value,
+                        $o->is_complimentary ? 'yes' : 'no',
+                        $o->total_amount,
+                        $o->order_type ?? '',
+                        $o->waiter?->name ?? '—',
+                        $o->discountApprovedBy?->name ?? '—',
+                        $o->discount_approved_at?->format('Y-m-d H:i') ?? '',
+                        $close['day_closed_at'] ?? '',
+                        $close['day_closed_by'] ?? '',
+                    ]);
+                }
+                fclose($file);
+            };
+        }
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Order-type mix: counts and revenue by dine-in / takeaway / delivery / room service / walk-in.
+     *
+     * Gross = paid + refunded bills on business_date in range (same basis as sales summary).
+     * Refunds = pos_order_refunds in range (by refund business_date), attributed to the order's type.
+     */
+    public function orderTypeMixReport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $restaurantId = $validated['restaurant_id'] ?? null;
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            return response()->json([
+                'by_type' => [],
+                'totals' => [
+                    'orders_count' => 0,
+                    'gross_revenue' => 0.0,
+                    'refunded_amount' => 0.0,
+                    'net_revenue' => 0.0,
+                ],
+            ]);
+        }
+
+        $payload = $this->buildOrderTypeMixData((int) $restaurantId, $from, $to);
+
+        return response()->json($payload);
+    }
+
+    public function orderTypeMixExport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $type = $request->query('type', 'csv');
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
+        $payload = $this->buildOrderTypeMixData((int) $restaurantId, $from, $to);
+
+        if ($type === 'pdf') {
+            $pdf = Pdf::loadView('reports.order_type_mix', [
+                'restaurant' => $restaurant,
+                'from' => $from,
+                'to' => $to,
+                'by_type' => $payload['by_type'],
+                'totals' => $payload['totals'],
+            ]);
+
+            return $pdf->download("order_type_mix_{$from}_to_{$to}.pdf");
+        }
+
+        $fileName = "order_type_mix_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $callback = function () use ($payload) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, ['Order type', 'Bills', 'Gross revenue', 'Refunds', 'Net revenue', 'Share of net %']);
+            $netTotal = max(0.01, (float) ($payload['totals']['net_revenue'] ?? 0));
+            foreach ($payload['by_type'] as $row) {
+                $net = (float) ($row['net_revenue'] ?? 0);
+                $pct = $netTotal > 0 ? round(100 * $net / $netTotal, 1) : 0.0;
+                fputcsv($file, [
+                    $row['order_type'],
+                    $row['orders_count'],
+                    $row['gross_revenue'],
+                    $row['refunded_amount'],
+                    $row['net_revenue'],
+                    $pct,
+                ]);
+            }
+            fputcsv($file, ['TOTAL', $payload['totals']['orders_count'], $payload['totals']['gross_revenue'], $payload['totals']['refunded_amount'], $payload['totals']['net_revenue'], '']);
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Menu / item performance: sold qty and revenue by menu item (incl. variant) and by combo.
+     *
+     * Uses paid & refunded orders on business_date; only active (non–void) lines.
+     */
+    public function menuPerformanceReport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+            'page' => 'nullable|integer|min:1',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $page = (int) ($validated['page'] ?? 1);
+        $restaurantId = $validated['restaurant_id'] ?? null;
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            return response()->json([
+                'summary' => [
+                    'sku_rows' => 0,
+                    'qty_sold' => 0,
+                    'revenue' => 0.0,
+                    'bills_with_sales' => 0,
+                ],
+                'data' => [],
+                'meta' => ['current_page' => 1, 'last_page' => 1, 'total' => 0],
+            ]);
+        }
+
+        $rid = (int) $restaurantId;
+        $rows = $this->buildMenuPerformanceRows($rid, $from, $to);
+        $summary = $this->buildMenuPerformanceSummary($rid, $from, $to, $rows);
+
+        $perPage = 50;
+        $total = $rows->count();
+        $lastPage = max(1, (int) ceil($total / $perPage));
+        $page = min(max(1, $page), $lastPage);
+        $slice = $rows->slice(($page - 1) * $perPage, $perPage)->values();
+
+        $data = $slice->map(function ($r) {
+            $name = (string) ($r->name ?? '');
+            $variant = trim((string) ($r->variant_label ?? ''));
+            $display = $variant !== '' ? $name.' — '.$variant : $name;
+            if (($r->row_kind ?? '') === 'combo') {
+                $display = 'Combo: '.$name;
+            }
+
+            return [
+                'row_kind' => $r->row_kind,
+                'menu_item_id' => $r->menu_item_id ? (int) $r->menu_item_id : null,
+                'combo_id' => $r->combo_id ? (int) $r->combo_id : null,
+                'variant_id' => isset($r->variant_id) && $r->variant_id !== null ? (int) $r->variant_id : null,
+                'category' => (string) ($r->category_name ?? '—'),
+                'name' => $name,
+                'variant_label' => $variant !== '' ? $variant : null,
+                'display_name' => $display,
+                'qty_sold' => (float) $r->qty_sold,
+                'revenue' => round((float) $r->revenue, 2),
+                'lines_sold' => (int) $r->lines_sold,
+                'bills_count' => (int) $r->bills_count,
+            ];
+        });
+
+        return response()->json([
+            'summary' => $summary,
+            'data' => $data,
+            'meta' => [
+                'current_page' => $page,
+                'last_page' => $lastPage,
+                'total' => $total,
+            ],
+        ]);
+    }
+
+    public function menuPerformanceExport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $type = $request->query('type', 'csv');
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
+        $rows = $this->buildMenuPerformanceRows((int) $restaurantId, $from, $to);
+        $summary = $this->buildMenuPerformanceSummary((int) $restaurantId, $from, $to, $rows);
+
+        if ($type === 'pdf') {
+            $pdf = Pdf::loadView('reports.menu_performance', [
+                'restaurant' => $restaurant,
+                'from' => $from,
+                'to' => $to,
+                'rows' => $rows,
+                'summary' => $summary,
+            ]);
+
+            return $pdf->download("menu_performance_{$from}_to_{$to}.pdf");
+        }
+
+        $fileName = "menu_performance_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $callback = function () use ($rows, $summary) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, ['Category', 'Item / combo', 'Qty sold', 'Revenue', 'POS lines', 'Bills']);
+            foreach ($rows as $r) {
+                $name = (string) ($r->name ?? '');
+                $variant = trim((string) ($r->variant_label ?? ''));
+                $itemCol = ($r->row_kind ?? '') === 'combo'
+                    ? 'Combo: '.$name
+                    : ($variant !== '' ? $name.' — '.$variant : $name);
+                fputcsv($file, [
+                    (string) ($r->category_name ?? '—'),
+                    $itemCol,
+                    $r->qty_sold,
+                    round((float) $r->revenue, 2),
+                    $r->lines_sold,
+                    $r->bills_count,
+                ]);
+            }
+            fputcsv($file, [
+                'TOTAL',
+                $summary['sku_rows'].' SKUs',
+                $summary['qty_sold'],
+                $summary['revenue'],
+                '',
+                $summary['bills_with_sales'].' distinct bills',
+            ]);
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Tax / GST summary: taxable value and tax by slab (matches POS bill math incl. discount & inclusive/exclusive prices).
+     * Excludes complimentary bills. Paid + refunded on business_date.
+     */
+    public function taxGstSummaryReport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $restaurantId = $validated['restaurant_id'] ?? null;
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            return response()->json([
+                'summary' => [
+                    'taxable_value' => 0.0,
+                    'tax_amount' => 0.0,
+                    'bills_count' => 0,
+                    'bucket_count' => 0,
+                ],
+                'data' => [],
+            ]);
+        }
+
+        $payload = $this->buildTaxGstSummaryData((int) $restaurantId, $from, $to);
+
+        return response()->json([
+            'summary' => $payload['totals'],
+            'data' => $payload['by_rate'],
+        ]);
+    }
+
+    public function taxGstSummaryExport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $type = $request->query('type', 'csv');
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
+        $payload = $this->buildTaxGstSummaryData((int) $restaurantId, $from, $to);
+
+        if ($type === 'pdf') {
+            $pdf = Pdf::loadView('reports.tax_gst_summary', [
+                'restaurant' => $restaurant,
+                'from' => $from,
+                'to' => $to,
+                'rows' => $payload['by_rate'],
+                'totals' => $payload['totals'],
+            ]);
+
+            return $pdf->download("tax_gst_summary_{$from}_to_{$to}.pdf");
+        }
+
+        $fileName = "tax_gst_summary_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $callback = function () use ($payload) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, ['Rate %', 'Tax label', 'Taxable value', 'Tax amount', 'POS lines']);
+            foreach ($payload['by_rate'] as $row) {
+                fputcsv($file, [
+                    $row['rate'],
+                    $row['tax_label'],
+                    $row['taxable_value'],
+                    $row['tax_amount'],
+                    $row['line_count'],
+                ]);
+            }
+            fputcsv($file, [
+                '',
+                'TOTAL',
+                $payload['totals']['taxable_value'],
+                $payload['totals']['tax_amount'],
+                '',
+            ]);
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
      * Export Sales Report (CSV/PDF)
      */
     public function salesReportExport(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('view-reports');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -539,14 +1637,14 @@ class PosController extends Controller
                       $sq->where('status', 'void')->whereDate('voided_at', '>=', $from)->whereDate('voided_at', '<=', $to);
                   });
             })
-            ->with(['waiter:id,name', 'refunds', 'restaurant:id,name'])
+            ->with(['waiter:id,name', 'refunds', 'restaurant:id,name', 'payments'])
             ->orderBy('id', 'desc')
             ->get();
 
         if ($type === 'pdf') {
             $summary = [
                 'count' => $orders->count(),
-                'net' => $orders->sum('total_amount'),
+                'net' => $orders->where('status', '!=', 'void')->sum('total_amount'),
                 'refunds' => $orders->map(fn($o) => $o->refunds->sum('amount'))->sum(),
             ];
             $pdf = Pdf::loadView('reports.sales', [
@@ -569,25 +1667,97 @@ class PosController extends Controller
             "Expires"             => "0"
         ];
 
-        $columns = ['Bill #', 'Date', 'Staff', 'Outlet', 'Type', 'Status', 'Amount', 'Refunded'];
+        $columns = [
+            'Bill #', 'Date', 'Outlet', 'Customer Name', 'GSTIN', 'Status', 
+            'Gross / Subtotal', 'Discount', 'Tax', 'Srv Chg', 'Tips', 
+            'Net Total', 'Refunded', 'Payment Method', 'Staff', 'Order Type'
+        ];
 
         $callback = function() use($orders, $columns) {
             $file = fopen('php://output', 'w');
             fputcsv($file, $columns);
 
             foreach ($orders as $o) {
+                $paymentModes = $o->payments->pluck('method')->map(function($m) {
+                    return ucfirst($m);
+                })->implode(' + ');
+
+                if (empty($paymentModes)) {
+                    $paymentModes = $o->status === 'void' ? '—' : 'Missing';
+                }
+
                 fputcsv($file, [
                     '#' . $o->id,
                     $o->business_date . ' ' . ($o->closed_at ?: $o->voided_at),
-                    $o->waiter?->name ?? '—',
                     $o->restaurant?->name ?? '—',
-                    $o->order_type ?? 'dine_in',
+                    $o->customer_name ?? '—',
+                    $o->customer_gstin ?? '—',
                     $o->status,
+                    $o->subtotal,
+                    $o->discount_amount,
+                    $o->tax_amount,
+                    $o->service_charge_amount,
+                    $o->tip_amount,
                     $o->total_amount,
-                    $o->refunds->sum('amount')
+                    $o->refunds->sum('amount'),
+                    $paymentModes,
+                    $o->waiter?->name ?? '—',
+                    $o->order_type ?? 'dine_in'
                 ]);
             }
+            fclose($file);
+        };
 
+        return response()->stream($callback, 200, $headers);
+    }
+
+    public function b2bSalesReportExport(Request $request)
+    {
+        $this->checkPermission('view-reports');
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+
+        $query = PosOrder::whereIn('status', ['paid', 'refunded'])
+            ->whereNotNull('customer_gstin')
+            ->where('customer_gstin', '!=', '')
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to)
+            ->with(['restaurant:id,name']);
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int)$restaurantId);
+            $query->where('restaurant_id', $restaurantId);
+        }
+
+        $orders = $query->orderBy('id', 'desc')->get();
+
+        $fileName = "b2b_sales_report_{$from}_to_{$to}.csv";
+        $headers = [
+            "Content-type"        => "text/csv",
+            "Content-Disposition" => "attachment; filename=$fileName",
+            "Pragma"              => "no-cache",
+            "Cache-Control"       => "must-revalidate, post-check=0, pre-check=0",
+            "Expires"             => "0"
+        ];
+
+        $columns = ['Bill #', 'Date', 'Customer', 'GSTIN', 'Outlet', 'Taxable Value', 'Tax Amount', 'Total Amount'];
+
+        $callback = function() use($orders, $columns) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $columns);
+            foreach ($orders as $o) {
+                fputcsv($file, [
+                    '#' . $o->id,
+                    $o->business_date,
+                    $o->customer_name ?? '—',
+                    $o->customer_gstin ?? '—',
+                    $o->restaurant?->name ?? '—',
+                    round($o->total_amount - $o->tax_amount, 2),
+                    round($o->tax_amount, 2),
+                    round($o->total_amount, 2)
+                ]);
+            }
             fclose($file);
         };
 
@@ -1130,12 +2300,12 @@ class PosController extends Controller
         if ($duplicateOrder) {
             $this->broadcastPosOutletUpdate((int) $duplicateOrder->restaurant_id, (int) $duplicateOrder->id);
 
-            return response()->json($this->formatOrder($duplicateOrder->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy', 'voidedBy')));
+            return response()->json($this->formatOrder($duplicateOrder->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
         }
 
         $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy', 'voidedBy')), 201);
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')), 201);
     }
 
     // ── Order history (paid orders for reprint) ─────────────────────────────────
@@ -1202,7 +2372,7 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         $this->authorizeOrderAccess($order);
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Update order details (customer, covers) ─────────────────────────────────
@@ -1261,7 +2431,7 @@ class PosController extends Controller
         }
 
         if (empty($updates)) {
-            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+            return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
         }
 
         $order->update($updates);
@@ -1273,7 +2443,7 @@ class PosController extends Controller
 
         $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Transfer order to another table (dine-in only) ────────────────────────
@@ -1352,7 +2522,7 @@ class PosController extends Controller
 
         $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
 
-        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Sync order items (replace all) ────────────────────────────────────────
@@ -1408,7 +2578,7 @@ class PosController extends Controller
                     throw new \Illuminate\Http\Exceptions\HttpResponseException(
                         response()->json([
                             'message' => 'This order was modified by another terminal. Please reload to see the latest changes.',
-                            'order' => $this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')),
+                            'order' => $this->formatOrder($order->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')),
                         ], 409)
                     );
                 }
@@ -1792,7 +2962,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Send KOT ──────────────────────────────────────────────────────────────
@@ -1896,7 +3066,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Merge checks (combine table orders) ───────────────────────────────────
@@ -2053,7 +3223,7 @@ class PosController extends Controller
 
         // Return merged order in the standard order payload shape (same as GET /pos/orders/:id).
         // This keeps the client logic consistent (`items` always present).
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     /**
@@ -2109,7 +3279,7 @@ class PosController extends Controller
             }
         });
 
-        $fresh = $order->fresh()->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy');
+        $fresh = $order->fresh()->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy');
 
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
@@ -2154,7 +3324,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Settle / Pay ──────────────────────────────────────────────────────────
@@ -2256,6 +3426,19 @@ class PosController extends Controller
             $this->recalculate($order);
             $order->refresh();
 
+            if ((float) $order->discount_amount >= 0.01 || $order->is_complimentary) {
+                $order->update([
+                    'discount_approved_by' => auth()->id(),
+                    'discount_approved_at' => now(),
+                ]);
+            } else {
+                $order->update([
+                    'discount_approved_by' => null,
+                    'discount_approved_at' => null,
+                ]);
+            }
+            $order->refresh();
+
             $paymentsTotal = collect($validated['payments'] ?? [])->sum('amount');
             if (! $isComplimentary && $paymentsTotal < $order->total_amount - 0.01) {
                 throw new \Illuminate\Http\Exceptions\HttpResponseException(
@@ -2305,7 +3488,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     public function reopen(PosOrder $order)
@@ -2346,7 +3529,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Void ──────────────────────────────────────────────────────────────────
@@ -2482,10 +3665,10 @@ class PosController extends Controller
                 }
 
                 if ($qtyToVoidThisRow < $item->quantity) {
-                    // Partially void: Split row
+                    // Partially void: Split row (schema uses line_total, not total_price)
                     $cancelItem = $item->replicate();
                     $cancelItem->quantity = $qtyToVoidThisRow;
-                    $cancelItem->total_price = round(($item->total_price / $item->quantity) * $qtyToVoidThisRow, 2);
+                    $cancelItem->line_total = round(((float) $item->line_total / (float) $item->quantity) * $qtyToVoidThisRow, 2);
                     $cancelItem->status = 'cancelled';
                     $cancelItem->cancel_reason = $validated['cancel_reason'];
                     $cancelItem->cancel_notes = $validated['cancel_notes'] ?? null;
@@ -2495,7 +3678,7 @@ class PosController extends Controller
 
                     // Reduce original active row
                     $item->quantity -= $qtyToVoidThisRow;
-                    $item->total_price -= $cancelItem->total_price;
+                    $item->line_total = round((float) $item->line_total - (float) $cancelItem->line_total, 2);
                     $item->save();
 
                     $processItem = $cancelItem;
@@ -2531,7 +3714,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Refund (paid orders) ───────────────────────────────────────────────────
@@ -2615,7 +3798,7 @@ class PosController extends Controller
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
-        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'refunds', 'room', 'table', 'waiter', 'openedBy', 'voidedBy')));
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'refunds', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
     // ── Kitchen Display ───────────────────────────────────────────────────────
@@ -3612,28 +4795,9 @@ class PosController extends Controller
         $totalNetTaxable = 0.0;
 
         foreach ($activeItems as $i) {
-            $effGross = floatval($i->line_total) * (1 - $discountRatio);
-            $r = floatval($i->tax_rate);
-            
-            if ($order->tax_exempt || $order->is_complimentary) {
-                // If tax exempt, the whole effective amount is net taxable base
-                $totalTaxAmount += 0.0;
-                $totalNetTaxable += $effGross;
-            } else {
-                if ($this->linePriceTaxInclusive($i, $order)) {
-                    // Extraction: Base = Gross / (1 + r/100)
-                    $lineTax = $r > 0 ? $effGross * ($r / (100 + $r)) : 0;
-                    $lineNet = $effGross - $lineTax;
-                    $totalTaxAmount += $lineTax;
-                    $totalNetTaxable += $lineNet;
-                } else {
-                    // Addition: Tax = Base * r/100
-                    $lineTax = $effGross * ($r / 100);
-                    $lineNet = $effGross;
-                    $totalTaxAmount += $lineTax;
-                    $totalNetTaxable += $lineNet;
-                }
-            }
+            [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
+            $totalTaxAmount += $lineTax;
+            $totalNetTaxable += $lineNet;
         }
 
         // 4. Other charges (Service Charge, Tips, Delivery)
@@ -3683,6 +4847,50 @@ class PosController extends Controller
             'rounding_amount' => 0,
             'total_amount' => $finalTotal,
         ]);
+    }
+
+    /**
+     * Tax amount and net taxable base for one line after bill-level discount ratio (same rules as receipts).
+     *
+     * @return array{0: float, 1: float} [tax_amount, net_taxable]
+     */
+    private function posLineTaxAndNetTaxable(PosOrderItem $i, PosOrder $order, float $discountRatio): array
+    {
+        $effGross = floatval($i->line_total) * (1 - $discountRatio);
+        $r = floatval($i->tax_rate);
+
+        if ($order->tax_exempt || $order->is_complimentary) {
+            return [0.0, $effGross];
+        }
+
+        if ($this->linePriceTaxInclusive($i, $order)) {
+            $lineTax = $r > 0 ? $effGross * ($r / (100 + $r)) : 0;
+            $lineNet = $effGross - $lineTax;
+
+            return [$lineTax, $lineNet];
+        }
+
+        $lineTax = $effGross * ($r / 100);
+        $lineNet = $effGross;
+
+        return [$lineTax, $lineNet];
+    }
+
+    private function resolvePosLineTaxLabel(PosOrderItem $i, float $rate): string
+    {
+        if ($i->menu_item_id && $i->relationLoaded('menuItem') && $i->menuItem?->tax) {
+            return (string) $i->menuItem->tax->name;
+        }
+        if ($i->combo_id) {
+            $rStr = rtrim(rtrim(number_format($rate, 2, '.', ''), '0'), '.');
+
+            return 'Combo (blended'.($rStr !== '' && (float) $rStr > 0 ? ' @ '.$rStr.'%' : '').')';
+        }
+        if ($rate <= 0) {
+            return 'Nil rate';
+        }
+
+        return 'GST '.number_format($rate, 2).'%';
     }
 
     /** Per-line sell price includes tax (restaurant_menu_items / snapshot); falls back to order outlet default. */
@@ -3792,6 +5000,9 @@ class PosController extends Controller
             'rounding_amount' => (float) ($order->rounding_amount ?? 0),
             'delivery_charge' => (float) ($order->delivery_charge ?? 0),
             'is_complimentary' => (bool) $order->is_complimentary,
+            'discount_approved_by' => $order->discount_approved_by,
+            'discount_approved_by_user' => $order->discountApprovedBy ? ['id' => $order->discountApprovedBy->id, 'name' => $order->discountApprovedBy->name] : null,
+            'discount_approved_at' => $order->discount_approved_at?->toIso8601String(),
             'updated_at' => $order->updated_at?->toIso8601String(),
             'total_amount' => (float) $order->total_amount,
             'opened_at' => $order->opened_at,
@@ -3861,6 +5072,292 @@ class PosController extends Controller
                 'refunded_at' => $r->refunded_at,
             ]),
             'refunded_amount' => (float) $order->refunds->sum('amount'),
+        ];
+    }
+
+    /**
+     * @param  array<int, string>  $datesYmd
+     * @return array<string, array{day_closed_at: ?string, day_closed_by: string}>
+     */
+    private function posDayClosingMapForDates(int $restaurantId, array $datesYmd): array
+    {
+        if ($datesYmd === []) {
+            return [];
+        }
+
+        $rows = PosDayClosing::query()
+            ->where('restaurant_id', $restaurantId)
+            ->whereIn('closed_date', $datesYmd)
+            ->with('closedByUser:id,name')
+            ->get();
+
+        $map = [];
+        foreach ($rows as $c) {
+            $key = $c->closed_date instanceof \Carbon\CarbonInterface
+                ? $c->closed_date->format('Y-m-d')
+                : (string) $c->closed_date;
+            $map[$key] = [
+                'day_closed_at' => $c->closed_at?->toDateTimeString(),
+                'day_closed_by' => $c->closedByUser?->name ?? '—',
+            ];
+        }
+
+        return $map;
+    }
+
+    /**
+     * @return array{by_type: list<array{order_type: string, orders_count: int, gross_revenue: float, refunded_amount: float, net_revenue: float}>, totals: array{orders_count: int, gross_revenue: float, refunded_amount: float, net_revenue: float}}
+     */
+    private function buildOrderTypeMixData(int $restaurantId, string $from, string $to): array
+    {
+        $grossRows = DB::table('pos_orders')
+            ->whereIn('status', ['paid', 'refunded'])
+            ->where('restaurant_id', $restaurantId)
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to)
+            ->select(
+                DB::raw('COALESCE(order_type, \'dine_in\') as order_type'),
+                DB::raw('COUNT(*) as orders_count'),
+                DB::raw('SUM(total_amount) as gross_revenue')
+            )
+            ->groupBy(DB::raw('COALESCE(order_type, \'dine_in\')'))
+            ->get();
+
+        $gross = $grossRows->keyBy('order_type');
+
+        $refundRows = DB::table('pos_order_refunds')
+            ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
+            ->where('pos_orders.restaurant_id', $restaurantId)
+            ->whereDate('pos_order_refunds.business_date', '>=', $from)
+            ->whereDate('pos_order_refunds.business_date', '<=', $to)
+            ->select(
+                DB::raw('COALESCE(pos_orders.order_type, \'dine_in\') as order_type'),
+                DB::raw('SUM(pos_order_refunds.amount) as refund_amount')
+            )
+            ->groupBy(DB::raw('COALESCE(pos_orders.order_type, \'dine_in\')'))
+            ->get();
+
+        $refunds = $refundRows->pluck('refund_amount', 'order_type')->map(fn ($v) => (float) $v);
+
+        $preferredOrder = ['dine_in', 'takeaway', 'delivery', 'room_service', 'walk_in'];
+        $keys = $gross->keys()->merge($refunds->keys())->unique()->values();
+        $orderedTypes = [];
+        foreach ($preferredOrder as $p) {
+            if ($keys->contains($p)) {
+                $orderedTypes[] = $p;
+            }
+        }
+        foreach ($keys->sort()->values() as $k) {
+            if (! in_array($k, $orderedTypes, true)) {
+                $orderedTypes[] = $k;
+            }
+        }
+
+        $byType = [];
+        $totOrders = 0;
+        $totGross = 0.0;
+        $totRef = 0.0;
+        $totNet = 0.0;
+
+        foreach ($orderedTypes as $type) {
+            $row = $gross->get($type);
+            $ordersCount = $row ? (int) $row->orders_count : 0;
+            $grossRev = $row ? (float) $row->gross_revenue : 0.0;
+            $refAmt = (float) ($refunds[$type] ?? 0);
+            $netRev = $grossRev - $refAmt;
+
+            $byType[] = [
+                'order_type' => $type,
+                'orders_count' => $ordersCount,
+                'gross_revenue' => round($grossRev, 2),
+                'refunded_amount' => round($refAmt, 2),
+                'net_revenue' => round($netRev, 2),
+            ];
+
+            $totOrders += $ordersCount;
+            $totGross += $grossRev;
+            $totRef += $refAmt;
+            $totNet += $netRev;
+        }
+
+        return [
+            'by_type' => $byType,
+            'totals' => [
+                'orders_count' => $totOrders,
+                'gross_revenue' => round($totGross, 2),
+                'refunded_amount' => round($totRef, 2),
+                'net_revenue' => round($totNet, 2),
+            ],
+        ];
+    }
+
+    /**
+     * @return \Illuminate\Support\Collection<int, object>
+     */
+    private function buildMenuPerformanceRows(int $restaurantId, string $from, string $to)
+    {
+        $menuRows = DB::table('pos_order_items as poi')
+            ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
+            ->join('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+            ->leftJoin('menu_item_variants as miv', 'poi.menu_item_variant_id', '=', 'miv.id')
+            ->leftJoin('menu_categories as mc', 'mi.menu_category_id', '=', 'mc.id')
+            ->whereIn('po.status', ['paid', 'refunded'])
+            ->where('po.restaurant_id', $restaurantId)
+            ->whereDate('po.business_date', '>=', $from)
+            ->whereDate('po.business_date', '<=', $to)
+            ->where('poi.status', 'active')
+            ->whereNotNull('poi.menu_item_id')
+            ->whereNull('poi.combo_id')
+            ->groupBy('mi.id', 'poi.menu_item_variant_id')
+            ->select(
+                DB::raw("'menu_item' as row_kind"),
+                'mi.id as menu_item_id',
+                DB::raw('NULL as combo_id'),
+                'poi.menu_item_variant_id as variant_id',
+                DB::raw('MAX(mi.name) as name'),
+                DB::raw('MAX(COALESCE(miv.size_label, \'\')) as variant_label'),
+                DB::raw('MAX(mc.name) as category_name'),
+                DB::raw('SUM(poi.quantity) as qty_sold'),
+                DB::raw('SUM(poi.line_total) as revenue'),
+                DB::raw('COUNT(*) as lines_sold'),
+                DB::raw('COUNT(DISTINCT poi.order_id) as bills_count')
+            )
+            ->get();
+
+        $comboRows = DB::table('pos_order_items as poi')
+            ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
+            ->join('combos as c', 'poi.combo_id', '=', 'c.id')
+            ->whereIn('po.status', ['paid', 'refunded'])
+            ->where('po.restaurant_id', $restaurantId)
+            ->whereDate('po.business_date', '>=', $from)
+            ->whereDate('po.business_date', '<=', $to)
+            ->where('poi.status', 'active')
+            ->whereNotNull('poi.combo_id')
+            ->groupBy('c.id')
+            ->select(
+                DB::raw("'combo' as row_kind"),
+                DB::raw('NULL as menu_item_id'),
+                'c.id as combo_id',
+                DB::raw('NULL as variant_id'),
+                DB::raw('MAX(c.name) as name'),
+                DB::raw("'' as variant_label"),
+                DB::raw("'Combo' as category_name"),
+                DB::raw('SUM(poi.quantity) as qty_sold'),
+                DB::raw('SUM(poi.line_total) as revenue'),
+                DB::raw('COUNT(*) as lines_sold'),
+                DB::raw('COUNT(DISTINCT poi.order_id) as bills_count')
+            )
+            ->get();
+
+        return $menuRows->concat($comboRows)->sortByDesc(fn ($r) => (float) $r->revenue)->values();
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, object>  $rows
+     * @return array{sku_rows: int, qty_sold: float, revenue: float, bills_with_sales: int}
+     */
+    private function buildMenuPerformanceSummary(int $restaurantId, string $from, string $to, $rows): array
+    {
+        $billCount = (int) DB::table('pos_order_items as poi')
+            ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
+            ->whereIn('po.status', ['paid', 'refunded'])
+            ->where('po.restaurant_id', $restaurantId)
+            ->whereDate('po.business_date', '>=', $from)
+            ->whereDate('po.business_date', '<=', $to)
+            ->where('poi.status', 'active')
+            ->where(function ($q) {
+                $q->where(function ($q2) {
+                    $q2->whereNotNull('poi.menu_item_id')->whereNull('poi.combo_id');
+                })->orWhereNotNull('poi.combo_id');
+            })
+            ->selectRaw('COUNT(DISTINCT poi.order_id) as c')
+            ->value('c');
+
+        return [
+            'sku_rows' => $rows->count(),
+            'qty_sold' => round((float) $rows->sum(fn ($r) => (float) $r->qty_sold), 2),
+            'revenue' => round((float) $rows->sum(fn ($r) => (float) $r->revenue), 2),
+            'bills_with_sales' => $billCount,
+        ];
+    }
+
+    /**
+     * @return array{by_rate: list<array{rate: float, tax_label: string, taxable_value: float, tax_amount: float, line_count: int}>, totals: array{taxable_value: float, tax_amount: float, bills_count: int, bucket_count: int}}
+     */
+    private function buildTaxGstSummaryData(int $restaurantId, string $from, string $to): array
+    {
+        $orders = PosOrder::query()
+            ->whereIn('status', ['paid', 'refunded'])
+            ->where('restaurant_id', $restaurantId)
+            ->where('is_complimentary', false)
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to)
+            ->with([
+                'items' => fn ($q) => $q->where('status', 'active')->with(['menuItem.tax', 'combo']),
+            ])
+            ->get();
+
+        $buckets = [];
+
+        foreach ($orders as $order) {
+            $activeItems = $order->items;
+            $grossSubtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
+            $discountAmount = 0;
+            if ($order->discount_type === 'percent') {
+                $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
+            } elseif ($order->discount_type === 'flat') {
+                $discountAmount = min(floatval($order->discount_value ?? 0), $grossSubtotal);
+            }
+            $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
+
+            foreach ($activeItems as $i) {
+                [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
+                $r = round((float) $i->tax_rate, 2);
+                if ($order->tax_exempt) {
+                    $label = 'Bill tax exempt';
+                    $r = 0.0;
+                } else {
+                    $label = $this->resolvePosLineTaxLabel($i, $r);
+                }
+                $key = sprintf('%.4f', $r).'|'.$label;
+                if (! isset($buckets[$key])) {
+                    $buckets[$key] = [
+                        'rate' => $r,
+                        'tax_label' => $label,
+                        'taxable_value' => 0.0,
+                        'tax_amount' => 0.0,
+                        'line_count' => 0,
+                    ];
+                }
+                $buckets[$key]['taxable_value'] += $lineNet;
+                $buckets[$key]['tax_amount'] += $lineTax;
+                $buckets[$key]['line_count']++;
+            }
+        }
+
+        $list = collect($buckets)
+            ->values()
+            ->map(function ($row) {
+                $row['taxable_value'] = round($row['taxable_value'], 2);
+                $row['tax_amount'] = round($row['tax_amount'], 2);
+
+                return $row;
+            })
+            ->sortByDesc(fn ($row) => $row['rate'])
+            ->values()
+            ->all();
+
+        $totalTaxable = round(collect($list)->sum('taxable_value'), 2);
+        $totalTax = round(collect($list)->sum('tax_amount'), 2);
+
+        return [
+            'by_rate' => $list,
+            'totals' => [
+                'taxable_value' => $totalTaxable,
+                'tax_amount' => $totalTax,
+                'bills_count' => $orders->count(),
+                'bucket_count' => count($list),
+            ],
         ];
     }
 }

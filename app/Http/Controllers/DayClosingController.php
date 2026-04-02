@@ -7,6 +7,7 @@ use App\Models\PosOrder;
 use App\Models\PosPayment;
 use App\Models\RestaurantMaster;
 use App\Models\StoreRequest;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -15,7 +16,10 @@ class DayClosingController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -181,6 +185,152 @@ class DayClosingController extends Controller
         $closings = $query->paginate($request->get('per_page', 20));
 
         return response()->json($closings);
+    }
+
+    /**
+     * Export closing history (CSV / PDF) for the same filters as the list (no pagination — full range).
+     */
+    public function export(Request $request)
+    {
+        $this->checkPermission('view-reports');
+
+        $validated = $request->validate([
+            'restaurant_id' => 'nullable|exists:restaurant_masters,id',
+            'from' => 'nullable|date',
+            'to' => 'nullable|date|after_or_equal:from',
+            'type' => 'nullable|in:csv,pdf',
+        ]);
+
+        $type = $validated['type'] ?? 'csv';
+
+        if (! empty($validated['restaurant_id'])) {
+            $this->authorizeRestaurantId((int) $validated['restaurant_id']);
+        }
+
+        $query = PosDayClosing::with('restaurant', 'closedByUser')
+            ->orderByDesc('closed_date');
+
+        if (! empty($validated['restaurant_id'])) {
+            $query->where('restaurant_id', $validated['restaurant_id']);
+        }
+        if (! empty($validated['from'])) {
+            $query->where('closed_date', '>=', $validated['from']);
+        }
+        if (! empty($validated['to'])) {
+            $query->where('closed_date', '<=', $validated['to']);
+        }
+
+        $closings = $query->get();
+
+        $fromSlug = $validated['from'] ?? 'all';
+        $toSlug = $validated['to'] ?? 'all';
+
+        if ($type === 'pdf') {
+            $pdf = Pdf::loadView('reports.day_closings', [
+                'closings' => $closings,
+                'from' => $validated['from'] ?? null,
+                'to' => $validated['to'] ?? null,
+            ]);
+
+            return $pdf->download("closing_history_{$fromSlug}_to_{$toSlug}.pdf");
+        }
+
+        $fileName = "closing_history_{$fromSlug}_to_{$toSlug}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $columns = [
+            'Business date',
+            'Outlet',
+            'Orders',
+            'Total sales',
+            'Discount',
+            'Tax',
+            'Service chg',
+            'Tip',
+            'Total paid',
+            'Cash',
+            'Card',
+            'UPI',
+            'Room charge',
+            'Voids',
+            'Opening bal',
+            'Closing bal',
+            'Closed by',
+            'Closed at',
+        ];
+
+        $callback = function () use ($closings, $columns) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $columns);
+
+            foreach ($closings as $c) {
+                fputcsv($file, [
+                    $c->closed_date?->format('Y-m-d') ?? '',
+                    $c->restaurant?->name ?? '—',
+                    $c->order_count,
+                    $c->total_sales,
+                    $c->total_discount,
+                    $c->total_tax,
+                    $c->total_service_charge,
+                    $c->total_tip,
+                    $c->total_paid,
+                    $c->cash_total,
+                    $c->card_total,
+                    $c->upi_total,
+                    $c->room_charge_total,
+                    $c->void_count,
+                    $c->opening_balance,
+                    $c->closing_balance,
+                    $c->closedByUser?->name ?? '—',
+                    $c->closed_at?->format('Y-m-d H:i') ?? '',
+                ]);
+            }
+
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    private function userCanAccessRestaurant(int $restaurantId): bool
+    {
+        $user = auth()->user();
+        if (! $user) {
+            return false;
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return true;
+        }
+
+        $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+        if (count($assigned) > 0) {
+            return in_array($restaurantId, $assigned, true);
+        }
+
+        $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+        if (count($deptIds) > 0) {
+            return RestaurantMaster::where('id', $restaurantId)
+                ->where('is_active', true)
+                ->where(function ($q) use ($deptIds) {
+                    $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                })
+                ->exists();
+        }
+
+        return false;
+    }
+
+    private function authorizeRestaurantId(int $restaurantId): void
+    {
+        if (! $this->userCanAccessRestaurant($restaurantId)) {
+            abort(403, 'You do not have access to this outlet.');
+        }
     }
 
     /**

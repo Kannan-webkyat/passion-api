@@ -13,6 +13,7 @@ class PosOrder extends Model
         'discount_type', 'discount_value', 'service_charge_type', 'service_charge_value', 'service_charge_amount',
         'subtotal', 'tax_amount', 'discount_amount', 'tip_amount', 'rounding_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt', 'prices_tax_inclusive', 'receipt_show_tax_breakdown', 'is_complimentary',
         'void_reason', 'void_notes', 'voided_by', 'voided_at',
+        'discount_approved_by', 'discount_approved_at',
     ];
 
     protected $casts = [
@@ -36,6 +37,7 @@ class PosOrder extends Model
         'receipt_show_tax_breakdown' => 'boolean',
         'is_complimentary' => 'boolean',
         'voided_at' => 'datetime',
+        'discount_approved_at' => 'datetime',
     ];
 
     public function table()
@@ -86,5 +88,10 @@ class PosOrder extends Model
     public function voidedBy()
     {
         return $this->belongsTo(User::class, 'voided_by');
+    }
+
+    public function discountApprovedBy()
+    {
+        return $this->belongsTo(User::class, 'discount_approved_by');
     }
 }
