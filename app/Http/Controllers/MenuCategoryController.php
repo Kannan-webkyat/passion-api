@@ -22,7 +22,7 @@ class MenuCategoryController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'is_active' => 'boolean',
@@ -40,7 +40,7 @@ class MenuCategoryController extends Controller
 
     public function update(Request $request, MenuCategory $menuCategory)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'is_active' => 'boolean',
@@ -53,7 +53,7 @@ class MenuCategoryController extends Controller
 
     public function destroy(MenuCategory $menuCategory)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         try {
             $menuCategory->delete();
 

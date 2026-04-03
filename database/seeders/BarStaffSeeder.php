@@ -14,7 +14,7 @@ class BarStaffSeeder extends Seeder
             ['email' => 'bar_cashier@gmail.com'],
             [
                 'name' => 'Bar Cashier',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 
@@ -22,7 +22,7 @@ class BarStaffSeeder extends Seeder
             ['email' => 'bar_waiter@gmail.com'],
             [
                 'name' => 'Bar Waiter',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 

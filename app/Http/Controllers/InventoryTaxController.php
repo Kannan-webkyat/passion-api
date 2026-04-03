@@ -7,6 +7,20 @@ use Illuminate\Http\Request;
 
 class InventoryTaxController extends Controller
 {
+    private function checkPermission(string $permission): void
+    {
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return;
+        }
+        if (! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         return response()->json(InventoryTax::all());
@@ -14,6 +28,7 @@ class InventoryTaxController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'rate' => 'required|numeric|min:0',
@@ -27,6 +42,7 @@ class InventoryTaxController extends Controller
 
     public function update(Request $request, InventoryTax $tax)
     {
+        $this->checkPermission('manage-settings');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'rate' => 'required|numeric|min:0',
@@ -40,6 +56,7 @@ class InventoryTaxController extends Controller
 
     public function destroy(InventoryTax $tax)
     {
+        $this->checkPermission('manage-settings');
         try {
             $tax->delete();
 

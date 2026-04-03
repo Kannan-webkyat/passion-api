@@ -13,11 +13,28 @@ use App\Models\PosOrderItem;
 
 class InventoryReportController extends Controller
 {
-    private function checkPermission($permission)
+    private function checkPermission(string $permission): void
     {
-        // Simple permission check (can be integrated with middleware)
-        if (!auth()->user() || !auth()->user()->can($permission) && auth()->user()->roles()->where('name', 'Admin')->count() === 0) {
-            // Logged in user can manage if admin
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return;
+        }
+
+        // Backward compatibility: inventory managers can access all inventory reports.
+        if ($user->can('manage-inventory')) {
+            return;
+        }
+
+        // Dashboard permission is treated as umbrella for inventory reports.
+        if ($user->can('inventory-report-summary')) {
+            return;
+        }
+
+        if (! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
         }
     }
 
@@ -26,6 +43,7 @@ class InventoryReportController extends Controller
      */
     public function stockStatus(Request $request)
     {
+        $this->checkPermission('inventory-report-status');
         $categoryId = $request->query('category_id');
         $locationId = $request->query('location_id');
         $search = $request->query('search');
@@ -110,6 +128,7 @@ class InventoryReportController extends Controller
      */
     public function stockLedger(Request $request)
     {
+        $this->checkPermission('inventory-report-ledger');
         $itemId = $request->query('item_id');
         $locationId = $request->query('location_id');
         $startDate = $request->query('start_date');
@@ -133,6 +152,7 @@ class InventoryReportController extends Controller
      */
     public function consumption(Request $request)
     {
+        $this->checkPermission('inventory-report-consumption');
         $startDate = $request->query('from') ?? $request->query('start_date') ?? now()->subDays(7)->toDateString();
         $endDate = $request->query('to') ?? $request->query('end_date') ?? now()->toDateString();
         $locationId = $request->query('location_id');
@@ -270,6 +290,7 @@ class InventoryReportController extends Controller
      */
     public function adjustments(Request $request)
     {
+        $this->checkPermission('inventory-report-adjustments');
         $reason = $request->query('reason');
         $startDate = $request->query('from') ?? $request->query('start_date');
         $endDate = $request->query('to') ?? $request->query('end_date');
@@ -320,6 +341,7 @@ class InventoryReportController extends Controller
      */
     public function purchaseHistory(Request $request)
     {
+        $this->checkPermission('inventory-report-purchase-history');
         $vendorId = $request->query('vendor_id');
         $itemId = $request->query('item_id');
         $startDate = $request->query('from') ?? $request->query('start_date');
@@ -368,6 +390,7 @@ class InventoryReportController extends Controller
      */
     public function reorderReport(Request $request)
     {
+        $this->checkPermission('inventory-report-reorder');
         $items = InventoryItem::with(['category', 'issueUom', 'vendor'])
             ->whereColumn('current_stock', '<=', 'reorder_level')
             ->get();
@@ -403,6 +426,7 @@ class InventoryReportController extends Controller
      */
     public function slowMovingReport(Request $request)
     {
+        $this->checkPermission('inventory-report-slow-moving');
         $days = (int) $request->query('days', 30);
         $cutoff = now()->subDays($days);
 
@@ -451,6 +475,7 @@ class InventoryReportController extends Controller
      */
     public function overstockReport(Request $request)
     {
+        $this->checkPermission('inventory-report-overstock');
         // Items where current stock is more than 150% of reorder level (and reorder level > 0)
         // Or if reorder level is 0, where stock is unusually high (e.g. > 100)
         $items = InventoryItem::with(['category', 'issueUom', 'vendor'])
@@ -500,6 +525,7 @@ class InventoryReportController extends Controller
      */
     public function dashboardSummary(Request $request)
     {
+        $this->checkPermission('inventory-report-summary');
         $statusResp = $this->stockStatus($request)->getData();
         $adjustResp = $this->adjustments($request)->getData();
         

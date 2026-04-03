@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Spatie\Permission\PermissionRegistrar;
 
 class UserController extends Controller
 {
@@ -44,6 +45,7 @@ class UserController extends Controller
                 abort(403, 'Only Admins can assign the Admin role.');
             }
             $user->syncRoles($validated['roles']);
+            app(PermissionRegistrar::class)->forgetCachedPermissions();
         }
 
         if (isset($validated['departments'])) {
@@ -95,6 +97,7 @@ class UserController extends Controller
                 abort(403, 'Cannot modify Admin users.');
             }
             $user->syncRoles($validated['roles']);
+            app(PermissionRegistrar::class)->forgetCachedPermissions();
         }
 
         if (isset($validated['departments'])) {

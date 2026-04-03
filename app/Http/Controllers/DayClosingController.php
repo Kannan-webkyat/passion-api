@@ -30,7 +30,7 @@ class DayClosingController extends Controller
      */
     public function preview(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('pos-day-closing');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'date' => 'required|date',
@@ -60,7 +60,7 @@ class DayClosingController extends Controller
      */
     public function close(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('pos-day-closing');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'date' => 'required|date',
@@ -162,7 +162,7 @@ class DayClosingController extends Controller
      */
     public function index(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-day-closings');
         $validated = $request->validate([
             'restaurant_id' => 'nullable|exists:restaurant_masters,id',
             'from' => 'nullable|date',
@@ -192,7 +192,7 @@ class DayClosingController extends Controller
      */
     public function export(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-day-closings');
 
         $validated = $request->validate([
             'restaurant_id' => 'nullable|exists:restaurant_masters,id',

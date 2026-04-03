@@ -7,6 +7,20 @@ use Illuminate\Http\Request;
 
 class InventoryLocationController extends Controller
 {
+    private function checkPermission(string $permission): void
+    {
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return;
+        }
+        if (! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index(Request $request)
     {
         $query = InventoryLocation::with('department');
@@ -19,6 +33,7 @@ class InventoryLocationController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name',
             'type' => 'required|string|in:main_store,kitchen_store,sub_store,satellite',
@@ -38,6 +53,7 @@ class InventoryLocationController extends Controller
 
     public function update(Request $request, InventoryLocation $location)
     {
+        $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name,'.$location->id,
             'type' => 'required|string|in:main_store,kitchen_store,sub_store,satellite',
@@ -56,6 +72,7 @@ class InventoryLocationController extends Controller
 
     public function destroy(InventoryLocation $location)
     {
+        $this->checkPermission('manage-inventory');
         if ($location->type === 'main_store') {
             return response()->json(['message' => 'The Main Store cannot be deleted.'], 422);
         }

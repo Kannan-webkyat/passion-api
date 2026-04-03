@@ -3,13 +3,10 @@
 namespace Database\Seeders;
 
 use App\Models\User;
-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
 use Illuminate\Database\Seeder;
 
 class DatabaseSeeder extends Seeder
 {
-    use WithoutModelEvents;
-
     /**
      * Seed the application's database.
      */
@@ -24,13 +21,8 @@ class DatabaseSeeder extends Seeder
             RestaurantTableSeeder::class,  // Must run before FreshBiryaniTeaCoffeeSeeder (creates restaurants)
             FreshBiryaniTeaCoffeeSeeder::class,
             BarSeeder::class,
-            BarStaffSeeder::class,
-            KitchenStaffSeeder::class,
-            ReceptionistSeeder::class,
-            WaiterSeeder::class,
-            StoreManagerSeeder::class,
-            UserDepartmentSeeder::class,
             RoomSeeder::class,
+            RbacTestUsersSeeder::class,
             // BookingSeeder::class,
         ]);
 
@@ -38,7 +30,7 @@ class DatabaseSeeder extends Seeder
             ['email' => 'admin@hotel.com'],
             [
                 'name' => 'Admin User',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         )->assignRole('Admin');
     }

@@ -14,7 +14,7 @@ class WaiterSeeder extends Seeder
             ['email' => 'waiter1@gmail.com'],
             [
                 'name' => 'Waiter One',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 
@@ -22,7 +22,7 @@ class WaiterSeeder extends Seeder
             ['email' => 'waiter2@gmail.com'],
             [
                 'name' => 'Waiter Two',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 

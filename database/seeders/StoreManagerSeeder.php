@@ -14,7 +14,7 @@ class StoreManagerSeeder extends Seeder
             ['email' => 'storemanager@gmail.com'],
             [
                 'name' => 'Store Manager',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 

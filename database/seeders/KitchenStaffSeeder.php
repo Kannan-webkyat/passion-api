@@ -14,7 +14,7 @@ class KitchenStaffSeeder extends Seeder
             ['email' => 'kitchen@gmail.com'],
             [
                 'name' => 'Kitchen Chef',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 

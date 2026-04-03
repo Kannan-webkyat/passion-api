@@ -27,10 +27,20 @@ use App\Services\BusinessDateService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Barryvdh\DomPDF\Facade\Pdf;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PosController extends Controller
 {
+    /**
+     * Recompute stored tax split columns (maintenance / backfill). Does not change permission checks.
+     */
+    public function maintenanceRecalculateOrderTotals(PosOrder $order): void
+    {
+        $this->recalculate($order);
+    }
+
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
@@ -340,7 +350,7 @@ class PosController extends Controller
      */
     public function salesReport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-sales');
 
         $validated = $request->validate([
             'from' => 'required|date',
@@ -404,6 +414,12 @@ class PosController extends Controller
             DB::raw('SUM(total_amount) as total_amount'),
             DB::raw('SUM(subtotal) as subtotal'),
             DB::raw('SUM(tax_amount) as tax_amount'),
+            DB::raw('SUM(COALESCE(cgst_amount, 0)) as cgst_amount'),
+            DB::raw('SUM(COALESCE(sgst_amount, 0)) as sgst_amount'),
+            DB::raw('SUM(COALESCE(igst_amount, 0)) as igst_amount'),
+            DB::raw('SUM(COALESCE(vat_tax_amount, 0)) as vat_tax_amount'),
+            DB::raw('SUM(COALESCE(gst_net_taxable, 0)) as gst_net_taxable'),
+            DB::raw('SUM(COALESCE(vat_net_taxable, 0)) as vat_net_taxable'),
             DB::raw('SUM(discount_amount) as discount_amount'),
             DB::raw('SUM(service_charge_amount) as service_charge_amount'),
             DB::raw('SUM(tip_amount) as tip_amount'),
@@ -433,7 +449,9 @@ class PosController extends Controller
 
         $aggData = $agg ?? (object)[
             'orders_count' => 0, 'total_amount' => 0, 'subtotal' => 0,
-            'tax_amount' => 0, 'discount_amount' => 0,
+            'tax_amount' => 0, 'cgst_amount' => 0, 'sgst_amount' => 0, 'igst_amount' => 0,
+            'vat_tax_amount' => 0, 'gst_net_taxable' => 0, 'vat_net_taxable' => 0,
+            'discount_amount' => 0,
             'service_charge_amount' => 0, 'tip_amount' => 0, 'delivery_charge' => 0,
         ];
         $aggTotal = (float)$aggData->total_amount;
@@ -441,6 +459,12 @@ class PosController extends Controller
             'orders_count' => (int)$aggData->orders_count,
             'subtotal' => (float)$aggData->subtotal,
             'tax_amount' => (float)$aggData->tax_amount,
+            'cgst_amount' => (float)($aggData->cgst_amount ?? 0),
+            'sgst_amount' => (float)($aggData->sgst_amount ?? 0),
+            'igst_amount' => (float)($aggData->igst_amount ?? 0),
+            'vat_tax_amount' => (float)($aggData->vat_tax_amount ?? 0),
+            'gst_net_taxable' => (float)($aggData->gst_net_taxable ?? 0),
+            'vat_net_taxable' => (float)($aggData->vat_net_taxable ?? 0),
             'discount_amount' => (float)$aggData->discount_amount,
             'service_charge_amount' => (float)$aggData->service_charge_amount,
             'tip_amount' => (float)$aggData->tip_amount,
@@ -486,7 +510,7 @@ class PosController extends Controller
 
         $paginated = $ordersQ->orderBy('id', 'desc')->paginate(50);
         
-        $data = collect($paginated->items())->map(function($o) {
+        $data = collect($paginated->items())->map(function ($o) {
             return [
                 'id' => $o->id,
                 'business_date' => $o->business_date,
@@ -494,10 +518,16 @@ class PosController extends Controller
                 'restaurant' => $o->restaurant?->name ?? '—',
                 'order_type' => $o->order_type ?? 'dine_in',
                 'status' => $o->status,
-                'total_amount' => (float)$o->total_amount,
-                'refunded_amount' => (float)$o->refunds->sum('amount'),
+                'total_amount' => (float) $o->total_amount,
+                'refunded_amount' => (float) $o->refunds->sum('amount'),
                 'closed_at' => $o->closed_at?->toDateTimeString(),
                 'voided_at' => $o->voided_at?->toDateTimeString(),
+                'cgst_amount' => (float) ($o->cgst_amount ?? 0),
+                'sgst_amount' => (float) ($o->sgst_amount ?? 0),
+                'igst_amount' => (float) ($o->igst_amount ?? 0),
+                'vat_tax_amount' => (float) ($o->vat_tax_amount ?? 0),
+                'gst_net_taxable' => (float) ($o->gst_net_taxable ?? 0),
+                'vat_net_taxable' => (float) ($o->vat_net_taxable ?? 0),
             ];
         });
 
@@ -514,13 +544,1824 @@ class PosController extends Controller
     }
 
     /**
+     * Liquor (state VAT) line register: same structure as food/GST report, filtered to liquor VAT lines only.
+     */
+    public function liquorSalesReport(Request $request)
+    {
+        $this->checkPermission('report-sales');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+            'page' => 'nullable|integer|min:1',
+            'group_by' => 'nullable|string|in:line,item,invoice',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $page = (int) ($validated['page'] ?? 1);
+        $restaurantId = $validated['restaurant_id'] ?? null;
+        $groupBy = (string) ($validated['group_by'] ?? 'line');
+        if (! in_array($groupBy, ['line', 'item', 'invoice'], true)) {
+            $groupBy = 'line';
+        }
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            $emptyFiling = [
+                'lines_count' => 0,
+                'qty_total' => 0.0,
+                'revenue_total' => 0.0,
+                'bills_count' => 0,
+                'note' => 'Active lines on paid or refunded orders only; void bills and cancelled lines excluded. Not a government return file; refunds and adjustments per CA.',
+            ];
+
+            return response()->json([
+                'summary' => [
+                    'lines_count' => 0,
+                    'active_lines_count' => 0,
+                    'cancelled_lines_count' => 0,
+                    'qty_total' => 0.0,
+                    'revenue_total' => 0.0,
+                    'bills_count' => 0,
+                ],
+                'vat_filing' => $emptyFiling,
+                'data' => [],
+                'meta' => [
+                    'current_page' => 1,
+                    'last_page' => 1,
+                    'total' => 0,
+                    'group_by' => $groupBy,
+                ],
+            ]);
+        }
+
+        $rid = (int) $restaurantId;
+        $base = $this->liquorSalesLinesBaseQuery($rid, $from, $to);
+
+        $agg = (clone $base)->selectRaw(
+            'COUNT(pos_order_items.id) as lines_count,
+            SUM(CASE WHEN pos_order_items.status = \'active\' THEN 1 ELSE 0 END) as active_lines_count,
+            SUM(CASE WHEN pos_order_items.status = \'cancelled\' THEN 1 ELSE 0 END) as cancelled_lines_count,
+            COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.quantity ELSE 0 END), 0) as qty_total,
+            COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.line_total ELSE 0 END), 0) as revenue_total,
+            COUNT(DISTINCT pos_orders.id) as bills_count'
+        )->first();
+
+        $vatFiling = $this->registerStatutoryFilingSummaryFromBase($base);
+
+        if ($groupBy === 'item' || $groupBy === 'invoice') {
+            $perPage = 50;
+            $allRows = $this->liquorSalesBuildAggregatedRows($rid, $from, $to, $groupBy);
+            $total = count($allRows);
+            $lastPage = max(1, (int) ceil($total / $perPage));
+            $page = min(max(1, $page), $lastPage);
+            $slice = array_slice($allRows, ($page - 1) * $perPage, $perPage);
+
+            return response()->json([
+                'summary' => [
+                    'lines_count' => (int) ($agg->lines_count ?? 0),
+                    'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
+                    'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
+                    'qty_total' => (float) ($agg->qty_total ?? 0),
+                    'revenue_total' => (float) ($agg->revenue_total ?? 0),
+                    'bills_count' => (int) ($agg->bills_count ?? 0),
+                ],
+                'vat_filing' => $vatFiling,
+                'data' => $slice,
+                'meta' => [
+                    'current_page' => $page,
+                    'last_page' => $lastPage,
+                    'total' => $total,
+                    'group_by' => $groupBy,
+                ],
+            ]);
+        }
+
+        $paginated = (clone $base)
+            ->select([
+                'pos_order_items.id as line_id',
+                'pos_order_items.order_id',
+                'pos_order_items.quantity',
+                'pos_order_items.unit_price',
+                'pos_order_items.tax_rate',
+                'pos_order_items.line_total',
+                'pos_order_items.combo_id',
+                'pos_order_items.status as line_status',
+                'menu_items.name as menu_name',
+                'menu_item_variants.size_label',
+                'combos.name as combo_name',
+                'pos_orders.business_date',
+                'pos_orders.closed_at',
+                'pos_orders.voided_at',
+                'pos_orders.status as order_status',
+                'pos_orders.customer_name',
+                'pos_orders.customer_gstin',
+                'users.name as waiter_name',
+                DB::raw('(SELECT u.name FROM pos_payments pp INNER JOIN users u ON u.id = pp.received_by WHERE pp.order_id = pos_orders.id AND pp.received_by IS NOT NULL ORDER BY COALESCE(pp.paid_at, pp.created_at) DESC, pp.id DESC LIMIT 1) as cashier_name'),
+            ])
+            ->orderByDesc('pos_order_items.id')
+            ->paginate(50, ['*'], 'page', $page);
+
+        $lineIds = collect($paginated->items())->pluck('line_id')->map(fn ($id) => (int) $id)->all();
+        $itemsById = PosOrderItem::whereIn('id', $lineIds)
+            ->with([
+                'menuItem.tax',
+                'combo.menuItems.tax',
+                'order.refunds',
+                'order.items' => fn ($q) => $q->where('status', 'active'),
+                'order.items.menuItem.tax',
+                'order.items.combo.menuItems.tax',
+            ])
+            ->get()
+            ->keyBy('id');
+
+        $orderIdsForPayment = collect($paginated->items())->pluck('order_id')->unique()->map(fn ($id) => (int) $id)->values()->all();
+        $paymentByOrder = $this->foodSalesPaymentMethodsForOrderIds($orderIdsForPayment);
+
+        $data = collect($paginated->items())->map(function ($row) use ($itemsById, $paymentByOrder) {
+            $comboId = $row->combo_id ?? null;
+            if ($comboId) {
+                $display = 'Combo: '.((string) ($row->combo_name ?? '') !== '' ? $row->combo_name : '—');
+            } else {
+                $name = (string) ($row->menu_name ?? '—');
+                $variant = trim((string) ($row->size_label ?? ''));
+                $display = $variant !== '' ? $name.' — '.$variant : $name;
+            }
+
+            $item = $itemsById->get((int) $row->line_id);
+            $extras = ($item && $item->order)
+                ? $this->computeFoodLineRegisterFields($item, $item->order)
+                : [
+                    'line_gross' => 0.0,
+                    'line_discount' => 0.0,
+                    'line_after_discount' => 0.0,
+                    'net_taxable' => 0.0,
+                    'tax_amount' => 0.0,
+                    'cgst' => 0.0,
+                    'sgst' => 0.0,
+                    'igst' => 0.0,
+                    'refund_alloc' => 0.0,
+                    'service_charge_alloc' => 0.0,
+                    'tip_alloc' => 0.0,
+                    'delivery_alloc' => 0.0,
+                    'rounding_alloc' => 0.0,
+                    'sheet_adjustments' => 0.0,
+                    'tax_inclusive' => false,
+                    'tax_pricing' => 'Exclusive',
+                    'line_status' => (string) ($row->line_status ?? 'active'),
+                ];
+
+            return [
+                'row_kind' => 'line',
+                'row_id' => 'line:'.(int) $row->line_id,
+                'lines_count' => 1,
+                'item_key' => null,
+                'line_id' => (int) $row->line_id,
+                'order_id' => (int) $row->order_id,
+                'line_status' => (string) ($extras['line_status'] ?? $row->line_status ?? 'active'),
+                'customer_name' => $row->customer_name !== null && trim((string) $row->customer_name) !== ''
+                    ? trim((string) $row->customer_name)
+                    : null,
+                'customer_gstin' => $row->customer_gstin !== null && trim((string) $row->customer_gstin) !== ''
+                    ? trim((string) $row->customer_gstin)
+                    : null,
+                'display_name' => $display,
+                'quantity' => (float) $row->quantity,
+                'unit_price' => (float) $row->unit_price,
+                'tax_rate' => (float) $row->tax_rate,
+                'tax_rate_mixed' => false,
+                'line_total' => (float) $row->line_total,
+                'line_gross' => $extras['line_gross'],
+                'line_discount' => $extras['line_discount'],
+                'line_after_discount' => $extras['line_after_discount'],
+                'net_taxable' => $extras['net_taxable'],
+                'tax_amount' => $extras['tax_amount'],
+                'vat_amount' => $extras['tax_amount'],
+                'cgst' => $extras['cgst'],
+                'sgst' => $extras['sgst'],
+                'igst' => $extras['igst'],
+                'refund_alloc' => $extras['refund_alloc'],
+                'service_charge_alloc' => $extras['service_charge_alloc'],
+                'tip_alloc' => $extras['tip_alloc'],
+                'delivery_alloc' => $extras['delivery_alloc'],
+                'rounding_alloc' => $extras['rounding_alloc'],
+                'sheet_adjustments' => $extras['sheet_adjustments'],
+                'tax_inclusive' => (bool) ($extras['tax_inclusive'] ?? false),
+                'tax_pricing' => (string) ($extras['tax_pricing'] ?? 'Exclusive'),
+                'business_date' => $row->business_date,
+                'closed_at' => $row->closed_at,
+                'voided_at' => $row->voided_at,
+                'order_status' => (string) $row->order_status,
+                'payment_methods' => $paymentByOrder[(int) $row->order_id] ?? '—',
+                'waiter' => $row->waiter_name ?? '—',
+                'cashier' => $row->cashier_name !== null && trim((string) $row->cashier_name) !== ''
+                    ? trim((string) $row->cashier_name)
+                    : '—',
+            ];
+        })->values();
+
+        return response()->json([
+            'summary' => [
+                'lines_count' => (int) ($agg->lines_count ?? 0),
+                'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
+                'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
+                'qty_total' => (float) ($agg->qty_total ?? 0),
+                'revenue_total' => (float) ($agg->revenue_total ?? 0),
+                'bills_count' => (int) ($agg->bills_count ?? 0),
+            ],
+            'vat_filing' => $vatFiling,
+            'data' => $data,
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'total' => $paginated->total(),
+                'group_by' => $groupBy,
+            ],
+        ]);
+    }
+
+    /**
+     * Export liquor (state VAT) line register as CSV, Excel (.xlsx), or PDF.
+     *
+     * @queryParam format csv|xlsx|pdf (default csv)
+     * @queryParam group_by line|item|invoice (default line)
+     */
+    public function liquorSalesExport(Request $request)
+    {
+        $this->checkPermission('report-sales');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $format = strtolower((string) $request->query('format', 'csv'));
+        if (! in_array($format, ['csv', 'xlsx', 'pdf'], true)) {
+            $format = 'csv';
+        }
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $this->authorizeRestaurantId((int) $restaurantId);
+
+        $groupBy = strtolower((string) $request->query('group_by', 'line'));
+        if (! in_array($groupBy, ['line', 'item', 'invoice'], true)) {
+            $groupBy = 'line';
+        }
+
+        $export = $this->buildLiquorSalesExportData((int) $restaurantId, $from, $to, $groupBy);
+
+        if ($format === 'pdf') {
+            $pdf = Pdf::loadView('reports.liquor_vat_sales', [
+                'restaurant' => $export['restaurant'],
+                'from' => $from,
+                'to' => $to,
+                'headers' => $export['headers'],
+                'rows' => $export['rows'],
+            ])->setPaper('a4', 'landscape');
+
+            return $pdf->download("liquor_vat_sales_{$groupBy}_{$from}_to_{$to}.pdf");
+        }
+
+        if ($format === 'xlsx') {
+            $spreadsheet = new Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
+            $sheet->fromArray(array_merge([$export['headers']], $export['rows']), null, 'A1');
+            $fileName = "liquor_vat_sales_{$groupBy}_{$from}_to_{$to}.xlsx";
+
+            return response()->streamDownload(function () use ($spreadsheet) {
+                $writer = new Xlsx($spreadsheet);
+                $writer->save('php://output');
+            }, $fileName, [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'Cache-Control' => 'must-revalidate',
+                'Pragma' => 'public',
+            ]);
+        }
+
+        $fileName = "liquor_vat_sales_{$groupBy}_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $callback = function () use ($export) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $export['headers']);
+            foreach ($export['rows'] as $row) {
+                fputcsv($file, $row);
+            }
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * Base query: liquor VAT lines on settled/void bills in date window.
+     *
+     * Includes lines with tax_regime = vat_liquor, and lines where regime was never
+     * backfilled but the menu item (or a combo component) uses inventory_taxes.type = vat.
+     * Active and cancelled (voided) lines are included for a full audit trail.
+     */
+    private function liquorSalesLinesBaseQuery(int $restaurantId, string $from, string $to)
+    {
+        return DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->leftJoin('menu_items', 'pos_order_items.menu_item_id', '=', 'menu_items.id')
+            ->leftJoin('menu_item_variants', 'pos_order_items.menu_item_variant_id', '=', 'menu_item_variants.id')
+            ->leftJoin('combos', 'pos_order_items.combo_id', '=', 'combos.id')
+            ->leftJoin('users', 'pos_orders.waiter_id', '=', 'users.id')
+            ->whereIn('pos_order_items.status', ['active', 'cancelled'])
+            ->where('pos_orders.restaurant_id', $restaurantId)
+            ->whereIn('pos_orders.status', ['paid', 'refunded', 'void'])
+            ->where(function ($w) {
+                $w->where('pos_order_items.tax_regime', 'vat_liquor')
+                    ->orWhere(function ($w2) {
+                        $w2->where(function ($w3) {
+                            $w3->whereNull('pos_order_items.tax_regime')
+                                ->orWhere('pos_order_items.tax_regime', '');
+                        })
+                            ->where(function ($w4) {
+                                $w4->whereExists(function ($q) {
+                                    $q->select(DB::raw(1))
+                                        ->from('menu_items as mi')
+                                        ->join('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                                        ->whereColumn('mi.id', 'pos_order_items.menu_item_id')
+                                        ->whereNotNull('pos_order_items.menu_item_id')
+                                        ->whereRaw('LOWER(it.type) = ?', ['vat']);
+                                })
+                                    ->orWhereExists(function ($q) {
+                                        $q->select(DB::raw(1))
+                                            ->from('combo_items as ci')
+                                            ->join('menu_items as mi', 'ci.menu_item_id', '=', 'mi.id')
+                                            ->join('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                                            ->whereColumn('ci.combo_id', 'pos_order_items.combo_id')
+                                            ->whereNotNull('pos_order_items.combo_id')
+                                            ->whereRaw('LOWER(it.type) = ?', ['vat']);
+                                    });
+                            });
+                    });
+            })
+            ->where(function ($q) use ($from, $to) {
+                $q->where(function ($q2) use ($from, $to) {
+                    $q2->whereDate('pos_orders.business_date', '>=', $from)
+                        ->whereDate('pos_orders.business_date', '<=', $to);
+                })->orWhere(function ($q3) use ($from, $to) {
+                    $q3->where('pos_orders.status', 'void')
+                        ->whereDate('pos_orders.voided_at', '>=', $from)
+                        ->whereDate('pos_orders.voided_at', '<=', $to);
+                });
+            });
+    }
+
+    /**
+     * Food / F&B (GST) line register: lines taxed as GST, excluding liquor VAT lines.
+     */
+    public function foodSalesReport(Request $request)
+    {
+        $this->checkPermission('report-sales');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
+            'page' => 'nullable|integer|min:1',
+            'group_by' => 'nullable|string|in:line,item,invoice',
+        ]);
+
+        $user = auth()->user();
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $page = (int) ($validated['page'] ?? 1);
+        $restaurantId = $validated['restaurant_id'] ?? null;
+        $groupBy = (string) ($validated['group_by'] ?? 'line');
+        if (! in_array($groupBy, ['line', 'item', 'invoice'], true)) {
+            $groupBy = 'line';
+        }
+
+        if ($restaurantId) {
+            $this->authorizeRestaurantId((int) $restaurantId);
+        }
+
+        $allowedOutletIds = null;
+        if (! $restaurantId && $user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+            if (count($assigned) > 0) {
+                $allowedOutletIds = $assigned;
+            } else {
+                $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+                if (count($deptIds) > 0) {
+                    $allowedOutletIds = RestaurantMaster::where('is_active', true)
+                        ->where(function ($q) use ($deptIds) {
+                            $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                        })
+                        ->pluck('id')
+                        ->map(fn ($id) => (int) $id)
+                        ->all();
+                } else {
+                    $allowedOutletIds = [];
+                }
+            }
+        }
+
+        if (! $restaurantId) {
+            if ($user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'))) {
+                $restaurantId = RestaurantMaster::where('is_active', true)->first()?->id;
+            } elseif (is_array($allowedOutletIds) && count($allowedOutletIds) > 0) {
+                $restaurantId = $allowedOutletIds[0];
+            }
+        }
+
+        if (! $restaurantId) {
+            $emptyFiling = [
+                'lines_count' => 0,
+                'qty_total' => 0.0,
+                'revenue_total' => 0.0,
+                'bills_count' => 0,
+                'note' => 'Active lines on paid or refunded orders only; void bills and cancelled lines excluded. Not a government return file; refunds and adjustments per CA.',
+            ];
+
+            return response()->json([
+                'summary' => [
+                    'lines_count' => 0,
+                    'active_lines_count' => 0,
+                    'cancelled_lines_count' => 0,
+                    'qty_total' => 0.0,
+                    'revenue_total' => 0.0,
+                    'bills_count' => 0,
+                ],
+                'gst_filing' => $emptyFiling,
+                'data' => [],
+                'meta' => [
+                    'current_page' => 1,
+                    'last_page' => 1,
+                    'total' => 0,
+                    'group_by' => $groupBy,
+                ],
+            ]);
+        }
+
+        $rid = (int) $restaurantId;
+        $base = $this->foodSalesLinesBaseQuery($rid, $from, $to);
+
+        $agg = (clone $base)->selectRaw(
+            'COUNT(pos_order_items.id) as lines_count,
+            SUM(CASE WHEN pos_order_items.status = \'active\' THEN 1 ELSE 0 END) as active_lines_count,
+            SUM(CASE WHEN pos_order_items.status = \'cancelled\' THEN 1 ELSE 0 END) as cancelled_lines_count,
+            COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.quantity ELSE 0 END), 0) as qty_total,
+            COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.line_total ELSE 0 END), 0) as revenue_total,
+            COUNT(DISTINCT pos_orders.id) as bills_count'
+        )->first();
+
+        $gstFiling = $this->registerStatutoryFilingSummaryFromBase($base);
+
+        if ($groupBy === 'item' || $groupBy === 'invoice') {
+            $perPage = 50;
+            $allRows = $this->foodSalesBuildAggregatedRows($rid, $from, $to, $groupBy);
+            $total = count($allRows);
+            $lastPage = max(1, (int) ceil($total / $perPage));
+            $page = min(max(1, $page), $lastPage);
+            $slice = array_slice($allRows, ($page - 1) * $perPage, $perPage);
+
+            return response()->json([
+                'summary' => [
+                    'lines_count' => (int) ($agg->lines_count ?? 0),
+                    'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
+                    'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
+                    'qty_total' => (float) ($agg->qty_total ?? 0),
+                    'revenue_total' => (float) ($agg->revenue_total ?? 0),
+                    'bills_count' => (int) ($agg->bills_count ?? 0),
+                ],
+                'gst_filing' => $gstFiling,
+                'data' => $slice,
+                'meta' => [
+                    'current_page' => $page,
+                    'last_page' => $lastPage,
+                    'total' => $total,
+                    'group_by' => $groupBy,
+                ],
+            ]);
+        }
+
+        $paginated = (clone $base)
+            ->select([
+                'pos_order_items.id as line_id',
+                'pos_order_items.order_id',
+                'pos_order_items.quantity',
+                'pos_order_items.unit_price',
+                'pos_order_items.tax_rate',
+                'pos_order_items.line_total',
+                'pos_order_items.combo_id',
+                'pos_order_items.status as line_status',
+                'menu_items.name as menu_name',
+                'menu_item_variants.size_label',
+                'combos.name as combo_name',
+                'pos_orders.business_date',
+                'pos_orders.closed_at',
+                'pos_orders.voided_at',
+                'pos_orders.status as order_status',
+                'pos_orders.customer_name',
+                'pos_orders.customer_gstin',
+                'users.name as waiter_name',
+                DB::raw('(SELECT u.name FROM pos_payments pp INNER JOIN users u ON u.id = pp.received_by WHERE pp.order_id = pos_orders.id AND pp.received_by IS NOT NULL ORDER BY COALESCE(pp.paid_at, pp.created_at) DESC, pp.id DESC LIMIT 1) as cashier_name'),
+            ])
+            ->orderByDesc('pos_order_items.id')
+            ->paginate(50, ['*'], 'page', $page);
+
+        $lineIds = collect($paginated->items())->pluck('line_id')->map(fn ($id) => (int) $id)->all();
+        $itemsById = PosOrderItem::whereIn('id', $lineIds)
+            ->with([
+                'menuItem.tax',
+                'combo.menuItems.tax',
+                'order.refunds',
+                'order.items' => fn ($q) => $q->where('status', 'active'),
+                'order.items.menuItem.tax',
+                'order.items.combo.menuItems.tax',
+            ])
+            ->get()
+            ->keyBy('id');
+
+        $orderIdsForPayment = collect($paginated->items())->pluck('order_id')->unique()->map(fn ($id) => (int) $id)->values()->all();
+        $paymentByOrder = $this->foodSalesPaymentMethodsForOrderIds($orderIdsForPayment);
+
+        $data = collect($paginated->items())->map(function ($row) use ($itemsById, $paymentByOrder) {
+            $comboId = $row->combo_id ?? null;
+            if ($comboId) {
+                $display = 'Combo: '.((string) ($row->combo_name ?? '') !== '' ? $row->combo_name : '—');
+            } else {
+                $name = (string) ($row->menu_name ?? '—');
+                $variant = trim((string) ($row->size_label ?? ''));
+                $display = $variant !== '' ? $name.' — '.$variant : $name;
+            }
+
+            $item = $itemsById->get((int) $row->line_id);
+            $extras = ($item && $item->order)
+                ? $this->computeFoodLineRegisterFields($item, $item->order)
+                : [
+                    'line_gross' => 0.0,
+                    'line_discount' => 0.0,
+                    'line_after_discount' => 0.0,
+                    'net_taxable' => 0.0,
+                    'tax_amount' => 0.0,
+                    'cgst' => 0.0,
+                    'sgst' => 0.0,
+                    'igst' => 0.0,
+                    'refund_alloc' => 0.0,
+                    'service_charge_alloc' => 0.0,
+                    'tip_alloc' => 0.0,
+                    'delivery_alloc' => 0.0,
+                    'rounding_alloc' => 0.0,
+                    'sheet_adjustments' => 0.0,
+                    'tax_inclusive' => false,
+                    'tax_pricing' => 'Exclusive',
+                    'line_status' => (string) ($row->line_status ?? 'active'),
+                ];
+
+            return [
+                'row_kind' => 'line',
+                'row_id' => 'line:'.(int) $row->line_id,
+                'lines_count' => 1,
+                'item_key' => null,
+                'line_id' => (int) $row->line_id,
+                'order_id' => (int) $row->order_id,
+                'line_status' => (string) ($extras['line_status'] ?? $row->line_status ?? 'active'),
+                'customer_name' => $row->customer_name !== null && trim((string) $row->customer_name) !== ''
+                    ? trim((string) $row->customer_name)
+                    : null,
+                'customer_gstin' => $row->customer_gstin !== null && trim((string) $row->customer_gstin) !== ''
+                    ? trim((string) $row->customer_gstin)
+                    : null,
+                'display_name' => $display,
+                'quantity' => (float) $row->quantity,
+                'unit_price' => (float) $row->unit_price,
+                'tax_rate' => (float) $row->tax_rate,
+                'tax_rate_mixed' => false,
+                'line_total' => (float) $row->line_total,
+                'line_gross' => $extras['line_gross'],
+                'line_discount' => $extras['line_discount'],
+                'line_after_discount' => $extras['line_after_discount'],
+                'net_taxable' => $extras['net_taxable'],
+                'tax_amount' => $extras['tax_amount'],
+                'cgst' => $extras['cgst'],
+                'sgst' => $extras['sgst'],
+                'igst' => $extras['igst'],
+                'refund_alloc' => $extras['refund_alloc'],
+                'service_charge_alloc' => $extras['service_charge_alloc'],
+                'tip_alloc' => $extras['tip_alloc'],
+                'delivery_alloc' => $extras['delivery_alloc'],
+                'rounding_alloc' => $extras['rounding_alloc'],
+                'sheet_adjustments' => $extras['sheet_adjustments'],
+                'tax_inclusive' => (bool) ($extras['tax_inclusive'] ?? false),
+                'tax_pricing' => (string) ($extras['tax_pricing'] ?? 'Exclusive'),
+                'business_date' => $row->business_date,
+                'closed_at' => $row->closed_at,
+                'voided_at' => $row->voided_at,
+                'order_status' => (string) $row->order_status,
+                'payment_methods' => $paymentByOrder[(int) $row->order_id] ?? '—',
+                'waiter' => $row->waiter_name ?? '—',
+                'cashier' => $row->cashier_name !== null && trim((string) $row->cashier_name) !== ''
+                    ? trim((string) $row->cashier_name)
+                    : '—',
+            ];
+        })->values();
+
+        return response()->json([
+            'summary' => [
+                'lines_count' => (int) ($agg->lines_count ?? 0),
+                'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
+                'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
+                'qty_total' => (float) ($agg->qty_total ?? 0),
+                'revenue_total' => (float) ($agg->revenue_total ?? 0),
+                'bills_count' => (int) ($agg->bills_count ?? 0),
+            ],
+            'gst_filing' => $gstFiling,
+            'data' => $data,
+            'meta' => [
+                'current_page' => $paginated->currentPage(),
+                'last_page' => $paginated->lastPage(),
+                'total' => $paginated->total(),
+                'group_by' => $groupBy,
+            ],
+        ]);
+    }
+
+    /**
+     * Export food / GST line register as CSV, Excel (.xlsx), or PDF.
+     *
+     * @queryParam format csv|xlsx|pdf (default csv)
+     */
+    public function foodSalesExport(Request $request)
+    {
+        $this->checkPermission('report-sales');
+
+        $restaurantId = $request->query('restaurant_id');
+        $from = $request->query('from') ?? now()->toDateString();
+        $to = $request->query('to') ?? now()->toDateString();
+        $format = strtolower((string) $request->query('format', 'csv'));
+        if (! in_array($format, ['csv', 'xlsx', 'pdf'], true)) {
+            $format = 'csv';
+        }
+
+        if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
+            abort(403, 'Unauthorized access to this outlet.');
+        }
+
+        $this->authorizeRestaurantId((int) $restaurantId);
+
+        $groupBy = strtolower((string) $request->query('group_by', 'line'));
+        if (! in_array($groupBy, ['line', 'item', 'invoice'], true)) {
+            $groupBy = 'line';
+        }
+
+        $export = $this->buildFoodSalesExportData((int) $restaurantId, $from, $to, $groupBy);
+
+        if ($format === 'pdf') {
+            $pdf = Pdf::loadView('reports.food_gst_sales', [
+                'restaurant' => $export['restaurant'],
+                'from' => $from,
+                'to' => $to,
+                'headers' => $export['headers'],
+                'rows' => $export['rows'],
+            ])->setPaper('a4', 'landscape');
+
+            return $pdf->download("food_gst_sales_{$from}_to_{$to}.pdf");
+        }
+
+        if ($format === 'xlsx') {
+            $spreadsheet = new Spreadsheet();
+            $sheet = $spreadsheet->getActiveSheet();
+            $sheet->fromArray(array_merge([$export['headers']], $export['rows']), null, 'A1');
+            $fileName = "food_gst_sales_{$from}_to_{$to}.xlsx";
+
+            return response()->streamDownload(function () use ($spreadsheet) {
+                $writer = new Xlsx($spreadsheet);
+                $writer->save('php://output');
+            }, $fileName, [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'Cache-Control' => 'must-revalidate',
+                'Pragma' => 'public',
+            ]);
+        }
+
+        $fileName = "food_gst_sales_{$from}_to_{$to}.csv";
+        $headers = [
+            'Content-type' => 'text/csv',
+            'Content-Disposition' => "attachment; filename={$fileName}",
+            'Pragma' => 'no-cache',
+            'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
+            'Expires' => '0',
+        ];
+
+        $callback = function () use ($export) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, $export['headers']);
+            foreach ($export['rows'] as $row) {
+                fputcsv($file, $row);
+            }
+            fclose($file);
+        };
+
+        return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * @return array{headers: array<int, string>, rows: array<int, array<int, mixed>>, restaurant: RestaurantMaster|null}
+     */
+    private function buildFoodSalesExportData(int $restaurantId, string $from, string $to, string $groupBy = 'line'): array
+    {
+        if ($groupBy === 'item') {
+            $agg = $this->foodSalesBuildAggregatedRows($restaurantId, $from, $to, 'item');
+            $headers = [
+                'Item', 'GST lines', 'Qty', 'Avg unit', 'Tax %', 'Tax type',
+                'Gross (Before Bill Discount)',
+                'Line discount', 'After discount', 'Net taxable', 'Tax', 'CGST', 'SGST', 'IGST',
+                'Refund (alloc)', 'Svc chg', 'Tip', 'Delivery', 'Rounding', 'POS sheet adj', 'Payment',
+            ];
+            $outRows = [];
+            foreach ($agg as $r) {
+                $taxPct = ! empty($r['tax_rate_mixed']) ? 'Mixed' : (float) $r['tax_rate'];
+                $outRows[] = [
+                    $r['display_name'],
+                    $r['lines_count'],
+                    $r['quantity'],
+                    $r['unit_price'],
+                    $taxPct,
+                    $r['tax_pricing'],
+                    $r['line_gross'],
+                    $r['line_discount'],
+                    $r['line_after_discount'],
+                    $r['net_taxable'],
+                    $r['tax_amount'],
+                    $r['cgst'],
+                    $r['sgst'],
+                    $r['igst'],
+                    $r['refund_alloc'],
+                    $r['service_charge_alloc'],
+                    $r['tip_alloc'],
+                    $r['delivery_alloc'],
+                    $r['rounding_alloc'],
+                    $r['sheet_adjustments'],
+                    '—',
+                ];
+            }
+
+            return [
+                'headers' => $headers,
+                'rows' => $outRows,
+                'restaurant' => RestaurantMaster::find($restaurantId),
+            ];
+        }
+
+        if ($groupBy === 'invoice') {
+            $agg = $this->foodSalesBuildAggregatedRows($restaurantId, $from, $to, 'invoice');
+            $headers = [
+                'Bill #', 'Customer', 'GSTIN', 'Business date', 'GST lines', 'Qty', 'Avg unit', 'Tax %', 'Tax type',
+                'Gross (Before Bill Discount)',
+                'Line discount', 'After discount', 'Net taxable', 'Tax', 'CGST', 'SGST', 'IGST',
+                'Refund (alloc)', 'Svc chg', 'Tip', 'Delivery', 'Rounding', 'POS sheet adj',
+                'Payment', 'Order status', 'Closed / voided',
+            ];
+            $outRows = [];
+            foreach ($agg as $r) {
+                $taxPct = ! empty($r['tax_rate_mixed']) ? 'Mixed' : (float) $r['tax_rate'];
+                $ts = $r['order_status'] === 'void' ? $r['voided_at'] : $r['closed_at'];
+                $outRows[] = [
+                    $r['order_id'],
+                    $r['customer_name'] ?? '',
+                    $r['customer_gstin'] ?? '',
+                    $r['business_date'],
+                    $r['lines_count'],
+                    $r['quantity'],
+                    $r['unit_price'],
+                    $taxPct,
+                    $r['tax_pricing'],
+                    $r['line_gross'],
+                    $r['line_discount'],
+                    $r['line_after_discount'],
+                    $r['net_taxable'],
+                    $r['tax_amount'],
+                    $r['cgst'],
+                    $r['sgst'],
+                    $r['igst'],
+                    $r['refund_alloc'],
+                    $r['service_charge_alloc'],
+                    $r['tip_alloc'],
+                    $r['delivery_alloc'],
+                    $r['rounding_alloc'],
+                    $r['sheet_adjustments'],
+                    $r['payment_methods'] ?? '—',
+                    $r['order_status'],
+                    $ts,
+                ];
+            }
+
+            return [
+                'headers' => $headers,
+                'rows' => $outRows,
+                'restaurant' => RestaurantMaster::find($restaurantId),
+            ];
+        }
+
+        $headers = [
+            'Line ID', 'Line status', 'Bill #', 'Customer', 'GSTIN', 'Business date', 'Item', 'Qty', 'Unit price', 'Tax %', 'Tax type',
+            'Gross (Before Bill Discount)',
+            'Line discount', 'After discount', 'Net taxable', 'Tax', 'CGST', 'SGST', 'IGST',
+            'Refund (alloc)', 'Svc chg', 'Tip', 'Delivery', 'Rounding', 'POS sheet adj',
+            'Payment', 'Order status', 'Closed / voided',
+        ];
+
+        $base = $this->foodSalesLinesBaseQuery($restaurantId, $from, $to);
+        $rows = (clone $base)
+            ->select([
+                'pos_order_items.id as line_id',
+                'pos_order_items.status as line_status',
+                'pos_order_items.order_id',
+                'pos_order_items.quantity',
+                'pos_order_items.unit_price',
+                'pos_order_items.tax_rate',
+                'pos_order_items.line_total',
+                'pos_order_items.combo_id',
+                'menu_items.name as menu_name',
+                'menu_item_variants.size_label',
+                'combos.name as combo_name',
+                'pos_orders.business_date',
+                'pos_orders.closed_at',
+                'pos_orders.voided_at',
+                'pos_orders.status as order_status',
+                'pos_orders.customer_name',
+                'pos_orders.customer_gstin',
+            ])
+            ->orderByDesc('pos_order_items.id')
+            ->get();
+
+        $lineIds = collect($rows)->pluck('line_id')->map(fn ($id) => (int) $id)->all();
+        $itemsById = PosOrderItem::whereIn('id', $lineIds)
+            ->with([
+                'menuItem.tax',
+                'combo.menuItems.tax',
+                'order.refunds',
+                'order.items' => fn ($q) => $q->where('status', 'active'),
+                'order.items.menuItem.tax',
+                'order.items.combo.menuItems.tax',
+            ])
+            ->get()
+            ->keyBy('id');
+
+        $paymentByOrder = $this->foodSalesPaymentMethodsForOrderIds(
+            collect($rows)->pluck('order_id')->unique()->map(fn ($id) => (int) $id)->values()->all()
+        );
+
+        $outRows = [];
+        foreach ($rows as $row) {
+            $comboId = $row->combo_id ?? null;
+            if ($comboId) {
+                $display = 'Combo: '.((string) ($row->combo_name ?? '') !== '' ? $row->combo_name : '—');
+            } else {
+                $name = (string) ($row->menu_name ?? '—');
+                $variant = trim((string) ($row->size_label ?? ''));
+                $display = $variant !== '' ? $name.' — '.$variant : $name;
+            }
+            $ts = $row->order_status === 'void' ? $row->voided_at : $row->closed_at;
+            $item = $itemsById->get((int) $row->line_id);
+            $ex = ($item && $item->order)
+                ? $this->computeFoodLineRegisterFields($item, $item->order)
+                : [
+                    'line_gross' => 0.0,
+                    'line_discount' => 0.0,
+                    'line_after_discount' => 0.0,
+                    'net_taxable' => 0.0,
+                    'tax_amount' => 0.0,
+                    'cgst' => 0.0,
+                    'sgst' => 0.0,
+                    'igst' => 0.0,
+                    'refund_alloc' => 0.0,
+                    'service_charge_alloc' => 0.0,
+                    'tip_alloc' => 0.0,
+                    'delivery_alloc' => 0.0,
+                    'rounding_alloc' => 0.0,
+                    'sheet_adjustments' => 0.0,
+                    'tax_inclusive' => false,
+                    'tax_pricing' => 'Exclusive',
+                    'line_status' => (string) ($row->line_status ?? 'active'),
+                ];
+            $cust = $row->customer_name !== null && trim((string) $row->customer_name) !== ''
+                ? trim((string) $row->customer_name)
+                : '';
+            $gstin = $row->customer_gstin !== null && trim((string) $row->customer_gstin) !== ''
+                ? trim((string) $row->customer_gstin)
+                : '';
+
+            $outRows[] = [
+                $row->line_id,
+                $ex['line_status'] ?? ($row->line_status ?? 'active'),
+                $row->order_id,
+                $cust,
+                $gstin,
+                $row->business_date,
+                $display,
+                $row->quantity,
+                $row->unit_price,
+                $row->tax_rate,
+                $ex['tax_pricing'],
+                $ex['line_gross'],
+                $ex['line_discount'],
+                $ex['line_after_discount'],
+                $ex['net_taxable'],
+                $ex['tax_amount'],
+                $ex['cgst'],
+                $ex['sgst'],
+                $ex['igst'],
+                $ex['refund_alloc'],
+                $ex['service_charge_alloc'],
+                $ex['tip_alloc'],
+                $ex['delivery_alloc'],
+                $ex['rounding_alloc'],
+                $ex['sheet_adjustments'],
+                $paymentByOrder[(int) $row->order_id] ?? '—',
+                $row->order_status,
+                $ts,
+            ];
+        }
+
+        return [
+            'headers' => $headers,
+            'rows' => $outRows,
+            'restaurant' => RestaurantMaster::find($restaurantId),
+        ];
+    }
+
+    /**
+     * Liquor (state VAT) export rows — same shape as food/GST export, VAT labeling.
+     *
+     * @return array{headers: array<int, string>, rows: array<int, array<int, mixed>>, restaurant: RestaurantMaster|null}
+     */
+    private function buildLiquorSalesExportData(int $restaurantId, string $from, string $to, string $groupBy = 'line'): array
+    {
+        if ($groupBy === 'item') {
+            $agg = $this->liquorSalesBuildAggregatedRows($restaurantId, $from, $to, 'item');
+            $headers = [
+                'Item', 'VAT lines', 'Qty', 'Avg unit', 'Tax %', 'Tax type',
+                'Gross (Before Bill Discount)',
+                'Line discount', 'After discount', 'Net taxable', 'VAT',
+                'Refund (alloc)', 'Svc chg', 'Tip', 'Delivery', 'Rounding', 'POS sheet adj', 'Payment',
+            ];
+            $outRows = [];
+            foreach ($agg as $r) {
+                $taxPct = ! empty($r['tax_rate_mixed']) ? 'Mixed' : (float) $r['tax_rate'];
+                $outRows[] = [
+                    $r['display_name'],
+                    $r['lines_count'],
+                    $r['quantity'],
+                    $r['unit_price'],
+                    $taxPct,
+                    $r['tax_pricing'],
+                    $r['line_gross'],
+                    $r['line_discount'],
+                    $r['line_after_discount'],
+                    $r['net_taxable'],
+                    $r['tax_amount'],
+                    $r['refund_alloc'],
+                    $r['service_charge_alloc'],
+                    $r['tip_alloc'],
+                    $r['delivery_alloc'],
+                    $r['rounding_alloc'],
+                    $r['sheet_adjustments'],
+                    '—',
+                ];
+            }
+
+            return [
+                'headers' => $headers,
+                'rows' => $outRows,
+                'restaurant' => RestaurantMaster::find($restaurantId),
+            ];
+        }
+
+        if ($groupBy === 'invoice') {
+            $agg = $this->liquorSalesBuildAggregatedRows($restaurantId, $from, $to, 'invoice');
+            $headers = [
+                'Bill #', 'Customer', 'Customer tax ID', 'Business date', 'VAT lines', 'Qty', 'Avg unit', 'Tax %', 'Tax type',
+                'Gross (Before Bill Discount)',
+                'Line discount', 'After discount', 'Net taxable', 'VAT',
+                'Refund (alloc)', 'Svc chg', 'Tip', 'Delivery', 'Rounding', 'POS sheet adj',
+                'Payment', 'Order status', 'Closed / voided',
+            ];
+            $outRows = [];
+            foreach ($agg as $r) {
+                $taxPct = ! empty($r['tax_rate_mixed']) ? 'Mixed' : (float) $r['tax_rate'];
+                $ts = $r['order_status'] === 'void' ? $r['voided_at'] : $r['closed_at'];
+                $outRows[] = [
+                    $r['order_id'],
+                    $r['customer_name'] ?? '',
+                    $r['customer_gstin'] ?? '',
+                    $r['business_date'],
+                    $r['lines_count'],
+                    $r['quantity'],
+                    $r['unit_price'],
+                    $taxPct,
+                    $r['tax_pricing'],
+                    $r['line_gross'],
+                    $r['line_discount'],
+                    $r['line_after_discount'],
+                    $r['net_taxable'],
+                    $r['tax_amount'],
+                    $r['refund_alloc'],
+                    $r['service_charge_alloc'],
+                    $r['tip_alloc'],
+                    $r['delivery_alloc'],
+                    $r['rounding_alloc'],
+                    $r['sheet_adjustments'],
+                    $r['payment_methods'] ?? '—',
+                    $r['order_status'],
+                    $ts,
+                ];
+            }
+
+            return [
+                'headers' => $headers,
+                'rows' => $outRows,
+                'restaurant' => RestaurantMaster::find($restaurantId),
+            ];
+        }
+
+        $headers = [
+            'Line ID', 'Line status', 'Bill #', 'Customer', 'Customer tax ID', 'Business date', 'Item', 'Qty', 'Unit price', 'Tax %', 'Tax type',
+            'Gross (Before Bill Discount)',
+            'Line discount', 'After discount', 'Net taxable', 'VAT',
+            'Refund (alloc)', 'Svc chg', 'Tip', 'Delivery', 'Rounding', 'POS sheet adj',
+            'Payment', 'Order status', 'Closed / voided',
+        ];
+
+        $base = $this->liquorSalesLinesBaseQuery($restaurantId, $from, $to);
+        $rows = (clone $base)
+            ->select([
+                'pos_order_items.id as line_id',
+                'pos_order_items.status as line_status',
+                'pos_order_items.order_id',
+                'pos_order_items.quantity',
+                'pos_order_items.unit_price',
+                'pos_order_items.tax_rate',
+                'pos_order_items.line_total',
+                'pos_order_items.combo_id',
+                'menu_items.name as menu_name',
+                'menu_item_variants.size_label',
+                'combos.name as combo_name',
+                'pos_orders.business_date',
+                'pos_orders.closed_at',
+                'pos_orders.voided_at',
+                'pos_orders.status as order_status',
+                'pos_orders.customer_name',
+                'pos_orders.customer_gstin',
+            ])
+            ->orderByDesc('pos_order_items.id')
+            ->get();
+
+        $lineIds = collect($rows)->pluck('line_id')->map(fn ($id) => (int) $id)->all();
+        $itemsById = PosOrderItem::whereIn('id', $lineIds)
+            ->with([
+                'menuItem.tax',
+                'combo.menuItems.tax',
+                'order.refunds',
+                'order.items' => fn ($q) => $q->where('status', 'active'),
+                'order.items.menuItem.tax',
+                'order.items.combo.menuItems.tax',
+            ])
+            ->get()
+            ->keyBy('id');
+
+        $paymentByOrder = $this->foodSalesPaymentMethodsForOrderIds(
+            collect($rows)->pluck('order_id')->unique()->map(fn ($id) => (int) $id)->values()->all()
+        );
+
+        $outRows = [];
+        foreach ($rows as $row) {
+            $comboId = $row->combo_id ?? null;
+            if ($comboId) {
+                $display = 'Combo: '.((string) ($row->combo_name ?? '') !== '' ? $row->combo_name : '—');
+            } else {
+                $name = (string) ($row->menu_name ?? '—');
+                $variant = trim((string) ($row->size_label ?? ''));
+                $display = $variant !== '' ? $name.' — '.$variant : $name;
+            }
+            $ts = $row->order_status === 'void' ? $row->voided_at : $row->closed_at;
+            $item = $itemsById->get((int) $row->line_id);
+            $ex = ($item && $item->order)
+                ? $this->computeFoodLineRegisterFields($item, $item->order)
+                : [
+                    'line_gross' => 0.0,
+                    'line_discount' => 0.0,
+                    'line_after_discount' => 0.0,
+                    'net_taxable' => 0.0,
+                    'tax_amount' => 0.0,
+                    'cgst' => 0.0,
+                    'sgst' => 0.0,
+                    'igst' => 0.0,
+                    'refund_alloc' => 0.0,
+                    'service_charge_alloc' => 0.0,
+                    'tip_alloc' => 0.0,
+                    'delivery_alloc' => 0.0,
+                    'rounding_alloc' => 0.0,
+                    'sheet_adjustments' => 0.0,
+                    'tax_inclusive' => false,
+                    'tax_pricing' => 'Exclusive',
+                    'line_status' => (string) ($row->line_status ?? 'active'),
+                ];
+            $cust = $row->customer_name !== null && trim((string) $row->customer_name) !== ''
+                ? trim((string) $row->customer_name)
+                : '';
+            $gstin = $row->customer_gstin !== null && trim((string) $row->customer_gstin) !== ''
+                ? trim((string) $row->customer_gstin)
+                : '';
+
+            $outRows[] = [
+                $row->line_id,
+                $ex['line_status'] ?? ($row->line_status ?? 'active'),
+                $row->order_id,
+                $cust,
+                $gstin,
+                $row->business_date,
+                $display,
+                $row->quantity,
+                $row->unit_price,
+                $row->tax_rate,
+                $ex['tax_pricing'],
+                $ex['line_gross'],
+                $ex['line_discount'],
+                $ex['line_after_discount'],
+                $ex['net_taxable'],
+                $ex['tax_amount'],
+                $ex['refund_alloc'],
+                $ex['service_charge_alloc'],
+                $ex['tip_alloc'],
+                $ex['delivery_alloc'],
+                $ex['rounding_alloc'],
+                $ex['sheet_adjustments'],
+                $paymentByOrder[(int) $row->order_id] ?? '—',
+                $row->order_status,
+                $ts,
+            ];
+        }
+
+        return [
+            'headers' => $headers,
+            'rows' => $outRows,
+            'restaurant' => RestaurantMaster::find($restaurantId),
+        ];
+    }
+
+    /**
+     * Base query: GST (food / F&B) lines — not liquor VAT.
+     * Active and cancelled (voided) lines are included for a full audit trail.
+     */
+    private function foodSalesLinesBaseQuery(int $restaurantId, string $from, string $to)
+    {
+        return DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->leftJoin('menu_items', 'pos_order_items.menu_item_id', '=', 'menu_items.id')
+            ->leftJoin('menu_item_variants', 'pos_order_items.menu_item_variant_id', '=', 'menu_item_variants.id')
+            ->leftJoin('combos', 'pos_order_items.combo_id', '=', 'combos.id')
+            ->leftJoin('users', 'pos_orders.waiter_id', '=', 'users.id')
+            ->whereIn('pos_order_items.status', ['active', 'cancelled'])
+            ->where('pos_orders.restaurant_id', $restaurantId)
+            ->whereIn('pos_orders.status', ['paid', 'refunded', 'void'])
+            ->where(function ($w) {
+                $w->where('pos_order_items.tax_regime', 'gst')
+                    ->orWhere(function ($w2) {
+                        $w2->where(function ($w3) {
+                            $w3->whereNull('pos_order_items.tax_regime')
+                                ->orWhere('pos_order_items.tax_regime', '');
+                        })
+                            ->where(function ($w4) {
+                                $w4->whereExists(function ($q) {
+                                    $q->select(DB::raw(1))
+                                        ->from('menu_items as mi')
+                                        ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                                        ->whereColumn('mi.id', 'pos_order_items.menu_item_id')
+                                        ->whereNotNull('pos_order_items.menu_item_id')
+                                        ->where(function ($q2) {
+                                            $q2->whereNull('mi.tax_id')
+                                                ->orWhereRaw('LOWER(COALESCE(it.type, ?)) <> ?', ['', 'vat']);
+                                        });
+                                })
+                                    ->orWhere(function ($w5) {
+                                        $w5->whereNotNull('pos_order_items.combo_id')
+                                            ->whereNotExists(function ($q) {
+                                                $q->select(DB::raw(1))
+                                                    ->from('combo_items as ci')
+                                                    ->join('menu_items as mi', 'ci.menu_item_id', '=', 'mi.id')
+                                                    ->join('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                                                    ->whereColumn('ci.combo_id', 'pos_order_items.combo_id')
+                                                    ->whereRaw('LOWER(it.type) = ?', ['vat']);
+                                            });
+                                    });
+                            });
+                    });
+            })
+            ->where(function ($q) use ($from, $to) {
+                $q->where(function ($q2) use ($from, $to) {
+                    $q2->whereDate('pos_orders.business_date', '>=', $from)
+                        ->whereDate('pos_orders.business_date', '<=', $to);
+                })->orWhere(function ($q3) use ($from, $to) {
+                    $q3->where('pos_orders.status', 'void')
+                        ->whereDate('pos_orders.voided_at', '>=', $from)
+                        ->whereDate('pos_orders.voided_at', '<=', $to);
+                });
+            });
+    }
+
+    /**
+     * Subset aligned with typical return/filing roll-ups: active lines only, on paid or refunded orders (void bills out).
+     * The full register may still list void/cancelled rows for audit; those do not contribute here.
+     * Not a GSTR-1 / statutory export; refunds and credit notes follow CA treatment.
+     *
+     * @param  \Illuminate\Database\Query\Builder  $base  foodSalesLinesBaseQuery or liquorSalesLinesBaseQuery
+     * @return array{lines_count: int, qty_total: float, revenue_total: float, bills_count: int, note: string}
+     */
+    private function registerStatutoryFilingSummaryFromBase($base): array
+    {
+        $filing = (clone $base)
+            ->whereIn('pos_orders.status', ['paid', 'refunded'])
+            ->where('pos_order_items.status', 'active')
+            ->selectRaw(
+                'COUNT(pos_order_items.id) as lines_count,
+                COALESCE(SUM(pos_order_items.quantity), 0) as qty_total,
+                COALESCE(SUM(pos_order_items.line_total), 0) as revenue_total,
+                COUNT(DISTINCT pos_orders.id) as bills_count'
+            )->first();
+
+        return [
+            'lines_count' => (int) ($filing->lines_count ?? 0),
+            'qty_total' => (float) ($filing->qty_total ?? 0),
+            'revenue_total' => (float) ($filing->revenue_total ?? 0),
+            'bills_count' => (int) ($filing->bills_count ?? 0),
+            'note' => 'Active lines on paid or refunded orders only; void bills and cancelled lines excluded. Not a government return file; refunds and adjustments per CA.',
+        ];
+    }
+
+    private function foodSalesItemKey(PosOrderItem $item): string
+    {
+        if ($item->combo_id) {
+            return 'c:'.(int) $item->combo_id;
+        }
+
+        return 'm:'.(int) ($item->menu_item_id ?? 0).':'.(int) ($item->menu_item_variant_id ?? 0);
+    }
+
+    private function foodSalesItemDisplayName(PosOrderItem $item): string
+    {
+        if ($item->combo_id) {
+            $item->loadMissing('combo');
+            $cname = trim((string) ($item->combo?->name ?? ''));
+
+            return 'Combo: '.($cname !== '' ? $cname : '—');
+        }
+        $item->loadMissing('menuItem', 'variant');
+        $name = (string) ($item->menuItem?->name ?? '—');
+        $variant = trim((string) ($item->variant?->size_label ?? ''));
+
+        return $variant !== '' ? $name.' — '.$variant : $name;
+    }
+
+    /**
+     * Latest payment receiver name per order (same rule as food sales line query).
+     *
+     * @param  array<int>  $orderIds
+     * @return array<int, string>
+     */
+    private function foodSalesCashierNamesForOrderIds(array $orderIds): array
+    {
+        if (count($orderIds) === 0) {
+            return [];
+        }
+        $rows = DB::table('pos_payments as pp')
+            ->join('users as u', 'pp.received_by', '=', 'u.id')
+            ->whereIn('pp.order_id', $orderIds)
+            ->whereNotNull('pp.received_by')
+            ->orderByDesc('pp.paid_at')
+            ->orderByDesc('pp.id')
+            ->select('pp.order_id', 'u.name as cashier_name')
+            ->get();
+        $out = [];
+        foreach ($rows as $r) {
+            if (! isset($out[$r->order_id])) {
+                $out[$r->order_id] = (string) $r->cashier_name;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Distinct POS payment methods per order (order of first occurrence by payment id).
+     *
+     * @param  array<int>  $orderIds
+     * @return array<int, string>
+     */
+    private function foodSalesPaymentMethodsForOrderIds(array $orderIds): array
+    {
+        if (count($orderIds) === 0) {
+            return [];
+        }
+        $rows = DB::table('pos_payments')
+            ->whereIn('order_id', $orderIds)
+            ->orderBy('id')
+            ->select('order_id', 'method')
+            ->get();
+        $labelsByOrder = [];
+        foreach ($rows as $r) {
+            $oid = (int) $r->order_id;
+            $label = match ((string) $r->method) {
+                'cash' => 'Cash',
+                'card' => 'Card',
+                'upi' => 'UPI',
+                'room_charge' => 'Room',
+                default => ucfirst(str_replace('_', ' ', (string) $r->method)),
+            };
+            if (! isset($labelsByOrder[$oid])) {
+                $labelsByOrder[$oid] = [];
+            }
+            if (! in_array($label, $labelsByOrder[$oid], true)) {
+                $labelsByOrder[$oid][] = $label;
+            }
+        }
+        $out = [];
+        foreach ($labelsByOrder as $oid => $labels) {
+            $out[$oid] = implode(', ', $labels);
+        }
+
+        return $out;
+    }
+
+    private function foodSalesBuildAggregatedRows(int $restaurantId, string $from, string $to, string $groupBy): array
+    {
+        return $this->registerBuildAggregatedRowsFromBase(
+            $this->foodSalesLinesBaseQuery($restaurantId, $from, $to),
+            $groupBy
+        );
+    }
+
+    /**
+     * Item- or invoice-wise aggregates for liquor (state VAT) lines — same per-line math as the line register.
+     */
+    private function liquorSalesBuildAggregatedRows(int $restaurantId, string $from, string $to, string $groupBy): array
+    {
+        return $this->registerBuildAggregatedRowsFromBase(
+            $this->liquorSalesLinesBaseQuery($restaurantId, $from, $to),
+            $groupBy
+        );
+    }
+
+    /**
+     * Shared aggregation for food (GST) and liquor (state VAT) registers.
+     *
+     * @param  \Illuminate\Database\Query\Builder  $base
+     * @return array<int, array<string, mixed>>
+     */
+    private function registerBuildAggregatedRowsFromBase($base, string $groupBy): array
+    {
+        $lineIds = (clone $base)->select('pos_order_items.id')->orderBy('pos_order_items.id')->pluck('pos_order_items.id')
+            ->map(fn ($id) => (int) $id)
+            ->values();
+        if ($lineIds->isEmpty()) {
+            return [];
+        }
+
+        $buckets = [];
+
+        foreach ($lineIds->chunk(400) as $chunk) {
+            $posItems = PosOrderItem::whereIn('id', $chunk->all())
+                ->with([
+                    'menuItem.tax',
+                    'variant',
+                    'combo.menuItems.tax',
+                    'order.refunds',
+                    'order.items' => fn ($q) => $q->where('status', 'active'),
+                    'order.items.menuItem.tax',
+                    'order.items.combo.menuItems.tax',
+                    'order.waiter',
+                ])
+                ->get()
+                ->keyBy('id');
+
+            $orderIds = $posItems->pluck('order_id')->unique()->values()->all();
+            $cashierByOrder = $this->foodSalesCashierNamesForOrderIds($orderIds);
+            $paymentByOrder = $this->foodSalesPaymentMethodsForOrderIds($orderIds);
+
+            foreach ($chunk as $lid) {
+                $lid = (int) $lid;
+                $poi = $posItems->get($lid);
+                if (! $poi || ! $poi->order) {
+                    continue;
+                }
+                $order = $poi->order;
+                $ex = $this->computeFoodLineRegisterFields($poi, $order);
+                $k = $groupBy === 'item' ? $this->foodSalesItemKey($poi) : 'o:'.$poi->order_id;
+
+                if (! isset($buckets[$k])) {
+                    if ($groupBy === 'item') {
+                        $buckets[$k] = [
+                            '_key' => $k,
+                            'lines_count' => 0,
+                            'quantity' => 0.0,
+                            'line_gross' => 0.0,
+                            'line_discount' => 0.0,
+                            'line_after_discount' => 0.0,
+                            'net_taxable' => 0.0,
+                            'tax_amount' => 0.0,
+                            'cgst' => 0.0,
+                            'sgst' => 0.0,
+                            'igst' => 0.0,
+                            'refund_alloc' => 0.0,
+                            'service_charge_alloc' => 0.0,
+                            'tip_alloc' => 0.0,
+                            'delivery_alloc' => 0.0,
+                            'rounding_alloc' => 0.0,
+                            'sheet_adjustments' => 0.0,
+                            'tax_rates' => [],
+                            'tax_inclusives' => [],
+                            'tax_pricings' => [],
+                            'display_name' => $this->foodSalesItemDisplayName($poi),
+                        ];
+                    } else {
+                        $buckets[$k] = [
+                            '_key' => $k,
+                            'order_id' => (int) $order->id,
+                            'lines_count' => 0,
+                            'quantity' => 0.0,
+                            'line_gross' => 0.0,
+                            'line_discount' => 0.0,
+                            'line_after_discount' => 0.0,
+                            'net_taxable' => 0.0,
+                            'tax_amount' => 0.0,
+                            'cgst' => 0.0,
+                            'sgst' => 0.0,
+                            'igst' => 0.0,
+                            'refund_alloc' => 0.0,
+                            'service_charge_alloc' => 0.0,
+                            'tip_alloc' => 0.0,
+                            'delivery_alloc' => 0.0,
+                            'rounding_alloc' => 0.0,
+                            'sheet_adjustments' => 0.0,
+                            'tax_rates' => [],
+                            'tax_inclusives' => [],
+                            'tax_pricings' => [],
+                            'customer_name' => $order->customer_name !== null && trim((string) $order->customer_name) !== ''
+                                ? trim((string) $order->customer_name)
+                                : null,
+                            'customer_gstin' => $order->customer_gstin !== null && trim((string) $order->customer_gstin) !== ''
+                                ? trim((string) $order->customer_gstin)
+                                : null,
+                            'business_date' => $order->business_date?->format('Y-m-d'),
+                            'closed_at' => $order->closed_at?->toDateTimeString(),
+                            'voided_at' => $order->voided_at?->toDateTimeString(),
+                            'order_status' => (string) $order->status,
+                            'waiter' => $order->waiter?->name ?? '—',
+                            'cashier' => $cashierByOrder[(int) $order->id] ?? '—',
+                            'payment_methods' => $paymentByOrder[(int) $order->id] ?? '—',
+                        ];
+                    }
+                }
+
+                $b = & $buckets[$k];
+                $b['lines_count']++;
+                $b['quantity'] += (float) $poi->quantity;
+                $b['line_gross'] += $ex['line_gross'];
+                $b['line_discount'] += $ex['line_discount'];
+                $b['line_after_discount'] += $ex['line_after_discount'];
+                $b['net_taxable'] += $ex['net_taxable'];
+                $b['tax_amount'] += $ex['tax_amount'];
+                $b['cgst'] += $ex['cgst'];
+                $b['sgst'] += $ex['sgst'];
+                $b['igst'] += $ex['igst'];
+                $b['refund_alloc'] += $ex['refund_alloc'];
+                $b['service_charge_alloc'] += $ex['service_charge_alloc'];
+                $b['tip_alloc'] += $ex['tip_alloc'];
+                $b['delivery_alloc'] += $ex['delivery_alloc'];
+                $b['rounding_alloc'] += $ex['rounding_alloc'];
+                $b['sheet_adjustments'] += $ex['sheet_adjustments'];
+                $b['tax_rates'][] = (float) $poi->tax_rate;
+                $b['tax_inclusives'][] = (bool) ($ex['tax_inclusive'] ?? false);
+                $b['tax_pricings'][] = (string) ($ex['tax_pricing'] ?? 'Exclusive');
+                unset($b);
+            }
+        }
+
+        $rows = [];
+        foreach ($buckets as $b) {
+            $qty = (float) $b['quantity'];
+            $rates = array_unique(array_map(static fn ($x) => round((float) $x, 4), $b['tax_rates']));
+            $tax_rate = count($rates) === 1 ? (float) reset($rates) : null;
+            $tpU = array_unique($b['tax_pricings']);
+            $tax_pricing = count($tpU) === 1 ? reset($tpU) : 'Mixed';
+            $incU = array_unique(array_map(static fn ($x) => $x ? '1' : '0', $b['tax_inclusives']));
+            $tax_inclusive = count($incU) === 1 && ($b['tax_inclusives'][0] ?? false) === true;
+
+            $lineTotal = round($b['line_gross'], 2);
+            $unit_price = $qty > 0 ? round($lineTotal / $qty, 2) : 0.0;
+
+            if ($groupBy === 'item') {
+                $key = (string) $b['_key'];
+                $rows[] = [
+                    'row_kind' => 'item',
+                    'row_id' => 'item:'.$key,
+                    'line_id' => 0,
+                    'order_id' => 0,
+                    'item_key' => $key,
+                    'lines_count' => (int) $b['lines_count'],
+                    'customer_name' => null,
+                    'customer_gstin' => null,
+                    'display_name' => (string) $b['display_name'],
+                    'quantity' => round($qty, 4),
+                    'unit_price' => $unit_price,
+                    'tax_rate' => $tax_rate ?? 0.0,
+                    'tax_rate_mixed' => $tax_rate === null,
+                    'line_total' => $lineTotal,
+                    'line_gross' => round($b['line_gross'], 2),
+                    'line_discount' => round($b['line_discount'], 2),
+                    'line_after_discount' => round($b['line_after_discount'], 2),
+                    'net_taxable' => round($b['net_taxable'], 2),
+                    'tax_amount' => round($b['tax_amount'], 2),
+                    'vat_amount' => round($b['tax_amount'], 2),
+                    'cgst' => round($b['cgst'], 2),
+                    'sgst' => round($b['sgst'], 2),
+                    'igst' => round($b['igst'], 2),
+                    'refund_alloc' => round($b['refund_alloc'], 2),
+                    'service_charge_alloc' => round($b['service_charge_alloc'], 2),
+                    'tip_alloc' => round($b['tip_alloc'], 2),
+                    'delivery_alloc' => round($b['delivery_alloc'], 2),
+                    'rounding_alloc' => round($b['rounding_alloc'], 2),
+                    'sheet_adjustments' => round($b['sheet_adjustments'], 2),
+                    'tax_inclusive' => $tax_inclusive,
+                    'tax_pricing' => $tax_pricing,
+                    'business_date' => null,
+                    'closed_at' => null,
+                    'voided_at' => null,
+                    'order_status' => '—',
+                    'waiter' => '—',
+                    'cashier' => '—',
+                    'payment_methods' => '—',
+                ];
+            } else {
+                $oid = (int) $b['order_id'];
+                $lc = (int) $b['lines_count'];
+                $rows[] = [
+                    'row_kind' => 'invoice',
+                    'row_id' => 'invoice:'.$oid,
+                    'line_id' => 0,
+                    'order_id' => $oid,
+                    'item_key' => null,
+                    'lines_count' => $lc,
+                    'customer_name' => $b['customer_name'],
+                    'customer_gstin' => $b['customer_gstin'],
+                    'display_name' => '('.$lc.' lines)',
+                    'quantity' => round($qty, 4),
+                    'unit_price' => $unit_price,
+                    'tax_rate' => $tax_rate ?? 0.0,
+                    'tax_rate_mixed' => $tax_rate === null,
+                    'line_total' => $lineTotal,
+                    'line_gross' => round($b['line_gross'], 2),
+                    'line_discount' => round($b['line_discount'], 2),
+                    'line_after_discount' => round($b['line_after_discount'], 2),
+                    'net_taxable' => round($b['net_taxable'], 2),
+                    'tax_amount' => round($b['tax_amount'], 2),
+                    'vat_amount' => round($b['tax_amount'], 2),
+                    'cgst' => round($b['cgst'], 2),
+                    'sgst' => round($b['sgst'], 2),
+                    'igst' => round($b['igst'], 2),
+                    'refund_alloc' => round($b['refund_alloc'], 2),
+                    'service_charge_alloc' => round($b['service_charge_alloc'], 2),
+                    'tip_alloc' => round($b['tip_alloc'], 2),
+                    'delivery_alloc' => round($b['delivery_alloc'], 2),
+                    'rounding_alloc' => round($b['rounding_alloc'], 2),
+                    'sheet_adjustments' => round($b['sheet_adjustments'], 2),
+                    'tax_inclusive' => $tax_inclusive,
+                    'tax_pricing' => $tax_pricing,
+                    'business_date' => $b['business_date'],
+                    'closed_at' => $b['closed_at'],
+                    'voided_at' => $b['voided_at'],
+                    'order_status' => (string) $b['order_status'],
+                    'waiter' => (string) $b['waiter'],
+                    'cashier' => (string) $b['cashier'],
+                    'payment_methods' => (string) ($b['payment_methods'] ?? '—'),
+                ];
+            }
+        }
+
+        if ($groupBy === 'item') {
+            usort($rows, static function ($a, $b) {
+                return strcmp((string) $a['display_name'], (string) $b['display_name']);
+            });
+        } else {
+            usort($rows, static function ($a, $b) {
+                $db = strcmp((string) $b['business_date'], (string) $a['business_date']);
+                if ($db !== 0) {
+                    return $db;
+                }
+
+                return (int) $b['order_id'] <=> (int) $a['order_id'];
+            });
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Per-line GST breakdown and order-level allocations for food / GST line register.
+     * Matches POS recalculate() / receipt math (discount ratio, CGST+SGST vs IGST).
+     *
+     * Line gross uses stored pos_order_items.line_total (final line before bill discount; modifiers in combo/line are already included).
+     * Refunds: order-level refund total is allocated by line share — not item-level refund attribution.
+     * POS sheet_adjustments: internal reconciliation only (svc+tip+delivery+rounding shares), not a statutory tax line.
+     * Refunds: order-level only until item-linked refunds exist in pos_order_refunds (future: map cancels to lines).
+     *
+     * @return array<string, float|bool|string>
+     */
+    private function computeFoodLineRegisterFields(PosOrderItem $item, PosOrder $order): array
+    {
+        if (($item->status ?? '') === 'cancelled') {
+            return $this->computeCancelledLineRegisterFields($item, $order);
+        }
+
+        $order->loadMissing([
+            'refunds',
+            'items' => fn ($q) => $q->where('status', 'active'),
+            'items.menuItem.tax',
+            'items.combo.menuItems.tax',
+        ]);
+        $item->loadMissing(['menuItem.tax', 'combo.menuItems.tax']);
+
+        $activeItems = $order->items->where('status', 'active');
+        $grossSubtotal = (float) $activeItems->sum(fn ($i) => floatval($i->line_total));
+
+        $discountAmount = 0.0;
+        if ($order->discount_type === 'percent') {
+            $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
+        } elseif ($order->discount_type === 'flat') {
+            $discountAmount = min((float) ($order->discount_value ?? 0), $grossSubtotal);
+        }
+        $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0.0;
+
+        $lineGross = (float) $item->line_total;
+        $lineDiscountShare = round($lineGross * $discountRatio, 2);
+        $lineAfterDiscount = round($lineGross * (1 - $discountRatio), 2);
+
+        $refundTotal = (float) $order->refunds->sum('amount');
+        $share = $grossSubtotal > 0 ? ($lineGross / $grossSubtotal) : 0.0;
+        $lineRefundAlloc = round($refundTotal * $share, 2);
+
+        [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($item, $order, $discountRatio);
+        $kind = $this->posLineTaxSupplyKind($item, $order);
+
+        $cgst = 0.0;
+        $sgst = 0.0;
+        $igst = 0.0;
+        if ($order->tax_exempt || $order->is_complimentary) {
+            $lineTax = 0.0;
+            $lineNet = $lineAfterDiscount;
+        }
+        if (! $order->tax_exempt && ! $order->is_complimentary) {
+            if ($kind === 'local_gst') {
+                $cgst = round($lineTax / 2, 2);
+                $sgst = round($lineTax - $cgst, 2);
+            } elseif ($kind === 'igst') {
+                $igst = round($lineTax, 2);
+            }
+        }
+
+        $svc = round((float) ($order->service_charge_amount ?? 0) * $share, 2);
+        $tip = round((float) ($order->tip_amount ?? 0) * $share, 2);
+        $del = ($order->order_type === 'delivery')
+            ? round((float) ($order->delivery_charge ?? 0) * $share, 2)
+            : 0.0;
+        $rnd = round((float) ($order->rounding_amount ?? 0) * $share, 2);
+        $sheetAdjustments = round($svc + $tip + $del + $rnd, 2);
+
+        $taxInclusive = $this->linePriceTaxInclusive($item, $order);
+
+        return [
+            'line_gross' => round($lineGross, 2),
+            'line_discount' => $lineDiscountShare,
+            'line_after_discount' => $lineAfterDiscount,
+            'net_taxable' => round($lineNet, 2),
+            'tax_amount' => round($lineTax, 2),
+            'cgst' => $cgst,
+            'sgst' => $sgst,
+            'igst' => $igst,
+            'refund_alloc' => $lineRefundAlloc,
+            'service_charge_alloc' => $svc,
+            'tip_alloc' => $tip,
+            'delivery_alloc' => $del,
+            'rounding_alloc' => $rnd,
+            'sheet_adjustments' => $sheetAdjustments,
+            'tax_inclusive' => $taxInclusive,
+            'tax_pricing' => $taxInclusive ? 'Inclusive' : 'Exclusive',
+            'line_status' => 'active',
+        ];
+    }
+
+    /**
+     * Register display for a cancelled (voided) line: no bill-discount share, no
+     * refund/charge allocation — tax is derived from stored line_total and rate only.
+     *
+     * @return array<string, float|bool|string>
+     */
+    private function computeCancelledLineRegisterFields(PosOrderItem $item, PosOrder $order): array
+    {
+        $item->loadMissing(['menuItem.tax', 'combo.menuItems.tax']);
+
+        $discountRatio = 0.0;
+        $lineGross = (float) $item->line_total;
+        $lineAfterDiscount = $lineGross;
+
+        [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($item, $order, $discountRatio);
+        $kind = $this->posLineTaxSupplyKind($item, $order);
+
+        $cgst = 0.0;
+        $sgst = 0.0;
+        $igst = 0.0;
+        if ($order->tax_exempt || $order->is_complimentary) {
+            $lineTax = 0.0;
+            $lineNet = $lineAfterDiscount;
+        }
+        if (! $order->tax_exempt && ! $order->is_complimentary) {
+            if ($kind === 'local_gst') {
+                $cgst = round($lineTax / 2, 2);
+                $sgst = round($lineTax - $cgst, 2);
+            } elseif ($kind === 'igst') {
+                $igst = round($lineTax, 2);
+            }
+        }
+
+        $taxInclusive = $this->linePriceTaxInclusive($item, $order);
+
+        return [
+            'line_gross' => round($lineGross, 2),
+            'line_discount' => 0.0,
+            'line_after_discount' => round($lineAfterDiscount, 2),
+            'net_taxable' => round($lineNet, 2),
+            'tax_amount' => round($lineTax, 2),
+            'cgst' => $cgst,
+            'sgst' => $sgst,
+            'igst' => $igst,
+            'refund_alloc' => 0.0,
+            'service_charge_alloc' => 0.0,
+            'tip_alloc' => 0.0,
+            'delivery_alloc' => 0.0,
+            'rounding_alloc' => 0.0,
+            'sheet_adjustments' => 0.0,
+            'tax_inclusive' => $taxInclusive,
+            'tax_pricing' => $taxInclusive ? 'Inclusive' : 'Exclusive',
+            'line_status' => 'cancelled',
+        ];
+    }
+
+    /**
      * POS refund register (audit / reconciliation): one row per refund.
      *
      * Query: from, to, restaurant_id (optional), page
      */
     public function refundsAdjustmentsReport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-refunds-adjustments');
 
         $validated = $request->validate([
             'from' => 'required|date',
@@ -635,7 +2476,7 @@ class PosController extends Controller
      */
     public function refundsAdjustmentsExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-refunds-adjustments');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -719,7 +2560,7 @@ class PosController extends Controller
      */
     public function voidsDiscountsReport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-voids-discounts');
 
         $validated = $request->validate([
             'from' => 'required|date',
@@ -965,7 +2806,7 @@ class PosController extends Controller
      */
     public function voidsDiscountsExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-voids-discounts');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -1171,7 +3012,7 @@ class PosController extends Controller
      */
     public function orderTypeMixReport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-order-type-mix');
 
         $validated = $request->validate([
             'from' => 'required|date',
@@ -1236,7 +3077,7 @@ class PosController extends Controller
 
     public function orderTypeMixExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-order-type-mix');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -1301,7 +3142,7 @@ class PosController extends Controller
      */
     public function menuPerformanceReport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-menu-performance');
 
         $validated = $request->validate([
             'from' => 'required|date',
@@ -1409,7 +3250,7 @@ class PosController extends Controller
 
     public function menuPerformanceExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-menu-performance');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -1483,7 +3324,7 @@ class PosController extends Controller
      */
     public function taxGstSummaryReport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-tax-gst-summary');
 
         $validated = $request->validate([
             'from' => 'required|date',
@@ -1551,7 +3392,7 @@ class PosController extends Controller
 
     public function taxGstSummaryExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-tax-gst-summary');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -1616,7 +3457,7 @@ class PosController extends Controller
      */
     public function salesReportExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-sales');
 
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
@@ -1645,15 +3486,20 @@ class PosController extends Controller
             $summary = [
                 'count' => $orders->count(),
                 'net' => $orders->where('status', '!=', 'void')->sum('total_amount'),
-                'refunds' => $orders->map(fn($o) => $o->refunds->sum('amount'))->sum(),
+                'refunds' => $orders->map(fn ($o) => $o->refunds->sum('amount'))->sum(),
+                'gst_duty' => (float) $orders->sum(fn ($o) => (float) ($o->cgst_amount ?? 0) + (float) ($o->sgst_amount ?? 0) + (float) ($o->igst_amount ?? 0)),
+                'vat_tax' => (float) $orders->sum(fn ($o) => (float) ($o->vat_tax_amount ?? 0)),
+                'gst_net_taxable' => (float) $orders->sum(fn ($o) => (float) ($o->gst_net_taxable ?? 0)),
+                'vat_net_taxable' => (float) $orders->sum(fn ($o) => (float) ($o->vat_net_taxable ?? 0)),
             ];
             $pdf = Pdf::loadView('reports.sales', [
                 'orders' => $orders,
                 'restaurant' => $restaurant,
                 'from' => $from,
                 'to' => $to,
-                'summary' => $summary
-            ]);
+                'summary' => $summary,
+            ])->setPaper('a4', 'landscape');
+
             return $pdf->download("sales_report_{$from}_to_{$to}.pdf");
         }
 
@@ -1668,9 +3514,10 @@ class PosController extends Controller
         ];
 
         $columns = [
-            'Bill #', 'Date', 'Outlet', 'Customer Name', 'GSTIN', 'Status', 
-            'Gross / Subtotal', 'Discount', 'Tax', 'Srv Chg', 'Tips', 
-            'Net Total', 'Refunded', 'Payment Method', 'Staff', 'Order Type'
+            'Bill #', 'Date', 'Outlet', 'Customer Name', 'GSTIN', 'Status',
+            'Gross / Subtotal', 'Discount', 'Tax', 'CGST', 'SGST', 'IGST', 'Liquor VAT',
+            'GST Taxable', 'VAT Taxable', 'Srv Chg', 'Tips',
+            'Net Total', 'Refunded', 'Payment Method', 'Staff', 'Order Type',
         ];
 
         $callback = function() use($orders, $columns) {
@@ -1696,13 +3543,19 @@ class PosController extends Controller
                     $o->subtotal,
                     $o->discount_amount,
                     $o->tax_amount,
+                    $o->cgst_amount ?? 0,
+                    $o->sgst_amount ?? 0,
+                    $o->igst_amount ?? 0,
+                    $o->vat_tax_amount ?? 0,
+                    $o->gst_net_taxable ?? 0,
+                    $o->vat_net_taxable ?? 0,
                     $o->service_charge_amount,
                     $o->tip_amount,
                     $o->total_amount,
                     $o->refunds->sum('amount'),
                     $paymentModes,
                     $o->waiter?->name ?? '—',
-                    $o->order_type ?? 'dine_in'
+                    $o->order_type ?? 'dine_in',
                 ]);
             }
             fclose($file);
@@ -1713,7 +3566,7 @@ class PosController extends Controller
 
     public function b2bSalesReportExport(Request $request)
     {
-        $this->checkPermission('view-reports');
+        $this->checkPermission('report-b2b-sales');
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
         $to = $request->query('to') ?? now()->toDateString();
@@ -1769,7 +3622,7 @@ class PosController extends Controller
      */
     public function salesReportOrders(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('report-sales');
         $date = $request->input('date');
         $restaurantId = $request->input('restaurant_id');
 
@@ -2176,12 +4029,20 @@ class PosController extends Controller
                 $comboTaxRate = $restaurantId
                     ? $this->resolveComboTaxRate($c, (int) $restaurantId)
                     : 0;
+                $comboTaxRegime = $restaurantId
+                    ? $this->resolveComboTaxRegime($c, (int) $restaurantId)
+                    : 'gst';
+                $comboSupplyType = $comboTaxRegime === 'vat_liquor'
+                    ? 'vat'
+                    : ($this->comboHasInterstateGstComponent($c) ? 'inter-state' : 'local');
 
                 return (object) [
                     'id' => $c->id,
                     'name' => $c->name,
                     'price' => $price,
                     'tax_rate' => $comboTaxRate,
+                    'tax_regime' => $comboTaxRegime,
+                    'tax_supply_type' => $comboSupplyType,
                     'price_tax_inclusive' => $rcRow ? (bool) ($rcRow->price_tax_inclusive ?? true) : true,
                     'type' => 'combo',
                     'item_code' => 'COMBO-'.$c->id,
@@ -2809,6 +4670,7 @@ class PosController extends Controller
                         $comboTaxCache[(int) $combo->id] = $this->resolveComboTaxRate($combo, (int) $order->restaurant_id);
                     }
                     $taxRate = (float) $comboTaxCache[(int) $combo->id];
+                    $taxRegime = $this->resolveComboTaxRegime($combo, (int) $order->restaurant_id);
                     $matching = $currentActive->filter(
                         fn ($i) => $i->combo_id == $row['combo_id']
                             && trim($i->notes ?? '') === trim($notes ?? '')
@@ -2854,6 +4716,7 @@ class PosController extends Controller
                     }
                     $taxRate = floatval($menuItem->tax?->rate ?? 0);
                     $priceTaxInclusive = (bool) ($rmi->price_tax_inclusive ?? true);
+                    $taxRegime = strtolower((string) ($menuItem->tax?->type ?? 'local')) === 'vat' ? 'vat_liquor' : 'gst';
                     $matching = $currentActive->filter(
                         fn ($i) => $i->menu_item_id == $row['menu_item_id']
                             && ($i->menu_item_variant_id ?? null) == $variantId
@@ -2874,6 +4737,7 @@ class PosController extends Controller
                     'quantity' => $q,
                     'unit_price' => $u,
                     'tax_rate' => $taxRate,
+                    'tax_regime' => $taxRegime,
                     'price_tax_inclusive' => $priceTaxInclusive,
                     'line_total' => $u * $q,
                     'kot_sent' => false,
@@ -2891,6 +4755,7 @@ class PosController extends Controller
                             'quantity' => $unsent->quantity + $delta,
                             'unit_price' => $unitPrice,
                             'tax_rate' => $taxRate,
+                            'tax_regime' => $taxRegime,
                             'price_tax_inclusive' => $priceTaxInclusive,
                             'line_total' => $unitPrice * ($unsent->quantity + $delta),
                             'notes' => $notes,
@@ -2944,6 +4809,7 @@ class PosController extends Controller
                                     'quantity' => $newQty,
                                     'unit_price' => $unitPrice,
                                     'tax_rate' => $taxRate,
+                                    'tax_regime' => $taxRegime,
                                     'price_tax_inclusive' => $priceTaxInclusive,
                                     'line_total' => $unitPrice * $newQty,
                                     'notes' => $notes,
@@ -3360,6 +5226,14 @@ class PosController extends Controller
             'payments.*.reference_no' => 'nullable|string',
         ]);
 
+        // Discount/complimentary is an elevated permission (separate from settle).
+        if (
+            ((float) ($validated['discount_value'] ?? 0) > 0) ||
+            ((bool) ($validated['is_complimentary'] ?? false) === true)
+        ) {
+            $this->checkPermission('pos-discount');
+        }
+
         // Percent-type caps at 100; flat-type capped at subtotal in recalculate()
         if (($validated['discount_type'] ?? null) === 'percent' && ($validated['discount_value'] ?? 0) > 100) {
             return response()->json(['message' => 'Discount percent cannot exceed 100%.'], 422);
@@ -3493,7 +5367,7 @@ class PosController extends Controller
 
     public function reopen(PosOrder $order)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('pos-reopen-order');
         $this->authorizeOrderAccess($order);
         if ($this->isBusinessDateClosedForOrder($order)) {
             return response()->json(['message' => 'Cannot re-open: business date is already closed for this outlet.'], 422);
@@ -3536,7 +5410,7 @@ class PosController extends Controller
 
     public function void(Request $request, PosOrder $order)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('pos-void-item');
         $this->authorizeOrderAccess($order);
         if (in_array($order->status, ['paid', 'refunded', 'void'])) {
             return response()->json(['message' => 'Cannot void a paid, refunded, or already-voided order.'], 422);
@@ -3608,7 +5482,7 @@ class PosController extends Controller
 
     public function voidItems(Request $request, PosOrder $order)
     {
-        $this->checkPermission('pos-order');
+        $this->checkPermission('pos-void-item');
         $this->authorizeOrderAccess($order);
         if (in_array($order->status, ['paid', 'void', 'refunded'])) {
             return response()->json(['message' => 'Cannot void items on a paid, voided or refunded order.'], 422);
@@ -3721,7 +5595,7 @@ class PosController extends Controller
 
     public function refund(Request $request, PosOrder $order)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('pos-void-item');
         $this->authorizeOrderAccess($order);
         if (! in_array($order->status, ['paid', 'refunded'])) {
             return response()->json(['message' => 'Only paid orders can be refunded.'], 422);
@@ -3805,7 +5679,7 @@ class PosController extends Controller
 
     public function kitchenDisplay(Request $request)
     {
-        $this->checkPermission('pos-order');
+        $this->checkPermission('kitchen-production');
         $restaurantId = $request->input('restaurant_id');
         if ($restaurantId) {
             $this->authorizeRestaurantId((int) $restaurantId);
@@ -3841,18 +5715,13 @@ class PosController extends Controller
 
         $orders = $query->orderBy('opened_at')->get()
             ->map(function ($order) use ($restaurantId, $user) {
-                // Determine if THIS KDS SCREEN we are viewing is a Bar or Kitchen
-                $currentScreen = $restaurantId ? \App\Models\RestaurantMaster::with('department')->find($restaurantId) : null;
+                // Determine Bar vs Kitchen KDS based on USER department (not outlet name).
+                // Reason: outlet names can contain "bar" (e.g. "Bar & Restaurant") and wrongly
+                // hide all kitchen items when a specific outlet is selected.
                 $userDept = $user ? $user->departments()->first() : null;
-
-                // Check by selected outlet OR by user's assigned department for 'All Outlets' view
-                $isBarKds = ($currentScreen && (
-                    stripos($currentScreen->name, 'bar') !== false ||
-                    ($currentScreen->department && stripos($currentScreen->department->name, 'bar') !== false) ||
-                    ($currentScreen->department && $currentScreen->department->code === 'BAR')
-                )) || (! $currentScreen && $userDept && (
-                    stripos($userDept->name, 'bar') !== false ||
-                    $userDept->code === 'BAR'
+                $isBarKds = (bool) ($userDept && (
+                    ($userDept->code && strtoupper((string) $userDept->code) === 'BAR') ||
+                    stripos((string) $userDept->name, 'bar') !== false
                 ));
 
                 $label = match ($order->order_type ?? 'dine_in') {
@@ -3876,11 +5745,14 @@ class PosController extends Controller
                             return true;
                         } // Show all in master view
 
-                        // Bar KDS sees items that ARE direct sale (spirits, beer, cocktails)
-                        // Kitchen KDS sees items that are NOT direct sale (food, made-to-order)
-                        return $isBarKds
-                            ? (bool) ($item->menuItem?->is_direct_sale ?? false)
-                            : ! (bool) ($item->menuItem?->is_direct_sale ?? false);
+                        // When a specific outlet is selected, only BAR users should be limited
+                        // to direct-sale items. Kitchen users should see all KOT items, since
+                        // menu master data may not reliably mark is_direct_sale for every item.
+                        if ($isBarKds) {
+                            return (bool) ($item->menuItem?->is_direct_sale ?? false);
+                        }
+
+                        return true;
                     });
 
                 // Per line: hide only when this line is served (picked up / delivered)
@@ -4768,12 +6640,158 @@ class PosController extends Controller
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    private function resolveComboTaxRegime(Combo $combo, int $restaurantId): string
+    {
+        $combo->loadMissing('menuItems.tax');
+        foreach ($combo->menuItems as $mi) {
+            $t = strtolower((string) ($mi->tax?->type ?? 'local'));
+            if ($t !== 'vat') {
+                return 'gst';
+            }
+        }
+
+        return $combo->menuItems->isNotEmpty() ? 'vat_liquor' : 'gst';
+    }
+
+    private function comboHasInterstateGstComponent(Combo $combo): bool
+    {
+        $combo->loadMissing('menuItems.tax');
+        foreach ($combo->menuItems as $mi) {
+            if (strtolower((string) ($mi->tax?->type ?? '')) === 'inter-state') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return 'vat'|'igst'|'local_gst' */
+    private function posLineTaxSupplyKind(PosOrderItem $i, PosOrder $order): string
+    {
+        $i->loadMissing(['menuItem.tax', 'combo.menuItems.tax']);
+        if ($i->combo_id && $i->combo) {
+            if ($this->resolveComboTaxRegime($i->combo, (int) $order->restaurant_id) === 'vat_liquor') {
+                return 'vat';
+            }
+
+            return $this->comboHasInterstateGstComponent($i->combo) ? 'igst' : 'local_gst';
+        }
+        if ($i->menu_item_id && $i->menuItem?->tax) {
+            $t = strtolower((string) $i->menuItem->tax->type);
+            if ($t === 'vat') {
+                return 'vat';
+            }
+            if ($t === 'inter-state') {
+                return 'igst';
+            }
+
+            return 'local_gst';
+        }
+
+        return 'local_gst';
+    }
+
+    private function posLineTaxRegimeSnapshot(PosOrderItem $i, int $restaurantId): string
+    {
+        $i->loadMissing(['menuItem.tax', 'combo.menuItems.tax']);
+        if ($i->combo_id && $i->combo) {
+            return $this->resolveComboTaxRegime($i->combo, $restaurantId);
+        }
+        if ($i->menu_item_id && $i->menuItem?->tax) {
+            return strtolower((string) $i->menuItem->tax->type) === 'vat' ? 'vat_liquor' : 'gst';
+        }
+
+        return 'gst';
+    }
+
+    private function posLineItemTaxSupplyTypeForApi(PosOrderItem $i, PosOrder $order): string
+    {
+        $kind = $this->posLineTaxSupplyKind($i, $order);
+
+        return match ($kind) {
+            'vat' => 'vat',
+            'igst' => 'inter-state',
+            default => 'local',
+        };
+    }
+
+    /**
+     * GST component lines for bills/receipts. Liquor (state VAT) is not listed — price is shown on the line only.
+     *
+     * @return array{0: array<int, array{name: string, amount: float}>, 1: array<int, array{name: string, amount: float}>} [gstLines, vatLines always empty]
+     */
+    private function buildPosOrderTaxDisplayLines(PosOrder $order): array
+    {
+        $order->loadMissing([
+            'items' => fn ($q) => $q->where('status', 'active'),
+            'items.menuItem.tax',
+            'items.combo.menuItems.tax',
+        ]);
+        $activeItems = $order->items->where('status', 'active');
+        $grossSubtotal = $activeItems->sum(fn ($i) => floatval($i->line_total));
+        $discountAmount = 0;
+        if ($order->discount_type === 'percent') {
+            $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
+        } elseif ($order->discount_type === 'flat') {
+            $discountAmount = min(floatval($order->discount_value ?? 0), $grossSubtotal);
+        }
+        $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
+
+        $byLocalRate = [];
+        $byIgstRate = [];
+        $fmtRate = fn (float $r) => rtrim(rtrim(number_format($r, 2, '.', ''), '0'), '.');
+
+        foreach ($activeItems as $i) {
+            if ($order->tax_exempt || $order->is_complimentary) {
+                continue;
+            }
+            [$lineTax,] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
+            $r = round(floatval($i->tax_rate), 4);
+            $kind = $this->posLineTaxSupplyKind($i, $order);
+            if ($lineTax <= 0 && $r <= 0) {
+                continue;
+            }
+            if ($kind === 'vat') {
+                continue;
+            }
+            if ($kind === 'igst') {
+                $byIgstRate[$r] = ($byIgstRate[$r] ?? 0) + $lineTax;
+            } else {
+                $byLocalRate[$r] = ($byLocalRate[$r] ?? 0) + $lineTax;
+            }
+        }
+
+        $gstLines = [];
+        krsort($byLocalRate, SORT_NUMERIC);
+        foreach ($byLocalRate as $rate => $total) {
+            $total = round((float) $total, 2);
+            if ($total <= 0 || $rate <= 0) {
+                continue;
+            }
+            $half = $rate / 2;
+            $cgst = round($total / 2, 2);
+            $sgst = round($total - $cgst, 2);
+            $gstLines[] = ['name' => 'CGST @ '.$fmtRate($half).'%', 'amount' => $cgst];
+            $gstLines[] = ['name' => 'SGST @ '.$fmtRate($half).'%', 'amount' => $sgst];
+        }
+        krsort($byIgstRate, SORT_NUMERIC);
+        foreach ($byIgstRate as $rate => $total) {
+            $total = round((float) $total, 2);
+            if ($total <= 0 || $rate <= 0) {
+                continue;
+            }
+            $gstLines[] = ['name' => 'IGST @ '.$fmtRate($rate).'%', 'amount' => $total];
+        }
+
+        return [$gstLines, []];
+    }
+
     private function recalculate(PosOrder $order): void
     {
         $order->refresh();
         $order->load(['items' => function ($q) {
             $q->where('status', 'active');
-        }]);
+        }, 'items.menuItem.tax', 'items.combo.menuItems.tax']);
 
         $activeItems = $order->items;
         
@@ -4790,15 +6808,40 @@ class PosController extends Controller
 
         $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
         
-        // 3. Extract Tax and calculate true Net Subtotal
+        // 3. Extract Tax and calculate true Net Subtotal; CGST/SGST/IGST/VAT buckets
         $totalTaxAmount = 0.0;
         $totalNetTaxable = 0.0;
+        $localGstTax = 0.0;
+        $igstTax = 0.0;
+        $vatTax = 0.0;
+        $gstNetTaxable = 0.0;
+        $vatNetTaxable = 0.0;
+        $restaurantId = (int) $order->restaurant_id;
 
         foreach ($activeItems as $i) {
+            $reg = $this->posLineTaxRegimeSnapshot($i, $restaurantId);
+            if (($i->tax_regime ?? null) !== $reg) {
+                PosOrderItem::where('id', $i->id)->update(['tax_regime' => $reg]);
+                $i->tax_regime = $reg;
+            }
             [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
             $totalTaxAmount += $lineTax;
             $totalNetTaxable += $lineNet;
+            $kind = $this->posLineTaxSupplyKind($i, $order);
+            if ($kind === 'vat') {
+                $vatTax += $lineTax;
+                $vatNetTaxable += $lineNet;
+            } elseif ($kind === 'igst') {
+                $igstTax += $lineTax;
+                $gstNetTaxable += $lineNet;
+            } else {
+                $localGstTax += $lineTax;
+                $gstNetTaxable += $lineNet;
+            }
         }
+
+        $cgstAmount = round($localGstTax / 2, 2);
+        $sgstAmount = round($localGstTax - $cgstAmount, 2);
 
         // 4. Other charges (Service Charge, Tips, Delivery)
         // Usually, Service Charge is calculated on the Gross Subtotal
@@ -4818,6 +6861,12 @@ class PosController extends Controller
             $serviceChargeAmount = 0;
             $tipAmount = 0;
             $totalTaxAmount = 0;
+            $cgstAmount = 0;
+            $sgstAmount = 0;
+            $igstTax = 0;
+            $vatTax = 0;
+            $gstNetTaxable = 0;
+            $vatNetTaxable = 0;
         } else {
             // Gross Total = Items (After Discount) + Tax (if extra) + Extras
             // Note: If inclusive, Tax is already in effGross, but linePaySum calculation below is clearer
@@ -4841,6 +6890,12 @@ class PosController extends Controller
         $order->update([
             'subtotal' => round($totalNetTaxable, 2), // Now stores True Net Taxable
             'tax_amount' => round($totalTaxAmount, 2),
+            'cgst_amount' => $cgstAmount,
+            'sgst_amount' => $sgstAmount,
+            'igst_amount' => round($igstTax, 2),
+            'vat_tax_amount' => round($vatTax, 2),
+            'gst_net_taxable' => round($gstNetTaxable, 2),
+            'vat_net_taxable' => round($vatNetTaxable, 2),
             'service_charge_amount' => round($serviceChargeAmount, 2),
             'discount_amount' => round($discountAmount, 2),
             'tip_amount' => $tipAmount,
@@ -4963,6 +7018,24 @@ class PosController extends Controller
 
     private function formatOrder(PosOrder $order): array
     {
+        $order->loadMissing([
+            'restaurant',
+            'items.menuItem.tax',
+            'items.menuItem.category',
+            'items.combo',
+            'items.combo.menuItems.tax',
+            'items.variant',
+            'payments',
+            'refunds',
+            'room',
+            'table',
+            'waiter',
+            'openedBy',
+            'voidedBy',
+            'discountApprovedBy',
+        ]);
+        [$gstTaxLines, $vatTaxLines] = $this->buildPosOrderTaxDisplayLines($order);
+
         return [
             'id' => $order->id,
             'order_type' => $order->order_type ?? 'dine_in',
@@ -4995,6 +7068,14 @@ class PosController extends Controller
             'service_charge_amount' => (float) ($order->service_charge_amount ?? 0),
             'subtotal' => (float) $order->subtotal,
             'tax_amount' => (float) $order->tax_amount,
+            'cgst_amount' => (float) ($order->cgst_amount ?? 0),
+            'sgst_amount' => (float) ($order->sgst_amount ?? 0),
+            'igst_amount' => (float) ($order->igst_amount ?? 0),
+            'vat_tax_amount' => (float) ($order->vat_tax_amount ?? 0),
+            'gst_net_taxable' => (float) ($order->gst_net_taxable ?? 0),
+            'vat_net_taxable' => (float) ($order->vat_net_taxable ?? 0),
+            'tax_breakdown' => $gstTaxLines,
+            'vat_breakdown' => $vatTaxLines,
             'discount_amount' => (float) $order->discount_amount,
             'tip_amount' => (float) ($order->tip_amount ?? 0),
             'rounding_amount' => (float) ($order->rounding_amount ?? 0),
@@ -5030,6 +7111,8 @@ class PosController extends Controller
                 'unit_price' => (float) $i->unit_price,
                 'tax_rate' => (float) $i->tax_rate,
                 'tax_name' => $i->menuItem?->tax?->name ?? null,
+                'tax_regime' => $i->tax_regime ?: $this->posLineTaxRegimeSnapshot($i, (int) $order->restaurant_id),
+                'tax_supply_type' => $this->posLineItemTaxSupplyTypeForApi($i, $order),
                 'price_tax_inclusive' => $i->price_tax_inclusive === null ? null : (bool) $i->price_tax_inclusive,
                 'line_total' => (float) $i->line_total,
                 'kot_sent' => $i->kot_sent,

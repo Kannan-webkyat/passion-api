@@ -7,6 +7,20 @@ use Illuminate\Http\Request;
 
 class DietaryTypeController extends Controller
 {
+    private function checkPermission(string $permission): void
+    {
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return;
+        }
+        if (! $user->can($permission)) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
         return response()->json(DietaryType::all());
@@ -14,6 +28,7 @@ class DietaryTypeController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('manage-menu');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'is_active' => 'boolean',
@@ -31,6 +46,7 @@ class DietaryTypeController extends Controller
 
     public function update(Request $request, DietaryType $dietaryType)
     {
+        $this->checkPermission('manage-menu');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'is_active' => 'boolean',
@@ -43,6 +59,7 @@ class DietaryTypeController extends Controller
 
     public function destroy(DietaryType $dietaryType)
     {
+        $this->checkPermission('manage-menu');
         $dietaryType->delete();
 
         return response()->json(null, 204);

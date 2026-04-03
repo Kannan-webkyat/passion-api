@@ -110,6 +110,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('pos/reports/sales', [PosController::class , 'salesReport']);
     Route::get('pos/reports/sales/export', [PosController::class , 'salesReportExport']);
     Route::get('pos/reports/sales/orders', [PosController::class , 'salesReportOrders']);
+    Route::get('pos/reports/liquor-sales', [PosController::class , 'liquorSalesReport']);
+    Route::get('pos/reports/liquor-sales/export', [PosController::class , 'liquorSalesExport']);
+    Route::get('pos/reports/food-sales', [PosController::class , 'foodSalesReport']);
+    Route::get('pos/reports/food-sales/export', [PosController::class , 'foodSalesExport']);
     Route::get('pos/reports/order-type-mix/export', [PosController::class , 'orderTypeMixExport']);
     Route::get('pos/reports/order-type-mix', [PosController::class , 'orderTypeMixReport']);
     Route::get('pos/reports/menu-performance/export', [PosController::class , 'menuPerformanceExport']);

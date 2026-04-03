@@ -15,7 +15,10 @@ class StoreRequestController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if (! $user->hasRole('Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -75,6 +78,7 @@ class StoreRequestController extends Controller
 
     public function index()
     {
+        $this->checkPermission('create-requisition');
         $user = auth()->user();
         $query = StoreRequest::with(['department', 'fromLocation.department', 'toLocation', 'requester', 'items.item'])
             ->latest();
@@ -92,6 +96,7 @@ class StoreRequestController extends Controller
 
     public function store(Request $request)
     {
+        $this->checkPermission('create-requisition');
         $validated = $request->validate([
             'from_location_id' => 'required|exists:inventory_locations,id',
             'to_location_id' => 'required|exists:inventory_locations,id|different:from_location_id',
@@ -268,6 +273,7 @@ class StoreRequestController extends Controller
      */
     public function accept(StoreRequest $storeRequest)
     {
+        $this->checkPermission('create-requisition');
         if ($storeRequest->status !== 'awaiting_acceptance') {
             return response()->json(['message' => 'Nothing pending acceptance for this request'], 422);
         }
@@ -389,6 +395,7 @@ class StoreRequestController extends Controller
      */
     public function cancel(StoreRequest $storeRequest)
     {
+        $this->checkPermission('create-requisition');
         if (! in_array($storeRequest->status, ['pending', 'approved', 'awaiting_acceptance'])) {
             return response()->json(['message' => 'Cannot cancel a fulfilled request'], 422);
         }

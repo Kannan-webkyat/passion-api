@@ -50,7 +50,16 @@ class TableController extends Controller
 
     public function update(Request $request, RestaurantTable $table)
     {
-        $this->checkPermission('manage-tables');
+        // Allow operational status changes (cleaning/available) for POS users.
+        // Full table master edits still require manage-tables.
+        $payloadKeys = array_keys($request->all());
+        $statusOnly = count($payloadKeys) === 1 && $payloadKeys[0] === 'status';
+        $status = $request->input('status');
+        if ($statusOnly && in_array($status, ['cleaning', 'available'], true)) {
+            $this->checkPermission('pos-order');
+        } else {
+            $this->checkPermission('manage-tables');
+        }
         $oldStatus = $table->status;
         $validated = $request->validate([
             'table_number' => 'sometimes|required|string|max:255',

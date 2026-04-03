@@ -19,7 +19,17 @@ class RecipeController extends Controller
      */
     public function index(Request $request)
     {
-        $this->checkPermission('kitchen-production');
+        // Recipe listing is used by Menu Configuration and Kitchen Production.
+        // Allow either menu managers or kitchen users.
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            if (! $user->can('manage-menu') && ! $user->can('kitchen-production')) {
+                abort(403, 'Unauthorized action.');
+            }
+        }
         // Hide items that are direct-sale AND directly linked to an inventory item
         // (e.g. Pepsi, Sprite, spirits) — they are deducted directly, no recipe needed.
         // Show Tea, Coffee etc. (direct-sale but NO inventory link) so ingredients can be set.
@@ -117,7 +127,16 @@ class RecipeController extends Controller
      */
     public function upsert(Request $request, $menuItemId)
     {
-        $this->checkPermission('kitchen-production');
+        // Menu/recipe configuration: allow kitchen users or menu admins.
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
+            if (! $user->can('manage-menu') && ! $user->can('kitchen-production')) {
+                abort(403, 'Unauthorized action.');
+            }
+        }
         $menuItem = MenuItem::findOrFail($menuItemId);
         // Direct-sale items (e.g. Tea, Coffee) are allowed to have recipes
         // so their ingredients can be tracked and deducted from inventory.

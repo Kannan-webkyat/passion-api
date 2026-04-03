@@ -25,7 +25,7 @@ class MenuPricingController extends Controller
      */
     public function index()
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
 
         $items = MenuItem::with([
             'category',
@@ -80,7 +80,7 @@ class MenuPricingController extends Controller
      */
     public function update(Request $request, MenuItem $menuItem)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
 
         $validated = $request->validate([
             'restaurant_links' => 'required|array|min:1',

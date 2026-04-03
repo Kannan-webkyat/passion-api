@@ -14,7 +14,7 @@ class ReceptionistSeeder extends Seeder
             ['email' => 'reception@gmail.com'],
             [
                 'name' => 'Receptionist User',
-                'password' => bcrypt('password'),
+                'password' => bcrypt('1'),
             ]
         );
 

@@ -23,7 +23,7 @@ class ComboController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'price' => 'nullable|numeric|min:0',
@@ -57,7 +57,7 @@ class ComboController extends Controller
 
     public function update(Request $request, Combo $menuCombo)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'price' => 'nullable|numeric|min:0',
@@ -90,7 +90,7 @@ class ComboController extends Controller
 
     public function destroy(Combo $menuCombo)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         try {
             $menuCombo->delete();
 

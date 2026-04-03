@@ -39,7 +39,7 @@ class MenuItemController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
         $validated = $request->validate([
             'item_code' => 'required|string|unique:menu_items',
@@ -102,7 +102,7 @@ class MenuItemController extends Controller
 
     public function update(Request $request, MenuItem $menuItem)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
         $validated = $request->validate([
             'item_code' => 'sometimes|required|string|unique:menu_items,item_code,'.$menuItem->id,
@@ -160,7 +160,7 @@ class MenuItemController extends Controller
 
     public function destroy(MenuItem $menuItem)
     {
-        $this->checkPermission('pos-manage');
+        $this->checkPermission('manage-menu');
         try {
             $menuItem->delete();
 

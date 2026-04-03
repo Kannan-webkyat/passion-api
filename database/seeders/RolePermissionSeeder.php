@@ -19,8 +19,29 @@ class RolePermissionSeeder extends Seeder
             'view-rooms',
             'reservation',
             'manage-inventory',
+            // Inventory report permissions (granular)
+            'inventory-report-summary',
+            'inventory-report-status',
+            'inventory-report-reorder',
+            'inventory-report-overstock',
+            'inventory-report-slow-moving',
+            'inventory-report-ledger',
+            'inventory-report-consumption',
+            'inventory-report-adjustments',
+            'inventory-report-purchase-history',
             'manage-tables',
-            'view-reports',
+            // Outlet / menu master configuration
+            'manage-outlets',
+            'manage-menu',
+            // POS / Finance report permissions (granular)
+            'report-sales',
+            'report-day-closings',
+            'report-refunds-adjustments',
+            'report-voids-discounts',
+            'report-order-type-mix',
+            'report-menu-performance',
+            'report-tax-gst-summary',
+            'report-b2b-sales',
             'manage-users',
             'manage-settings',
             'create-requisition',
@@ -31,7 +52,6 @@ class RolePermissionSeeder extends Seeder
             'pos-discount',
             'pos-reopen-order',
             'pos-day-closing',
-            'pos-manage',
         ];
 
         foreach ($permissions as $permission) {
@@ -64,6 +84,6 @@ class RolePermissionSeeder extends Seeder
         $waiter->syncPermissions(['pos-order']);
 
         $seniorWaiter = Role::firstOrCreate(['name' => 'Senior Waiter']);
-        $seniorWaiter->syncPermissions(['pos-order', 'pos-void-item', 'pos-reopen-order', 'pos-manage']);
+        $seniorWaiter->syncPermissions(['pos-order', 'pos-void-item', 'pos-reopen-order']);
     }
 }

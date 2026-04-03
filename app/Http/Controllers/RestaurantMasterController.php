@@ -11,7 +11,13 @@ class RestaurantMasterController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return;
+        }
+        if (! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -28,7 +34,7 @@ class RestaurantMasterController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('pos-manages');
+        $this->checkPermission('manage-outlets');
         $validated = $this->validateRestaurant($request);
         $restaurant = RestaurantMaster::create($validated);
 
@@ -42,7 +48,7 @@ class RestaurantMasterController extends Controller
 
     public function update(Request $request, RestaurantMaster $restaurantMaster)
     {
-        $this->checkPermission('pos-manages');
+        $this->checkPermission('manage-outlets');
         $validated = $this->validateRestaurant($request);
         $restaurantMaster->update($validated);
 
@@ -51,7 +57,7 @@ class RestaurantMasterController extends Controller
 
     public function destroy(RestaurantMaster $restaurantMaster)
     {
-        $this->checkPermission('pos-manages');
+        $this->checkPermission('manage-outlets');
         try {
             $restaurantMaster->delete();
 
@@ -93,6 +99,7 @@ class RestaurantMasterController extends Controller
 
     public function uploadLogo(Request $request, RestaurantMaster $restaurantMaster)
     {
+        $this->checkPermission('manage-outlets');
         $request->validate(['logo' => 'required|image|mimes:png,jpg,jpeg|max:512']);
         if ($restaurantMaster->logo_path && Storage::disk('public')->exists($restaurantMaster->logo_path)) {
             Storage::disk('public')->delete($restaurantMaster->logo_path);
