@@ -85,6 +85,7 @@ class RestaurantMasterController extends Controller
             'phone' => 'nullable|string|max:50',
             'gstin' => 'nullable|string|max:50',
             'fssai' => 'nullable|string|max:50',
+            'sac_code' => 'nullable|string|max:20',
             'business_day_cutoff_time' => 'nullable|date_format:H:i:s',
             'receipt_show_tax_breakdown' => 'boolean',
         ];

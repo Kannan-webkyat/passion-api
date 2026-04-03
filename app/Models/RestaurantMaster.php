@@ -9,7 +9,7 @@ class RestaurantMaster extends Model
     protected $fillable = [
         'name', 'floor', 'description', 'is_active', 'department_id', 'kitchen_location_id', 'bar_location_id', 'business_day_cutoff_time',
         'receipt_show_tax_breakdown',
-        'address', 'email', 'phone', 'gstin', 'fssai', 'logo_path',
+        'address', 'email', 'phone', 'gstin', 'fssai', 'sac_code', 'logo_path',
     ];
 
     protected $casts = [

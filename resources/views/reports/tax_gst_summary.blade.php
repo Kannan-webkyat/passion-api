@@ -15,6 +15,7 @@
         .text-right { text-align: right; }
         .num { font-family: DejaVu Sans Mono, monospace; font-size: 10px; }
         .total-row td { font-weight: bold; border-top: 2px solid #ccc; }
+        .section-row td { background: #f0f0f0; font-weight: bold; font-size: 9px; text-transform: uppercase; padding: 6px 4px; border-top: 2px solid #ddd; }
         .footer { margin-top: 16px; text-align: center; font-size: 9px; color: #999; }
     </style>
 </head>
@@ -40,7 +41,16 @@
             </tr>
         </thead>
         <tbody>
-            @foreach($rows as $row)
+            @php
+                $gstRows = collect($rows)->filter(fn($r) => !str_starts_with($r['tax_label'] ?? '', 'Liquor VAT'));
+                $vatRows = collect($rows)->filter(fn($r) => str_starts_with($r['tax_label'] ?? '', 'Liquor VAT'));
+            @endphp
+
+            @if($gstRows->count() > 0)
+            <tr class="section-row">
+                <td colspan="5">GST (Food & Beverages)</td>
+            </tr>
+            @foreach($gstRows as $row)
             <tr>
                 <td class="text-right num">{{ number_format((float) ($row['rate'] ?? 0), 2) }}</td>
                 <td>{{ \Illuminate\Support\Str::limit($row['tax_label'] ?? '—', 40) }}</td>
@@ -51,7 +61,38 @@
             @endforeach
             <tr class="total-row">
                 <td></td>
-                <td>TOTAL</td>
+                <td>GST SUBTOTAL</td>
+                <td class="text-right num">₹{{ number_format((float) $gstRows->sum('taxable_value'), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) $gstRows->sum('tax_amount'), 2) }}</td>
+                <td class="text-right num">{{ (int) $gstRows->sum('line_count') }}</td>
+            </tr>
+            @endif
+
+            @if($vatRows->count() > 0)
+            <tr class="section-row">
+                <td colspan="5">State VAT (Liquor)</td>
+            </tr>
+            @foreach($vatRows as $row)
+            <tr>
+                <td class="text-right num">{{ number_format((float) ($row['rate'] ?? 0), 2) }}</td>
+                <td>{{ \Illuminate\Support\Str::limit($row['tax_label'] ?? '—', 40) }}</td>
+                <td class="text-right num">₹{{ number_format((float) ($row['taxable_value'] ?? 0), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) ($row['tax_amount'] ?? 0), 2) }}</td>
+                <td class="text-right num">{{ (int) ($row['line_count'] ?? 0) }}</td>
+            </tr>
+            @endforeach
+            <tr class="total-row">
+                <td></td>
+                <td>VAT SUBTOTAL</td>
+                <td class="text-right num">₹{{ number_format((float) $vatRows->sum('taxable_value'), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) $vatRows->sum('tax_amount'), 2) }}</td>
+                <td class="text-right num">{{ (int) $vatRows->sum('line_count') }}</td>
+            </tr>
+            @endif
+
+            <tr class="total-row">
+                <td></td>
+                <td>GRAND TOTAL</td>
                 <td class="text-right num">₹{{ number_format((float) ($totals['taxable_value'] ?? 0), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) ($totals['tax_amount'] ?? 0), 2) }}</td>
                 <td></td>

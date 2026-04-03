@@ -226,11 +226,16 @@ class DayClosingController extends Controller
         $toSlug = $validated['to'] ?? 'all';
 
         if ($type === 'pdf') {
+            $restaurant = ! empty($validated['restaurant_id'])
+                ? RestaurantMaster::find((int) $validated['restaurant_id'])
+                : null;
+
             $pdf = Pdf::loadView('reports.day_closings', [
                 'closings' => $closings,
+                'restaurant' => $restaurant,
                 'from' => $validated['from'] ?? null,
                 'to' => $validated['to'] ?? null,
-            ]);
+            ])->setPaper('a4', 'landscape');
 
             return $pdf->download("closing_history_{$fromSlug}_to_{$toSlug}.pdf");
         }

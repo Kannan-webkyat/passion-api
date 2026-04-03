@@ -167,7 +167,9 @@
                 <td>#{{ $o->id }}</td>
                 <td>
                     {{ date('d/m/y', strtotime($o->business_date)) }}<br>
-                    <small style="color: #888;">{{ date('H:i', strtotime($o->closed_at ?: $o->voided_at)) }}</small>
+                    @if($o->closed_at || $o->voided_at)
+                        <small style="color: #888;">{{ date('H:i', strtotime($o->closed_at ?: $o->voided_at)) }}</small>
+                    @endif
                 </td>
                 <td>
                     {{ $o->customer_name ?: '—' }}<br>

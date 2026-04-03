@@ -330,6 +330,7 @@ class PosController extends Controller
             'phone' => $restaurant->phone ?: ($defaults['phone'] ?? ''),
             'gstin' => $restaurant->gstin ?: '',
             'fssai' => $restaurant->fssai ?: '',
+            'sac_code' => $restaurant->sac_code ?: '',
             'logo_url' => $restaurant->logo_path
                 ? asset('storage/'.$restaurant->logo_path)
                 : ($defaults['logo_url'] ?? null),
@@ -3483,14 +3484,15 @@ class PosController extends Controller
             ->get();
 
         if ($type === 'pdf') {
+            $nonVoidOrders = $orders->where('status', '!=', 'void');
             $summary = [
                 'count' => $orders->count(),
-                'net' => $orders->where('status', '!=', 'void')->sum('total_amount'),
+                'net' => $nonVoidOrders->sum('total_amount'),
                 'refunds' => $orders->map(fn ($o) => $o->refunds->sum('amount'))->sum(),
-                'gst_duty' => (float) $orders->sum(fn ($o) => (float) ($o->cgst_amount ?? 0) + (float) ($o->sgst_amount ?? 0) + (float) ($o->igst_amount ?? 0)),
-                'vat_tax' => (float) $orders->sum(fn ($o) => (float) ($o->vat_tax_amount ?? 0)),
-                'gst_net_taxable' => (float) $orders->sum(fn ($o) => (float) ($o->gst_net_taxable ?? 0)),
-                'vat_net_taxable' => (float) $orders->sum(fn ($o) => (float) ($o->vat_net_taxable ?? 0)),
+                'gst_duty' => (float) $nonVoidOrders->sum(fn ($o) => (float) ($o->cgst_amount ?? 0) + (float) ($o->sgst_amount ?? 0) + (float) ($o->igst_amount ?? 0)),
+                'vat_tax' => (float) $nonVoidOrders->sum(fn ($o) => (float) ($o->vat_tax_amount ?? 0)),
+                'gst_net_taxable' => (float) $nonVoidOrders->sum(fn ($o) => (float) ($o->gst_net_taxable ?? 0)),
+                'vat_net_taxable' => (float) $nonVoidOrders->sum(fn ($o) => (float) ($o->vat_net_taxable ?? 0)),
             ];
             $pdf = Pdf::loadView('reports.sales', [
                 'orders' => $orders,
@@ -3594,7 +3596,7 @@ class PosController extends Controller
             "Expires"             => "0"
         ];
 
-        $columns = ['Bill #', 'Date', 'Customer', 'GSTIN', 'Outlet', 'Taxable Value', 'Tax Amount', 'Total Amount'];
+        $columns = ['Bill #', 'Date', 'Customer', 'GSTIN', 'Outlet', 'GST Taxable', 'VAT Taxable', 'CGST', 'SGST', 'IGST', 'Liquor VAT', 'Total Tax', 'Total Amount'];
 
         $callback = function() use($orders, $columns) {
             $file = fopen('php://output', 'w');
@@ -3606,9 +3608,14 @@ class PosController extends Controller
                     $o->customer_name ?? '—',
                     $o->customer_gstin ?? '—',
                     $o->restaurant?->name ?? '—',
-                    round($o->total_amount - $o->tax_amount, 2),
-                    round($o->tax_amount, 2),
-                    round($o->total_amount, 2)
+                    round((float) ($o->gst_net_taxable ?? 0), 2),
+                    round((float) ($o->vat_net_taxable ?? 0), 2),
+                    round((float) ($o->cgst_amount ?? 0), 2),
+                    round((float) ($o->sgst_amount ?? 0), 2),
+                    round((float) ($o->igst_amount ?? 0), 2),
+                    round((float) ($o->vat_tax_amount ?? 0), 2),
+                    round((float) ($o->tax_amount ?? 0), 2),
+                    round((float) ($o->total_amount ?? 0), 2),
                 ]);
             }
             fclose($file);
@@ -7376,11 +7383,12 @@ class PosController extends Controller
             ->whereDate('business_date', '>=', $from)
             ->whereDate('business_date', '<=', $to)
             ->with([
-                'items' => fn ($q) => $q->where('status', 'active')->with(['menuItem.tax', 'combo']),
+                'items' => fn ($q) => $q->where('status', 'active')->with(['menuItem.tax', 'combo.menuItems.tax']),
             ])
             ->get();
 
-        $buckets = [];
+        $gstBuckets = [];
+        $vatBuckets = [];
 
         foreach ($orders as $order) {
             $activeItems = $order->items;
@@ -7396,27 +7404,51 @@ class PosController extends Controller
             foreach ($activeItems as $i) {
                 [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
                 $r = round((float) $i->tax_rate, 2);
+                $kind = $this->posLineTaxSupplyKind($i, $order);
+
                 if ($order->tax_exempt) {
                     $label = 'Bill tax exempt';
                     $r = 0.0;
                 } else {
                     $label = $this->resolvePosLineTaxLabel($i, $r);
                 }
-                $key = sprintf('%.4f', $r).'|'.$label;
-                if (! isset($buckets[$key])) {
-                    $buckets[$key] = [
-                        'rate' => $r,
-                        'tax_label' => $label,
-                        'taxable_value' => 0.0,
-                        'tax_amount' => 0.0,
-                        'line_count' => 0,
-                    ];
+
+                // Separate GST from VAT
+                if ($kind === 'vat') {
+                    $label = 'Liquor VAT @ ' . number_format($r, 2) . '%';
+                    $key = sprintf('%.4f', $r) . '|' . $label;
+                    if (! isset($vatBuckets[$key])) {
+                        $vatBuckets[$key] = [
+                            'rate' => $r,
+                            'tax_label' => $label,
+                            'taxable_value' => 0.0,
+                            'tax_amount' => 0.0,
+                            'line_count' => 0,
+                        ];
+                    }
+                    $vatBuckets[$key]['taxable_value'] += $lineNet;
+                    $vatBuckets[$key]['tax_amount'] += $lineTax;
+                    $vatBuckets[$key]['line_count']++;
+                } else {
+                    $key = sprintf('%.4f', $r) . '|' . $label;
+                    if (! isset($gstBuckets[$key])) {
+                        $gstBuckets[$key] = [
+                            'rate' => $r,
+                            'tax_label' => $label,
+                            'taxable_value' => 0.0,
+                            'tax_amount' => 0.0,
+                            'line_count' => 0,
+                        ];
+                    }
+                    $gstBuckets[$key]['taxable_value'] += $lineNet;
+                    $gstBuckets[$key]['tax_amount'] += $lineTax;
+                    $gstBuckets[$key]['line_count']++;
                 }
-                $buckets[$key]['taxable_value'] += $lineNet;
-                $buckets[$key]['tax_amount'] += $lineTax;
-                $buckets[$key]['line_count']++;
             }
         }
+
+        // Merge both buckets with GST first, then VAT
+        $buckets = array_merge($gstBuckets, $vatBuckets);
 
         $list = collect($buckets)
             ->values()
