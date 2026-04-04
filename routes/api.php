@@ -88,13 +88,12 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('certificate', [QzSignController::class, 'certificate']);
     });
 
-    // Settings (receipt defaults)
-    Route::prefix('settings')->group(function () {
-        Route::get('receipt', [SettingController::class, 'receiptDefaults']);
-        Route::match(['put', 'post'], 'receipt', [SettingController::class, 'updateReceiptDefaults']);
-        Route::get('global', [SettingController::class, 'globalConfig']);
-        Route::put('global', [SettingController::class, 'updateGlobalConfig']);
-    });
+    // Settings (receipt defaults + company profile for procurement / accounts / reports)
+    Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
+    Route::get('settings/company-profile', [SettingController::class, 'companyProfile']);
+    Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
+    Route::get('settings/global', [SettingController::class, 'globalConfig']);
+    Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);

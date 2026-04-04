@@ -21,16 +21,35 @@ class SettingController extends Controller
         return response()->json(Setting::getReceiptDefaults());
     }
 
+    /**
+     * Canonical company / property profile (for procurement, accounts, reports).
+     */
+    public function companyProfile()
+    {
+        return response()->json(Setting::getCompanyProfile());
+    }
+
     public function updateReceiptDefaults(Request $request)
     {
         $this->checkPermission('manage-settings');
         $validated = $request->validate([
+            'company_name' => ['required', 'string', 'max:255', function (string $attribute, mixed $value, \Closure $fail): void {
+                if (trim((string) $value) === '') {
+                    $fail('The property / company name field is required.');
+                }
+            }],
+            'gstin' => 'nullable|string|max:20',
             'address' => 'nullable|string|max:1000',
             'email' => 'nullable|email|max:255',
             'phone' => 'nullable|string|max:50',
         ]);
 
         foreach ($validated as $key => $value) {
+            if ($key === 'company_name') {
+                Setting::set('receipt_company_name', trim((string) $value));
+
+                continue;
+            }
             Setting::set("receipt_{$key}", $value ?? '');
         }
 
