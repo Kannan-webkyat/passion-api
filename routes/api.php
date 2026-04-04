@@ -192,6 +192,14 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('inventory/purchase-orders', \App\Http\Controllers\PurchaseOrderController::class);
     Route::post('inventory/purchase-orders/{purchaseOrder}/receive', [\App\Http\Controllers\PurchaseOrderController::class , 'receive']);
     Route::post('inventory/purchase-orders/{purchaseOrder}/pay', [\App\Http\Controllers\PurchaseOrderController::class , 'pay']);
+
+    Route::apiResource('inventory/procurement-requisitions', \App\Http\Controllers\ProcurementRequisitionController::class);
+    Route::post('inventory/procurement-requisitions/{procurement_requisition}/request-quotes', [\App\Http\Controllers\ProcurementRequisitionController::class , 'requestQuotes']);
+    Route::post('inventory/procurement-requisitions/{procurement_requisition}/start-comparison', [\App\Http\Controllers\ProcurementRequisitionController::class , 'startComparison']);
+    Route::get('inventory/procurement-requisitions/{procurement_requisition}/quote-slips', [\App\Http\Controllers\ProcurementRequisitionController::class , 'quoteSlips']);
+    Route::post('inventory/procurement-requisitions/{procurement_requisition}/generate-purchase-orders', [\App\Http\Controllers\ProcurementRequisitionController::class , 'generatePurchaseOrders']);
+    Route::delete('inventory/procurement-requisition-items/{procurement_requisition_item}/vendors/{vendor}', [\App\Http\Controllers\ProcurementRequisitionController::class , 'removeVendor']);
+    Route::patch('inventory/procurement-requisition-items/{procurement_requisition_item}/price', [\App\Http\Controllers\ProcurementRequisitionController::class , 'updateItemPrice']);
     Route::apiResource('payment-methods', \App\Http\Controllers\PaymentMethodController::class);
     Route::get('inventory/movements', [\App\Http\Controllers\StockMovementController::class , 'index']);
 });
