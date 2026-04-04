@@ -41,6 +41,8 @@ class Booking extends Model
         'refund_amount',
         'refund_method',
         'extra_charges',
+        'checkout_discount_amount',
+        'checkout_discount_reason',
         'status',
         'booking_source',
         'source_reference',
@@ -83,5 +85,6 @@ class Booking extends Model
         'check_in_at' => 'datetime',
         'check_out_at' => 'datetime',
         'refund_amount' => 'decimal:2',
+        'checkout_discount_amount' => 'decimal:2',
     ];
 }

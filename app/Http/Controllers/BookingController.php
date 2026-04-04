@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\ReservationInvoiceViewData;
 use App\Support\SeasonalRoomPricing;
 use App\Models\Booking;
 use App\Models\BookingGroup;
@@ -184,6 +185,23 @@ class BookingController extends Controller
             }
         }
 
+        if (array_key_exists('checkout_discount_amount', $validated)) {
+            $old = (float) ($booking->checkout_discount_amount ?? 0);
+            $new = (float) $validated['checkout_discount_amount'];
+            if (abs($old - $new) > 0.004) {
+                $reason = $sanitize((string) ($validated['checkout_discount_reason'] ?? $booking->checkout_discount_reason ?? ''));
+                $reasonBit = $reason !== '' ? ' — '.$reason : '';
+                $lines[] = sprintf(
+                    '[Checkout discount: ₹%s → ₹%s%s%s%s]',
+                    number_format($old, 2, '.', ''),
+                    number_format($new, 2, '.', ''),
+                    $reasonBit,
+                    $byPart,
+                    $onPart
+                );
+            }
+        }
+
         if ($lines === []) {
             return;
         }
@@ -258,11 +276,13 @@ class BookingController extends Controller
         return ['ok' => true, 'total' => round($total, 2), 'package_end' => $packageEnd];
     }
 
-    private function effectiveBookingGrand(Booking $booking): float
+    /**
+     * Room + tax (recomputed or stored) + folio extras, before checkout discount.
+     */
+    private function bookingGrossBeforeCheckoutDiscount(Booking $booking): float
     {
         $booking->loadMissing(['room.roomType.tax', 'room.roomType.ratePlans']);
 
-        // Keep hourly room rent as stored value (overtime etc.); folio postings are separate.
         if (($booking->booking_unit ?? 'day') === 'hour_package') {
             return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
         }
@@ -293,6 +313,15 @@ class BookingController extends Controller
         $grand = round($beforeTax * (1 + ($taxRate / 100)), 2);
 
         return $grand + (float) ($booking->extra_charges ?? 0);
+    }
+
+    /** Payable total after checkout (commercial) discount. */
+    private function effectiveBookingGrand(Booking $booking): float
+    {
+        $gross = $this->bookingGrossBeforeCheckoutDiscount($booking);
+        $disc = max(0.0, (float) ($booking->checkout_discount_amount ?? 0));
+
+        return max(0.0, round($gross - min($disc, $gross), 2));
     }
 
     public function index(Request $request)
@@ -695,6 +724,19 @@ class BookingController extends Controller
             $bookingData['check_out'] = $finalCheckOutAt->toDateString();
             $bookingData['total_price'] = $totalPrice;
 
+            // Activity log (same bracket format as PATCH audits): who created the reservation and when.
+            $creator = Auth::user();
+            $creatorName = $creator ? (string) $creator->name : '';
+            $createdAt = now()->format('Y-m-d H:i:s');
+            $byCreated = $creatorName !== '' ? " by {$creatorName}" : '';
+            $roomNum = (string) ($room->room_number ?? $roomId);
+            $roomTypeLabel = (string) ($room->roomType?->name ?? 'Room');
+            $ciStr = $finalCheckInAt->toDateString();
+            $coStr = $finalCheckOutAt ? $finalCheckOutAt->toDateString() : $ciStr;
+            $creationAudit = "[Reservation created: Room #{$roomNum} · {$roomTypeLabel} · {$ciStr} → {$coStr}{$byCreated} on {$createdAt}]";
+            $notesIncoming = trim((string) ($bookingData['notes'] ?? ''));
+            $bookingData['notes'] = $notesIncoming !== '' ? $creationAudit."\n".$notesIncoming : $creationAudit;
+
             $booking = Booking::create($bookingData);
 
             // Create initial Stay Segment
@@ -796,7 +838,36 @@ class BookingController extends Controller
             'child_breakfast_count' => 'nullable|integer|min:0',
             'rate_plan_id' => 'nullable|exists:rate_plans,id',
             'booking_group_id' => 'nullable|exists:booking_groups,id',
+            'checkout_discount_amount' => 'nullable|numeric|min:0',
+            'checkout_discount_reason' => 'nullable|string|max:500',
         ]);
+
+        if ($request->has('checkout_discount_amount') || $request->has('checkout_discount_reason')) {
+            if ($booking->status !== 'checked_in') {
+                return response()->json([
+                    'message' => 'Checkout discount can only be set while the guest is checked in.',
+                ], 422);
+            }
+            $newAmt = array_key_exists('checkout_discount_amount', $validated)
+                ? (float) $validated['checkout_discount_amount']
+                : (float) ($booking->checkout_discount_amount ?? 0);
+            $reason = array_key_exists('checkout_discount_reason', $validated)
+                ? trim((string) ($validated['checkout_discount_reason'] ?? ''))
+                : trim((string) ($booking->checkout_discount_reason ?? ''));
+            $gross = $this->bookingGrossBeforeCheckoutDiscount($booking);
+            if ($newAmt > $gross + 0.009) {
+                return response()->json([
+                    'message' => 'Discount cannot exceed the bill before discount (₹'.number_format($gross, 2, '.', '').').',
+                ], 422);
+            }
+            if ($newAmt > 0.004 && strlen($reason) < 3) {
+                return response()->json([
+                    'message' => 'A reason is required for checkout discounts (at least 3 characters).',
+                ], 422);
+            }
+            $validated['checkout_discount_amount'] = round($newAmt, 2);
+            $validated['checkout_discount_reason'] = $newAmt > 0.004 ? $reason : null;
+        }
 
         // Breakfast count validation
         $totalAdults = (int) ($validated['adults_count'] ?? $booking->adults_count);
@@ -1720,136 +1791,13 @@ class BookingController extends Controller
 
     public function reservationBilling(Request $request, Booking $booking)
     {
-        $booking->load(['room.roomType.tax']);
+        $this->checkPermission('reservation');
 
-        $guestName = trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''));
-        $guestName = $guestName !== '' ? $guestName : 'Guest';
-        $roomNo = (string) ($booking->room?->room_number ?? '-');
-        $roomType = (string) ($booking->room?->roomType?->name ?? '-');
-        $checkIn = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
-        $checkOut = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
-        $createdAt = $booking->created_at ? Carbon::parse($booking->created_at) : now();
+        $data = ReservationInvoiceViewData::build($booking);
+        $pdf = Pdf::loadView('bookings.reservation_invoice', $data)->setPaper('a4', 'portrait');
+        $safeName = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) $data['invoiceNo']);
 
-        $extraCharges = (float) ($booking->extra_charges ?? 0);
-        $roomGrand = (float) ($booking->total_price ?? 0);
-        $grand = $roomGrand + $extraCharges;
-        $paid = (float) ($booking->deposit_amount ?? 0);
-        $balance = $grand - $paid;
-
-        // Breakdown room price into subtotal/tax for display
-        $taxRate = (float) ($booking->room?->roomType?->tax?->rate ?? 0);
-        $divisor = 1 + ($taxRate > 0 ? $taxRate / 100 : 0);
-        $roomSubTotal = $divisor > 0 ? ($roomGrand / $divisor) : $roomGrand;
-        $roomTaxAmount = $roomGrand - $roomSubTotal;
-
-        $invoiceNo = 'BILL-'.str_pad((string) $booking->id, 6, '0', STR_PAD_LEFT);
-        $paymentStatus = strtoupper((string) ($booking->payment_status ?? 'pending'));
-        $paymentMethod = strtoupper((string) ($booking->payment_method ?? 'N/A'));
-
-        $html = "<!doctype html>
-<html>
-<head>
-  <meta charset='utf-8'>
-  <title>Billing Statement #{$booking->id}</title>
-  <style>
-    @page { size: A4 portrait; margin: 12mm; }
-    body { font-family: DejaVu Sans, Arial, sans-serif; color: #0f172a; margin: 0; font-size: 11px; }
-    .wrap { max-width: 700px; margin: 0 auto; }
-    .head { text-align: left; margin-bottom: 10px; }
-    .head-title { font-size: 18px; font-weight: 800; margin: 0; }
-    .head-sub { font-size: 10px; margin-top: 2px; color: #6b7280; }
-    .info-row { width: 100%; border-collapse: collapse; margin: 10px 0 14px 0; }
-    .info-row td { vertical-align: top; padding: 0; font-size: 10px; color: #374151; }
-    .info-block { padding-right: 20px; }
-    .info-label { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: #9ca3af; margin-bottom: 2px; }
-    .info-value { display: block; font-weight: 600; color: #111827; }
-    .info-spacer { height: 6px; }
-    .totals-table { width: 100%; border-collapse: collapse; }
-    .totals-table th,
-    .totals-table td { padding: 6px 0; font-size: 11px; }
-    .totals-table tr + tr td { border-top: 1px solid #e5e7eb; }
-    .label { text-align: left; color: #374151; }
-    .amount { text-align: right; font-weight: 600; color: #111827; }
-    .grand { font-size: 13px; font-weight: 800; }
-    .balance { color: #b91c1c; }
-    .muted { color: #6b7280; font-size: 9px; margin-top: 10px; }
-  </style>
-</head>
-<body>
-  <div class='wrap'>
-    <div class='head'>
-      <p class='head-title'>Billing Statement</p>
-      <p class='head-sub'>Generated {$createdAt->format('d M Y, h:i A')}</p>
-    </div>
-
-    <table class='info-row'>
-      <tr>
-        <td class='info-block'>
-          <span class='info-label'>Invoice No</span>
-          <span class='info-value'>{$invoiceNo}</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Booking No</span>
-          <span class='info-value'>#".e((string) $booking->id)."</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Guest</span>
-          <span class='info-value'>".e($guestName)."</span>
-        </td>
-        <td class='info-block'>
-          <span class='info-label'>Room</span>
-          <span class='info-value'>#".e($roomNo).' · '.e($roomType)."</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Stay</span>
-          <span class='info-value'>".e($checkIn->format('d M Y, h:i A')).' → '.e($checkOut->format('d M Y, h:i A'))."</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Payment Status</span>
-          <span class='info-value'>".e($paymentStatus)."</span>
-        </td>
-      </tr>
-    </table>
-
-    <table class='totals-table'>
-      <tr>
-        <td class='label'>Room Charges (Subtotal)</td>
-        <td class='amount'>INR ".number_format($roomSubTotal, 2)."</td>
-      </tr>
-      <tr>
-        <td class='label'>Room Tax</td>
-        <td class='amount'>INR ".number_format($roomTaxAmount, 2)."</td>
-      </tr>
-      <tr>
-        <td class='label font-bold'>Room Total</td>
-        <td class='amount font-bold'>INR ".number_format($roomGrand, 2)."</td>
-      </tr>
-      <tr>
-        <td class='label' style='padding-top: 10px;'>Extra Charges (F&B/Other)</td>
-        <td class='amount' style='padding-top: 10px;'>INR ".number_format($extraCharges, 2)."</td>
-      </tr>
-      <tr style='border-top: 2px solid #000;'>
-        <td class='label grand'>Total Outstanding</td>
-        <td class='amount grand'>INR ".number_format($grand, 2)."</td>
-      </tr>
-      <tr>
-        <td class='label'>Total Paid</td>
-        <td class='amount'>INR ".number_format($paid, 2)."</td>
-      </tr>
-      <tr>
-        <td class='label balance'>Balance Pending</td>
-        <td class='amount balance'>INR ".number_format($balance, 2)."</td>
-      </tr>
-      <tr>
-        <td class='label'>Payment Method</td>
-        <td class='amount'>".e($paymentMethod)."</td>
-      </tr>
-    </table>
-
-    <p class='muted'>Thank you for staying with us. This is a system-generated bill.</p>
-  </div>
-</body>
-</html>";
-
-        $pdf = Pdf::loadHTML($html)->setPaper('a4', 'portrait');
-
-        return $pdf->download('Billing_Statement_'.$booking->id.'.pdf');
+        return $pdf->download('Invoice_'.$safeName.'.pdf');
     }
 
     /**
