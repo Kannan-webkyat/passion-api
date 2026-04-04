@@ -6,31 +6,43 @@ use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\HousekeepingController;
+use App\Http\Controllers\InventoryCategoryController;
+use App\Http\Controllers\InventoryController;
+use App\Http\Controllers\InventoryLocationController;
+use App\Http\Controllers\InventoryReportController;
+use App\Http\Controllers\InventoryTaxController;
+use App\Http\Controllers\InventoryUomController;
 use App\Http\Controllers\MenuCategoryController;
 use App\Http\Controllers\MenuItemController;
 use App\Http\Controllers\MenuPricingController;
 use App\Http\Controllers\MenuSubCategoryController;
+use App\Http\Controllers\PaymentMethodController;
 use App\Http\Controllers\PosController;
+use App\Http\Controllers\ProcurementRequisitionController;
+use App\Http\Controllers\PurchaseOrderController;
 use App\Http\Controllers\QzSignController;
 use App\Http\Controllers\RecipeController;
 use App\Http\Controllers\RestaurantMasterController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\RoomController;
-use App\Http\Controllers\HousekeepingController;
 use App\Http\Controllers\RoomStatusBlockController;
 use App\Http\Controllers\RoomTypeController;
 use App\Http\Controllers\SettingController;
+use App\Http\Controllers\StockMovementController;
+use App\Http\Controllers\StoreRequestController;
 use App\Http\Controllers\TableCategoryController;
 use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
 use App\Http\Controllers\UserController;
+use App\Http\Controllers\VendorController;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/login', [AuthController::class , 'login']);
+Route::post('/login', [AuthController::class, 'login']);
 
 Route::middleware(['auth:sanctum'])->group(function () {
-    Route::get('/me', [AuthController::class , 'me']);
-    Route::post('/logout', [AuthController::class , 'logout']);
+    Route::get('/me', [AuthController::class, 'me']);
+    Route::post('/logout', [AuthController::class, 'logout']);
 
     // Room Types
     Route::apiResource('room-types', RoomTypeController::class);
@@ -43,12 +55,12 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('users', UserController::class);
     Route::apiResource('roles', RoleController::class);
     Route::apiResource('departments', DepartmentController::class);
-    Route::get('permissions', [RoleController::class , 'permissions']);
+    Route::get('permissions', [RoleController::class, 'permissions']);
 
     // Bookings & Room Chart
-    Route::get('housekeeping', [HousekeepingController::class , 'index']);
-    Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class , 'startCleaning']);
-    Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class , 'markCleaned']);
+    Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
 
     Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);
     Route::get('bookings/chart', [BookingController::class, 'chart']);
@@ -68,140 +80,155 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // F&B Module (Restaurant Master)
     Route::apiResource('restaurant-masters', RestaurantMasterController::class);
-    Route::post('restaurant-masters/{restaurantMaster}/logo', [RestaurantMasterController::class , 'uploadLogo']);
+    Route::post('restaurant-masters/{restaurantMaster}/logo', [RestaurantMasterController::class, 'uploadLogo']);
 
     // QZ Tray signing (for silent receipt printing)
-    Route::get('qz/sign', [QzSignController::class , 'sign']);
-    Route::get('qz/certificate', [QzSignController::class , 'certificate']);
+    Route::prefix('qz')->group(function () {
+        Route::get('sign', [QzSignController::class, 'sign']);
+        Route::get('certificate', [QzSignController::class, 'certificate']);
+    });
 
     // Settings (receipt defaults)
-    Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
-    Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
-    Route::get('settings/global', [SettingController::class, 'globalConfig']);
-    Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);
+    Route::prefix('settings')->group(function () {
+        Route::get('receipt', [SettingController::class, 'receiptDefaults']);
+        Route::match(['put', 'post'], 'receipt', [SettingController::class, 'updateReceiptDefaults']);
+        Route::get('global', [SettingController::class, 'globalConfig']);
+        Route::put('global', [SettingController::class, 'updateGlobalConfig']);
+    });
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);
     Route::apiResource('tables', TableController::class);
-    Route::post('table-reservations/{tableReservation}/check-in', [TableReservationController::class , 'checkIn']);
-    Route::post('table-reservations/{tableReservation}/complete', [TableReservationController::class , 'complete']);
-    Route::post('table-reservations/{tableReservation}/cancel', [TableReservationController::class , 'cancel']);
+    Route::post('table-reservations/{tableReservation}/check-in', [TableReservationController::class, 'checkIn']);
+    Route::post('table-reservations/{tableReservation}/complete', [TableReservationController::class, 'complete']);
+    Route::post('table-reservations/{tableReservation}/cancel', [TableReservationController::class, 'cancel']);
     Route::apiResource('table-reservations', TableReservationController::class);
 
     // POS Module
-    Route::get('pos/restaurants', [PosController::class , 'restaurants']);
-    Route::get('pos/receipt-config/{restaurant}', [PosController::class , 'receiptConfig']);
-    Route::get('pos/waiters', [PosController::class , 'waiters']);
-    Route::get('pos/tables', [PosController::class , 'tables']);
-    Route::get('pos/rooms', [PosController::class , 'rooms']);
-    Route::get('pos/active-orders', [PosController::class , 'activeOrders']);
-    Route::get('pos/menu', [PosController::class , 'menu']);
-    Route::post('pos/orders', [PosController::class , 'openOrder']);
-    Route::get('pos/orders/history', [PosController::class , 'orderHistory']);
-    Route::get('pos/orders/{order}', [PosController::class , 'getOrder']);
-    Route::patch('pos/orders/{order}', [PosController::class , 'updateOrder']);
-    Route::post('pos/orders/{order}/transfer-table', [PosController::class , 'transferTable']);
-    Route::post('pos/orders/{order}/merge', [PosController::class , 'merge']);
-    Route::put('pos/orders/{order}/items', [PosController::class , 'syncItems']);
-    Route::post('pos/orders/{order}/items/void', [PosController::class , 'voidItems']);
-    Route::post('pos/orders/{order}/kot', [PosController::class , 'sendKot']);
-    Route::post('pos/orders/{order}/kot-hold-items', [PosController::class , 'setKotHoldItems']);
-    Route::post('pos/orders/{order}/kot-fire-items', [PosController::class , 'fireKotItems']);
-    Route::post('pos/orders/{order}/open-bill', [PosController::class , 'openBill']);
-    Route::post('pos/orders/{order}/reopen', [PosController::class , 'reopen']);
-    Route::post('pos/orders/{order}/settle', [PosController::class , 'settle']);
-    Route::post('pos/orders/{order}/void', [PosController::class , 'void']);
-    Route::post('pos/orders/{order}/refund', [PosController::class , 'refund']);
-    Route::get('pos/reports/sales', [PosController::class , 'salesReport']);
-    Route::get('pos/reports/sales/export', [PosController::class , 'salesReportExport']);
-    Route::get('pos/reports/sales/orders', [PosController::class , 'salesReportOrders']);
-    Route::get('pos/reports/liquor-sales', [PosController::class , 'liquorSalesReport']);
-    Route::get('pos/reports/liquor-sales/export', [PosController::class , 'liquorSalesExport']);
-    Route::get('pos/reports/food-sales', [PosController::class , 'foodSalesReport']);
-    Route::get('pos/reports/food-sales/export', [PosController::class , 'foodSalesExport']);
-    Route::get('pos/reports/order-type-mix/export', [PosController::class , 'orderTypeMixExport']);
-    Route::get('pos/reports/order-type-mix', [PosController::class , 'orderTypeMixReport']);
-    Route::get('pos/reports/menu-performance/export', [PosController::class , 'menuPerformanceExport']);
-    Route::get('pos/reports/menu-performance', [PosController::class , 'menuPerformanceReport']);
-    Route::get('pos/reports/tax-gst-summary/export', [PosController::class , 'taxGstSummaryExport']);
-    Route::get('pos/reports/tax-gst-summary', [PosController::class , 'taxGstSummaryReport']);
-    Route::get('pos/reports/refunds-adjustments/export', [PosController::class , 'refundsAdjustmentsExport']);
-    Route::get('pos/reports/refunds-adjustments', [PosController::class , 'refundsAdjustmentsReport']);
-    Route::get('pos/reports/voids-discounts/export', [PosController::class , 'voidsDiscountsExport']);
-    Route::get('pos/reports/voids-discounts', [PosController::class , 'voidsDiscountsReport']);
-    Route::get('pos/reports/b2b-sales/export', [PosController::class , 'b2bSalesReportExport']);
+    Route::prefix('pos')->group(function () {
+        Route::get('restaurants', [PosController::class, 'restaurants']);
+        Route::get('receipt-config/{restaurant}', [PosController::class, 'receiptConfig']);
+        Route::get('waiters', [PosController::class, 'waiters']);
+        Route::get('tables', [PosController::class, 'tables']);
+        Route::get('rooms', [PosController::class, 'rooms']);
+        Route::get('active-orders', [PosController::class, 'activeOrders']);
+        Route::get('menu', [PosController::class, 'menu']);
+        Route::post('orders', [PosController::class, 'openOrder']);
+        Route::get('orders/history', [PosController::class, 'orderHistory']);
+        Route::get('orders/{order}', [PosController::class, 'getOrder']);
+        Route::patch('orders/{order}', [PosController::class, 'updateOrder']);
+        Route::post('orders/{order}/transfer-table', [PosController::class, 'transferTable']);
+        Route::post('orders/{order}/merge', [PosController::class, 'merge']);
+        Route::put('orders/{order}/items', [PosController::class, 'syncItems']);
+        Route::post('orders/{order}/items/void', [PosController::class, 'voidItems']);
+        Route::post('orders/{order}/kot', [PosController::class, 'sendKot']);
+        Route::post('orders/{order}/kot-hold-items', [PosController::class, 'setKotHoldItems']);
+        Route::post('orders/{order}/kot-fire-items', [PosController::class, 'fireKotItems']);
+        Route::post('orders/{order}/open-bill', [PosController::class, 'openBill']);
+        Route::post('orders/{order}/reopen', [PosController::class, 'reopen']);
+        Route::post('orders/{order}/settle', [PosController::class, 'settle']);
+        Route::post('orders/{order}/void', [PosController::class, 'void']);
+        Route::post('orders/{order}/refund', [PosController::class, 'refund']);
+        Route::get('reports/sales', [PosController::class, 'salesReport']);
+        Route::get('reports/sales/export', [PosController::class, 'salesReportExport']);
+        Route::get('reports/sales/orders', [PosController::class, 'salesReportOrders']);
+        Route::get('reports/liquor-sales', [PosController::class, 'liquorSalesReport']);
+        Route::get('reports/liquor-sales/export', [PosController::class, 'liquorSalesExport']);
+        Route::get('reports/food-sales', [PosController::class, 'foodSalesReport']);
+        Route::get('reports/food-sales/export', [PosController::class, 'foodSalesExport']);
+        Route::get('reports/order-type-mix/export', [PosController::class, 'orderTypeMixExport']);
+        Route::get('reports/order-type-mix', [PosController::class, 'orderTypeMixReport']);
+        Route::get('reports/menu-performance/export', [PosController::class, 'menuPerformanceExport']);
+        Route::get('reports/menu-performance', [PosController::class, 'menuPerformanceReport']);
+        Route::get('reports/tax-gst-summary/export', [PosController::class, 'taxGstSummaryExport']);
+        Route::get('reports/tax-gst-summary', [PosController::class, 'taxGstSummaryReport']);
+        Route::get('reports/refunds-adjustments/export', [PosController::class, 'refundsAdjustmentsExport']);
+        Route::get('reports/refunds-adjustments', [PosController::class, 'refundsAdjustmentsReport']);
+        Route::get('reports/voids-discounts/export', [PosController::class, 'voidsDiscountsExport']);
+        Route::get('reports/voids-discounts', [PosController::class, 'voidsDiscountsReport']);
+        Route::get('reports/b2b-sales/export', [PosController::class, 'b2bSalesReportExport']);
 
-    // Day Closing
-    Route::get('pos/day-closing/preview', [DayClosingController::class , 'preview']);
-    Route::post('pos/day-closing', [DayClosingController::class , 'close']);
-    Route::get('pos/day-closings', [DayClosingController::class , 'index']);
-    Route::get('pos/day-closings/export', [DayClosingController::class , 'export']);
+        // Day Closing
+        Route::get('day-closing/preview', [DayClosingController::class, 'preview']);
+        Route::post('day-closing', [DayClosingController::class, 'close']);
+        Route::get('day-closings', [DayClosingController::class, 'index']);
+        Route::get('day-closings/export', [DayClosingController::class, 'export']);
+    });
 
     // Kitchen Display
-    Route::get('kitchen/display', [PosController::class , 'kitchenDisplay']);
-    Route::patch('pos/orders/{order}/kitchen-status', [PosController::class , 'updateKitchenStatus']);
-    Route::post('pos/orders/{order}/start-kot-prep', [PosController::class , 'startKotPrep']);
-    Route::post('pos/orders/{order}/mark-batch-ready', [PosController::class , 'markBatchReady']);
-    Route::post('pos/orders/{order}/mark-order-item-ready', [PosController::class , 'markOrderItemReady']);
-    Route::post('pos/orders/{order}/mark-order-item-served', [PosController::class , 'markOrderItemServed']);
-    Route::post('pos/orders/{order}/mark-batch-delivered', [PosController::class , 'markBatchDelivered']);
+    Route::get('kitchen/display', [PosController::class, 'kitchenDisplay']);
+
+    Route::prefix('pos')->group(function () {
+        Route::patch('orders/{order}/kitchen-status', [PosController::class, 'updateKitchenStatus']);
+        Route::post('orders/{order}/start-kot-prep', [PosController::class, 'startKotPrep']);
+        Route::post('orders/{order}/mark-batch-ready', [PosController::class, 'markBatchReady']);
+        Route::post('orders/{order}/mark-order-item-ready', [PosController::class, 'markOrderItemReady']);
+        Route::post('orders/{order}/mark-order-item-served', [PosController::class, 'markOrderItemServed']);
+        Route::post('orders/{order}/mark-batch-delivered', [PosController::class, 'markBatchDelivered']);
+    });
 
     // F&B Module (Menu Configuration)
     Route::apiResource('menu-categories', MenuCategoryController::class);
     Route::apiResource('menu-sub-categories', MenuSubCategoryController::class);
     Route::apiResource('menu-items', MenuItemController::class);
-    Route::get('menu-pricing', [MenuPricingController::class , 'index']);
-    Route::put('menu-pricing/{menuItem}', [MenuPricingController::class , 'update']);
+    Route::get('menu-pricing', [MenuPricingController::class, 'index']);
+    Route::put('menu-pricing/{menuItem}', [MenuPricingController::class, 'update']);
     Route::apiResource('menu-dietary-types', DietaryTypeController::class);
     Route::apiResource('menu-combos', ComboController::class);
 
     // BOM / Recipe Module
-    Route::get('recipes', [RecipeController::class , 'index']);
-    Route::put('recipes/menu-item/{menuItemId}', [RecipeController::class , 'upsert']);
-    Route::post('recipes/{recipe}/produce', [RecipeController::class , 'produce']);
-    Route::get('production-logs', [RecipeController::class , 'productionLogs']);
-    Route::get('production-logs/{log}/details', [RecipeController::class , 'productionLogDetails']);
+    Route::get('recipes', [RecipeController::class, 'index']);
+    Route::put('recipes/menu-item/{menuItemId}', [RecipeController::class, 'upsert']);
+    Route::post('recipes/{recipe}/produce', [RecipeController::class, 'produce']);
+    Route::get('production-logs', [RecipeController::class, 'productionLogs']);
+    Route::get('production-logs/{log}/details', [RecipeController::class, 'productionLogDetails']);
 
     // Inventory Module
-    Route::get('inventory/stats', [\App\Http\Controllers\InventoryController::class , 'stats']);
-    Route::post('inventory/issue', [\App\Http\Controllers\InventoryController::class , 'issue']);
+    Route::prefix('inventory')->group(function () {
+        Route::get('stats', [InventoryController::class, 'stats']);
+        Route::post('issue', [InventoryController::class, 'issue']);
 
-    // Inventory Reports
-    Route::get('inventory/reports/summary', [\App\Http\Controllers\InventoryReportController::class , 'dashboardSummary']);
-    Route::get('inventory/reports/status', [\App\Http\Controllers\InventoryReportController::class , 'stockStatus']);
-    Route::get('inventory/reports/reorder', [\App\Http\Controllers\InventoryReportController::class , 'reorderReport']);
-    Route::get('inventory/reports/overstock', [\App\Http\Controllers\InventoryReportController::class , 'overstockReport']);
-    Route::get('inventory/reports/slow-moving', [\App\Http\Controllers\InventoryReportController::class , 'slowMovingReport']);
-    Route::get('inventory/reports/ledger', [\App\Http\Controllers\InventoryReportController::class , 'stockLedger']);
-    Route::get('inventory/reports/consumption', [\App\Http\Controllers\InventoryReportController::class , 'consumption']);
-    Route::get('inventory/reports/adjustments', [\App\Http\Controllers\InventoryReportController::class , 'adjustments']);
-    Route::get('inventory/reports/purchase-history', [\App\Http\Controllers\InventoryReportController::class , 'purchaseHistory']);
-    Route::apiResource('inventory/items', \App\Http\Controllers\InventoryController::class);
-    Route::apiResource('inventory/categories', \App\Http\Controllers\InventoryCategoryController::class);
-    Route::apiResource('inventory/uoms', \App\Http\Controllers\InventoryUomController::class);
-    Route::apiResource('inventory/taxes', \App\Http\Controllers\InventoryTaxController::class);
-    Route::apiResource('inventory/vendors', \App\Http\Controllers\VendorController::class);
-    Route::apiResource('inventory/locations', \App\Http\Controllers\InventoryLocationController::class);
-    Route::apiResource('inventory/store-requests', \App\Http\Controllers\StoreRequestController::class);
-    Route::post('inventory/adjust-stock', [\App\Http\Controllers\InventoryController::class , 'adjustStock']);
-    Route::post('inventory/store-requests/{storeRequest}/approve', [\App\Http\Controllers\StoreRequestController::class , 'approve']);
-    Route::post('inventory/store-requests/{storeRequest}/issue', [\App\Http\Controllers\StoreRequestController::class , 'issue']);
-    Route::post('inventory/store-requests/{storeRequest}/accept', [\App\Http\Controllers\StoreRequestController::class , 'accept']);
-    Route::post('inventory/store-requests/{storeRequest}/recall-issue', [\App\Http\Controllers\StoreRequestController::class , 'recallIssue']);
-    Route::post('inventory/store-requests/{storeRequest}/reject', [\App\Http\Controllers\StoreRequestController::class , 'reject']);
-    Route::post('inventory/store-requests/{storeRequest}/cancel', [\App\Http\Controllers\StoreRequestController::class , 'cancel']);
+        // Inventory Reports
+        Route::get('reports/summary', [InventoryReportController::class, 'dashboardSummary']);
+        Route::get('reports/status', [InventoryReportController::class, 'stockStatus']);
+        Route::get('reports/reorder', [InventoryReportController::class, 'reorderReport']);
+        Route::get('reports/overstock', [InventoryReportController::class, 'overstockReport']);
+        Route::get('reports/slow-moving', [InventoryReportController::class, 'slowMovingReport']);
+        Route::get('reports/ledger', [InventoryReportController::class, 'stockLedger']);
+        Route::get('reports/consumption', [InventoryReportController::class, 'consumption']);
+        Route::get('reports/adjustments', [InventoryReportController::class, 'adjustments']);
+        Route::get('reports/purchase-history', [InventoryReportController::class, 'purchaseHistory']);
+        Route::apiResource('items', InventoryController::class);
+        Route::apiResource('categories', InventoryCategoryController::class);
+        Route::apiResource('uoms', InventoryUomController::class);
+        Route::apiResource('taxes', InventoryTaxController::class);
+        Route::apiResource('vendors', VendorController::class);
+        Route::apiResource('locations', InventoryLocationController::class);
+        Route::apiResource('store-requests', StoreRequestController::class);
+        Route::post('adjust-stock', [InventoryController::class, 'adjustStock']);
+        Route::post('store-requests/{storeRequest}/approve', [StoreRequestController::class, 'approve']);
+        Route::post('store-requests/{storeRequest}/issue', [StoreRequestController::class, 'issue']);
+        Route::post('store-requests/{storeRequest}/accept', [StoreRequestController::class, 'accept']);
+        Route::post('store-requests/{storeRequest}/recall-issue', [StoreRequestController::class, 'recallIssue']);
+        Route::post('store-requests/{storeRequest}/reject', [StoreRequestController::class, 'reject']);
+        Route::post('store-requests/{storeRequest}/cancel', [StoreRequestController::class, 'cancel']);
 
-    Route::apiResource('inventory/purchase-orders', \App\Http\Controllers\PurchaseOrderController::class);
-    Route::post('inventory/purchase-orders/{purchaseOrder}/receive', [\App\Http\Controllers\PurchaseOrderController::class , 'receive']);
-    Route::post('inventory/purchase-orders/{purchaseOrder}/pay', [\App\Http\Controllers\PurchaseOrderController::class , 'pay']);
+        Route::apiResource('purchase-orders', PurchaseOrderController::class);
+        Route::post('purchase-orders/{purchaseOrder}/receive', [PurchaseOrderController::class, 'receive']);
+        Route::post('purchase-orders/{purchaseOrder}/pay', [PurchaseOrderController::class, 'pay']);
 
-    Route::apiResource('inventory/procurement-requisitions', \App\Http\Controllers\ProcurementRequisitionController::class);
-    Route::post('inventory/procurement-requisitions/{procurement_requisition}/request-quotes', [\App\Http\Controllers\ProcurementRequisitionController::class , 'requestQuotes']);
-    Route::post('inventory/procurement-requisitions/{procurement_requisition}/start-comparison', [\App\Http\Controllers\ProcurementRequisitionController::class , 'startComparison']);
-    Route::get('inventory/procurement-requisitions/{procurement_requisition}/quote-slips', [\App\Http\Controllers\ProcurementRequisitionController::class , 'quoteSlips']);
-    Route::post('inventory/procurement-requisitions/{procurement_requisition}/generate-purchase-orders', [\App\Http\Controllers\ProcurementRequisitionController::class , 'generatePurchaseOrders']);
-    Route::delete('inventory/procurement-requisition-items/{procurement_requisition_item}/vendors/{vendor}', [\App\Http\Controllers\ProcurementRequisitionController::class , 'removeVendor']);
-    Route::patch('inventory/procurement-requisition-items/{procurement_requisition_item}/price', [\App\Http\Controllers\ProcurementRequisitionController::class , 'updateItemPrice']);
-    Route::apiResource('payment-methods', \App\Http\Controllers\PaymentMethodController::class);
-    Route::get('inventory/movements', [\App\Http\Controllers\StockMovementController::class , 'index']);
+        Route::apiResource('procurement-requisitions', ProcurementRequisitionController::class);
+        Route::post('procurement-requisitions/{procurement_requisition}/request-quotes', [ProcurementRequisitionController::class, 'requestQuotes']);
+        Route::post('procurement-requisitions/{procurement_requisition}/start-comparison', [ProcurementRequisitionController::class, 'startComparison']);
+        Route::get('procurement-requisitions/{procurement_requisition}/quote-slips', [ProcurementRequisitionController::class, 'quoteSlips']);
+        Route::post('procurement-requisitions/{procurement_requisition}/generate-purchase-orders', [ProcurementRequisitionController::class, 'generatePurchaseOrders']);
+        Route::delete('procurement-requisition-items/{procurement_requisition_item}/vendors/{vendor}', [ProcurementRequisitionController::class, 'removeVendor']);
+        Route::patch('procurement-requisition-items/{procurement_requisition_item}/price', [ProcurementRequisitionController::class, 'updateItemPrice']);
+    });
+
+    Route::apiResource('payment-methods', PaymentMethodController::class);
+
+    Route::prefix('inventory')->group(function () {
+        Route::get('movements', [StockMovementController::class, 'index']);
+    });
 });
