@@ -7292,8 +7292,8 @@ class PosController extends Controller
                 $i->tax_regime = $reg;
             }
             [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
-            $totalTaxAmount += $lineTax;
-            $totalNetTaxable += $lineNet;
+                    $totalTaxAmount += $lineTax;
+                    $totalNetTaxable += $lineNet;
             $kind = $this->posLineTaxSupplyKind($i, $order);
             if ($kind === 'vat') {
                 $vatTax += $lineTax;
@@ -7301,7 +7301,7 @@ class PosController extends Controller
             } elseif ($kind === 'igst') {
                 $igstTax += $lineTax;
                 $gstNetTaxable += $lineNet;
-            } else {
+                } else {
                 $localGstTax += $lineTax;
                 $gstNetTaxable += $lineNet;
             }

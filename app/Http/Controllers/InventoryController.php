@@ -9,6 +9,17 @@ use Illuminate\Support\Facades\DB;
 
 class InventoryController extends Controller
 {
+    /**
+     * Cost per issue UOM from purchase-UOM cost (matches GRN, POS deductions, stock valuation report).
+     * cost_price = per purchase unit; conversion_factor = issue units per 1 purchase unit.
+     */
+    private function issueUnitCostFromPurchaseFields(float $costPricePerPurchaseUnit, float $conversionFactor): float
+    {
+        $cf = $conversionFactor > 0 ? $conversionFactor : 1.0;
+
+        return round($costPricePerPurchaseUnit / $cf, 4);
+    }
+
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
@@ -55,8 +66,13 @@ class InventoryController extends Controller
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $item = InventoryItem::create($validated);
 
-        $unitCost = round(floatval($validated['cost_price'] ?? 0), 4);
-        $item->update(['cost_price' => $unitCost]);
+        $purchaseUnitCost = round((float) ($validated['cost_price'] ?? 0), 4);
+        $item->update(['cost_price' => $purchaseUnitCost]);
+
+        $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
+            $purchaseUnitCost,
+            (float) ($validated['conversion_factor'] ?? 1)
+        );
 
         if ($item->current_stock > 0) {
             $mainStore = \App\Models\InventoryLocation::where('type', 'main_store')->first();
@@ -71,8 +87,8 @@ class InventoryController extends Controller
                     'inventory_location_id' => $mainStore->id,
                     'type' => 'in',
                     'quantity' => $item->current_stock,
-                    'unit_cost' => round($unitCost, 4),
-                    'total_cost' => round($item->current_stock * $unitCost, 2),
+                    'unit_cost' => $issueUnitCost,
+                    'total_cost' => round($item->current_stock * $issueUnitCost, 2),
                     'reason' => 'Initial Stock',
                     'user_id' => auth()->id(),
                 ]);
@@ -115,9 +131,14 @@ class InventoryController extends Controller
         $oldStock = $item->current_stock;
         $item->update($validated);
 
-        // Keep as Purchase Unit Price
-        $unitCost = round(floatval($validated['cost_price'] ?? 0), 4);
-        $item->update(['cost_price' => $unitCost]);
+        // Stored cost is per purchase UOM (WAC on GRN; manual entry same convention).
+        $purchaseUnitCost = round((float) ($validated['cost_price'] ?? 0), 4);
+        $item->update(['cost_price' => $purchaseUnitCost]);
+
+        $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
+            $purchaseUnitCost,
+            (float) ($validated['conversion_factor'] ?? 1)
+        );
 
         // If manual stock edit, sync with Main Store
         if (isset($validated['current_stock']) && $validated['current_stock'] != $oldStock) {
@@ -134,8 +155,8 @@ class InventoryController extends Controller
                     'inventory_location_id' => $mainStore->id,
                     'type' => $item->current_stock > $oldStock ? 'in' : 'out',
                     'quantity' => $qtyDelta,
-                    'unit_cost' => round($unitCost, 4),
-                    'total_cost' => round($qtyDelta * $unitCost, 2),
+                    'unit_cost' => $issueUnitCost,
+                    'total_cost' => round($qtyDelta * $issueUnitCost, 2),
                     'reason' => 'Manual Adjustment',
                     'notes' => 'Stock edited via Item Master',
                     'user_id' => auth()->id(),
