@@ -18,7 +18,7 @@ class RoomTypeController extends Controller
 
     public function index(Request $request)
     {
-        $query = RoomType::with(['tax', 'ratePlans']);
+        $query = RoomType::with(['tax', 'ratePlans', 'seasons']);
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
@@ -50,10 +50,21 @@ class RoomTypeController extends Controller
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
             'is_active' => 'nullable|boolean',
-            'base_price' => 'required|numeric|min:0',
             'breakfast_price' => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
+            'adult_lunch_price' => 'nullable|numeric|min:0',
+            'child_lunch_price' => 'nullable|numeric|min:0',
+            'adult_dinner_price' => 'nullable|numeric|min:0',
+            'child_dinner_price' => 'nullable|numeric|min:0',
+            'child_age_limit' => 'nullable|integer|min:1',
             'extra_bed_cost' => 'required|numeric|min:0',
+            'child_extra_bed_cost' => 'nullable|numeric|min:0',
+            'early_check_in_fee' => 'nullable|numeric|min:0',
+            'early_check_in_type' => 'nullable|string|in:per_hour,per_minute,flat_fee,percentage',
+            'early_check_in_buffer_minutes' => 'nullable|integer|min:0',
+            'late_check_out_fee' => 'nullable|numeric|min:0',
+            'late_check_out_type' => 'nullable|string|in:per_hour,per_minute,flat_fee,percentage',
+            'late_check_out_buffer_minutes' => 'nullable|integer|min:0',
             'base_occupancy' => 'required|integer|min:1',
             'capacity' => 'required|integer|min:1',
             'extra_bed_capacity' => 'required|integer|min:0',
@@ -61,10 +72,16 @@ class RoomTypeController extends Controller
             'bed_config' => 'nullable|string|max:255',
             'amenities' => 'nullable|array',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
+            'seasonal_prices' => 'nullable|array',
+            'seasonal_prices.*.season_name' => 'required_with:seasonal_prices|string|max:255',
+            'seasonal_prices.*.start_date' => 'required_with:seasonal_prices|date',
+            'seasonal_prices.*.end_date' => 'required_with:seasonal_prices|date',
+            'seasonal_prices.*.adjustment_type' => 'nullable|string|in:override,add_fixed,add_percent,discount',
+            'seasonal_prices.*.price_adjustment' => 'required_with:seasonal_prices|numeric',
             'rate_plans' => 'nullable|array',
             'rate_plans.*.name' => 'required_with:rate_plans|string|max:255',
             'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
-            'rate_plans.*.includes_breakfast' => 'nullable|boolean',
+            'rate_plans.*.meal_plan_type' => 'nullable|string|in:room_only,breakfast,half_board,full_board',
             // Hourly package extensions (backward compatible)
             'rate_plans.*.billing_unit' => 'nullable|in:day,hour_package',
             'rate_plans.*.package_hours' => 'nullable|integer|min:1',
@@ -82,12 +99,16 @@ class RoomTypeController extends Controller
             $roomType->ratePlans()->createMany($validated['rate_plans']);
         }
 
-        return response()->json($roomType->load(['tax', 'ratePlans']), 201);
+        if (! empty($validated['seasonal_prices'])) {
+            $roomType->seasons()->createMany($validated['seasonal_prices']);
+        }
+
+        return response()->json($roomType->load(['tax', 'ratePlans', 'seasons']), 201);
     }
 
     public function show(RoomType $roomType)
     {
-        return $roomType->load(['tax', 'ratePlans']);
+        return $roomType->load(['tax', 'ratePlans', 'seasons']);
     }
 
     public function update(Request $request, RoomType $roomType)
@@ -97,10 +118,15 @@ class RoomTypeController extends Controller
             'name' => 'string|max:255',
             'description' => 'nullable|string',
             'is_active' => 'nullable|boolean',
-            'base_price' => 'numeric|min:0',
             'breakfast_price' => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
+            'adult_lunch_price' => 'nullable|numeric|min:0',
+            'child_lunch_price' => 'nullable|numeric|min:0',
+            'adult_dinner_price' => 'nullable|numeric|min:0',
+            'child_dinner_price' => 'nullable|numeric|min:0',
+            'child_age_limit' => 'nullable|integer|min:0|max:18',
             'extra_bed_cost' => 'numeric|min:0',
+            'child_extra_bed_cost' => 'nullable|numeric|min:0',
             'base_occupancy' => 'integer|min:1',
             'capacity' => 'integer|min:1',
             'extra_bed_capacity' => 'integer|min:0',
@@ -108,11 +134,26 @@ class RoomTypeController extends Controller
             'bed_config' => 'nullable|string|max:255',
             'amenities' => 'nullable|array',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
+            'seasonal_prices' => 'nullable|array',
+            'seasonal_prices.*.id' => 'nullable|exists:room_type_seasons,id',
+            'seasonal_prices.*.season_name' => 'required_with:seasonal_prices|string|max:255',
+            'seasonal_prices.*.start_date' => 'required_with:seasonal_prices|date',
+            'seasonal_prices.*.end_date' => 'required_with:seasonal_prices|date',
+            'seasonal_prices.*.price_adjustment' => 'required_with:seasonal_prices|numeric',
             'rate_plans' => 'nullable|array',
             'rate_plans.*.id' => 'nullable|exists:rate_plans,id',
             'rate_plans.*.name' => 'required_with:rate_plans|string|max:255',
             'rate_plans.*.base_price' => 'required_with:rate_plans|numeric|min:0',
+            'rate_plans.*.meal_plan_type' => 'nullable|string|in:room_only,breakfast,half_board,full_board',
             'rate_plans.*.includes_breakfast' => 'nullable|boolean',
+            'rate_plans.*.includes_lunch' => 'nullable|boolean',
+            'rate_plans.*.includes_dinner' => 'nullable|boolean',
+            'early_check_in_fee' => 'nullable|numeric|min:0',
+            'early_check_in_type' => 'nullable|string|in:per_hour,per_minute,flat_fee,percentage',
+            'early_check_in_buffer_minutes' => 'nullable|integer|min:0',
+            'late_check_out_fee' => 'nullable|numeric|min:0',
+            'late_check_out_type' => 'nullable|string|in:per_hour,per_minute,flat_fee,percentage',
+            'late_check_out_buffer_minutes' => 'nullable|integer|min:0',
             // Hourly package extensions (backward compatible)
             'rate_plans.*.billing_unit' => 'nullable|in:day,hour_package',
             'rate_plans.*.package_hours' => 'nullable|integer|min:1',
@@ -144,7 +185,7 @@ class RoomTypeController extends Controller
                     $roomType->ratePlans()->where('id', $planData['id'])->update([
                         'name' => $planData['name'],
                         'base_price' => $planData['base_price'],
-                        'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                        'meal_plan_type' => $planData['meal_plan_type'] ?? 'room_only',
                         'billing_unit' => $planData['billing_unit'] ?? 'day',
                         'package_hours' => $planData['package_hours'] ?? null,
                         'package_price' => $planData['package_price'] ?? null,
@@ -156,7 +197,7 @@ class RoomTypeController extends Controller
                     $roomType->ratePlans()->create([
                         'name' => $planData['name'],
                         'base_price' => $planData['base_price'],
-                        'includes_breakfast' => $planData['includes_breakfast'] ?? false,
+                        'meal_plan_type' => $planData['meal_plan_type'] ?? 'room_only',
                         'billing_unit' => $planData['billing_unit'] ?? 'day',
                         'package_hours' => $planData['package_hours'] ?? null,
                         'package_price' => $planData['package_price'] ?? null,
@@ -168,7 +209,33 @@ class RoomTypeController extends Controller
             }
         }
 
-        return response()->json($roomType->load(['tax', 'ratePlans']));
+        if (array_key_exists('seasonal_prices', $validated)) {
+            $incomingSeasons = $validated['seasonal_prices'] ?? [];
+            $incomingSeasonIds = collect($incomingSeasons)->pluck('id')->filter()->toArray();
+            $roomType->seasons()->whereNotIn('id', $incomingSeasonIds)->delete();
+
+            foreach ($incomingSeasons as $seasonData) {
+                if (! empty($seasonData['id'])) {
+                    $roomType->seasons()->where('id', $seasonData['id'])->update([
+                        'season_name' => $seasonData['season_name'],
+                        'start_date' => $seasonData['start_date'],
+                        'end_date' => $seasonData['end_date'],
+                        'adjustment_type' => $seasonData['adjustment_type'] ?? 'override',
+                        'price_adjustment' => $seasonData['price_adjustment'],
+                    ]);
+                } else {
+                    $roomType->seasons()->create([
+                        'season_name' => $seasonData['season_name'],
+                        'start_date' => $seasonData['start_date'],
+                        'end_date' => $seasonData['end_date'],
+                        'adjustment_type' => $seasonData['adjustment_type'] ?? 'override',
+                        'price_adjustment' => $seasonData['price_adjustment'],
+                    ]);
+                }
+            }
+        }
+
+        return response()->json($roomType->load(['tax', 'ratePlans', 'seasons']));
     }
 
     public function destroy(RoomType $roomType)

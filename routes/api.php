@@ -50,17 +50,18 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class , 'startCleaning']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class , 'markCleaned']);
 
-    Route::get('bookings/chart', [BookingController::class , 'chart']);
-    Route::get('bookings/summary', [BookingController::class , 'summary']);
-    Route::post('bookings/{booking}/early-checkin', [BookingController::class , 'earlyCheckin']);
-    Route::post('bookings/{booking}/late-checkout', [BookingController::class , 'lateCheckout']);
-    Route::post('bookings/{booking}/extend', [BookingController::class , 'extendReservation']);
-    Route::post('bookings/{booking}/extend-hours', [BookingController::class , 'extendHourlyReservation']);
-    Route::get('bookings/{booking}/voucher', [BookingController::class , 'reservationVoucher']);
-    Route::get('bookings/{booking}/billing', [BookingController::class , 'reservationBilling']);
-    Route::post('bookings/{booking}/split-stay', [BookingController::class , 'splitStay']);
-    Route::get('bookings/available-rooms', [BookingController::class , 'getAvailableRooms']);
-    Route::post('booking-groups', [BookingController::class , 'storeGroup']);
+    Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);
+    Route::get('bookings/chart', [BookingController::class, 'chart']);
+    Route::get('bookings/summary', [BookingController::class, 'summary']);
+    Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
+    Route::post('bookings/{booking}/late-checkout', [BookingController::class, 'lateCheckout']);
+    Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
+    Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);
+    Route::get('bookings/{booking}/voucher', [BookingController::class, 'reservationVoucher']);
+    Route::get('bookings/{booking}/billing', [BookingController::class, 'reservationBilling']);
+    Route::post('bookings/{booking}/split-stay', [BookingController::class, 'splitStay']);
+    Route::get('bookings/available-rooms', [BookingController::class, 'getAvailableRooms']);
+    Route::post('booking-groups', [BookingController::class, 'storeGroup']);
     Route::apiResource('bookings', BookingController::class);
 
     // F&B Module (Restaurant Master)
@@ -72,8 +73,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('qz/certificate', [QzSignController::class , 'certificate']);
 
     // Settings (receipt defaults)
-    Route::get('settings/receipt', [SettingController::class , 'receiptDefaults']);
-    Route::match (['put', 'post'], 'settings/receipt', [SettingController::class , 'updateReceiptDefaults']);
+    Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
+    Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
+    Route::get('settings/global', [SettingController::class, 'globalConfig']);
+    Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);

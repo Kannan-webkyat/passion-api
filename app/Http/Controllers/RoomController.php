@@ -17,7 +17,7 @@ class RoomController extends Controller
 
     public function index(Request $request)
     {
-        $query = Room::with('roomType');
+        $query = Room::with(['roomType', 'connectedRoom']);
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
@@ -34,6 +34,13 @@ class RoomController extends Controller
             'is_active' => 'nullable|boolean',
             'status' => 'required|in:available,occupied,maintenance,dirty,cleaning',
             'floor' => 'nullable|string',
+            'bed_config' => 'nullable|string',
+            'amenities' => 'nullable|array',
+            'intercom_extension' => 'nullable|string|max:50',
+            'view_type' => 'nullable|string|in:standard,garden_view,sea_view,pool_view',
+            'is_smoking_allowed' => 'nullable|boolean',
+            'connected_room_id' => 'nullable|exists:rooms,id',
+            'internal_notes' => 'nullable|string',
             'notes' => 'nullable|string',
         ]);
 
@@ -56,6 +63,13 @@ class RoomController extends Controller
             'is_active' => 'nullable|boolean',
             'status' => 'in:available,occupied,maintenance,dirty,cleaning',
             'floor' => 'nullable|string',
+            'bed_config' => 'nullable|string',
+            'amenities' => 'nullable|array',
+            'intercom_extension' => 'nullable|string|max:50',
+            'view_type' => 'nullable|string|in:standard,garden_view,sea_view,pool_view',
+            'is_smoking_allowed' => 'nullable|boolean',
+            'connected_room_id' => 'nullable|exists:rooms,id',
+            'internal_notes' => 'nullable|string',
             'notes' => 'nullable|string',
         ]);
 
