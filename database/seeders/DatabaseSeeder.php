@@ -21,7 +21,7 @@ class DatabaseSeeder extends Seeder
             RestaurantTableSeeder::class,  // Must run before FreshBiryaniTeaCoffeeSeeder (creates restaurants)
             FreshBiryaniTeaCoffeeSeeder::class,
             BarSeeder::class,
-            // RoomSeeder::class,
+            RoomTypeRoomSeeder::class, // After InventoryTaxSeeder (room type tax_id)
             RbacTestUsersSeeder::class,
             // BookingSeeder::class,
         ]);
