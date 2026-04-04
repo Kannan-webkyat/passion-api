@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\InventoryItem;
 use App\Models\ProcurementRequisition;
 use App\Models\ProcurementRequisitionItem;
+use App\Models\Setting;
 use App\Models\Vendor;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\Request;
@@ -196,6 +197,7 @@ class ProcurementRequisitionController extends Controller
     public function quoteSlips(ProcurementRequisition $procurementRequisition)
     {
         $procurementRequisition->load([
+            'location',
             'items.inventoryItem.purchaseUom',
             'items.vendors',
         ]);
@@ -223,10 +225,24 @@ class ProcurementRequisitionController extends Controller
             }
         }
 
+        // Header: document title → settings company name → receive location → app name.
+        $propertyLabel = trim((string) ($procurementRequisition->title ?? ''));
+        if ($propertyLabel === '') {
+            $propertyLabel = trim((string) Setting::get('receipt_company_name', ''));
+        }
+        if ($propertyLabel === '') {
+            $propertyLabel = (string) ($procurementRequisition->location?->name ?? '');
+        }
+        if ($propertyLabel === '') {
+            $propertyLabel = (string) config('app.name', '');
+        }
+
         return response()->json([
             'reference_number' => $procurementRequisition->reference_number,
             'title' => $procurementRequisition->title,
-            'property_label' => $procurementRequisition->title ?: 'Property',
+            'property_label' => $propertyLabel,
+            /** Canonical org identity (same source as Settings → receipt / company profile). */
+            'company_profile' => Setting::getCompanyProfile(),
             'groups' => array_values($groups),
         ]);
     }

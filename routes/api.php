@@ -74,8 +74,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('qz/sign', [QzSignController::class , 'sign']);
     Route::get('qz/certificate', [QzSignController::class , 'certificate']);
 
-    // Settings (receipt defaults)
+    // Settings (receipt defaults + company profile for procurement / accounts / reports)
     Route::get('settings/receipt', [SettingController::class, 'receiptDefaults']);
+    Route::get('settings/company-profile', [SettingController::class, 'companyProfile']);
     Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
     Route::get('settings/global', [SettingController::class, 'globalConfig']);
     Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);

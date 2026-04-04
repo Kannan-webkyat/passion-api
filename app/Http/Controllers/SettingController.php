@@ -21,10 +21,20 @@ class SettingController extends Controller
         return response()->json(Setting::getReceiptDefaults());
     }
 
+    /**
+     * Canonical company / property profile (for procurement, accounts, reports).
+     */
+    public function companyProfile()
+    {
+        return response()->json(Setting::getCompanyProfile());
+    }
+
     public function updateReceiptDefaults(Request $request)
     {
         $this->checkPermission('manage-settings');
         $validated = $request->validate([
+            'company_name' => 'nullable|string|max:255',
+            'gstin' => 'nullable|string|max:20',
             'address' => 'nullable|string|max:1000',
             'email' => 'nullable|email|max:255',
             'phone' => 'nullable|string|max:50',

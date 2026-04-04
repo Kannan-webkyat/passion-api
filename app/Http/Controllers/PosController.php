@@ -328,7 +328,7 @@ class PosController extends Controller
             'address' => $restaurant->address ?: ($defaults['address'] ?? ''),
             'email' => $restaurant->email ?: ($defaults['email'] ?? ''),
             'phone' => $restaurant->phone ?: ($defaults['phone'] ?? ''),
-            'gstin' => $restaurant->gstin ?: '',
+            'gstin' => $restaurant->gstin ?: ($defaults['gstin'] ?? ''),
             'fssai' => $restaurant->fssai ?: '',
             'sac_code' => $restaurant->sac_code ?: '',
             'logo_url' => $restaurant->logo_path
