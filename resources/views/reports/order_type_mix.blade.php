@@ -33,6 +33,7 @@
     @endphp
     <div class="header">
         <h1>Order-type mix</h1>
+        <p><strong>{{ $category === 'all' ? 'All Revenue' : ($category === 'liquor' ? 'Bar (Liquor)' : 'Kitchen (Food)') }}</strong></p>
         <p>{{ $restaurant->name }}</p>
         <p>Period: {{ date('d M Y', strtotime($from)) }} to {{ date('d M Y', strtotime($to)) }}</p>
     </div>

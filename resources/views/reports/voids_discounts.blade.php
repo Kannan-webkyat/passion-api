@@ -25,6 +25,7 @@
             @endif
         </h1>
         <p>{{ $restaurant->name }}</p>
+        <p><strong>{{ $category === 'all' ? 'All Items' : ($category === 'bar' ? 'Bar (Liquor)' : 'Kitchen (Food)') }}</strong></p>
         <p>Period: {{ date('d M Y', strtotime($from)) }} to {{ date('d M Y', strtotime($to)) }}</p>
         <p>Rows: {{ $rows->count() }}</p>
     </div>
@@ -42,8 +43,10 @@
             </tr>
         </thead>
         <tbody>
+            @php $totalVoid = 0; @endphp
             @foreach($rows as $o)
             @php
+                $totalVoid += (float) $o->total_amount;
                 $bd = $o->business_date?->format('Y-m-d');
                 $close = $bd && isset($closingMap[$bd]) ? $closingMap[$bd] : null;
             @endphp
@@ -56,6 +59,13 @@
                 <td>{{ $close ? (\Illuminate\Support\Str::limit($close['day_closed_at'] ?? '', 16).' — '.($close['day_closed_by'] ?? '')) : '—' }}</td>
             </tr>
             @endforeach
+            @if($rows->count() > 0)
+            <tr style="font-weight: bold; background: #fafafa; border-top: 2px solid #ccc;">
+                <td colspan="3">TOTAL VOID BILLS</td>
+                <td class="text-right num">₹{{ number_format($totalVoid, 2) }}</td>
+                <td colspan="2"></td>
+            </tr>
+            @endif
         </tbody>
     </table>
     @elseif($section === 'void_items')
@@ -71,8 +81,10 @@
             </tr>
         </thead>
         <tbody>
+            @php $totalVoidItems = 0; @endphp
             @foreach($rows as $item)
             @php
+                $totalVoidItems += (float) $item->line_total;
                 $ord = $item->order;
                 $bd = $ord?->business_date?->format('Y-m-d');
                 $close = $bd && isset($closingMap[$bd]) ? $closingMap[$bd] : null;
@@ -87,6 +99,13 @@
                 <td>{{ $close ? (\Illuminate\Support\Str::limit($close['day_closed_at'] ?? '', 16).' — '.($close['day_closed_by'] ?? '')) : '—' }}</td>
             </tr>
             @endforeach
+            @if($rows->count() > 0)
+            <tr style="font-weight: bold; background: #fafafa; border-top: 2px solid #ccc;">
+                <td colspan="4">TOTAL VOID ITEMS</td>
+                <td class="text-right num">₹{{ number_format($totalVoidItems, 2) }}</td>
+                <td></td>
+            </tr>
+            @endif
         </tbody>
     </table>
     @else
@@ -102,8 +121,10 @@
             </tr>
         </thead>
         <tbody>
+            @php $totalDiscounts = 0; @endphp
             @foreach($rows as $o)
             @php
+                $totalDiscounts += (float) $o->discount_amount;
                 $bd = $o->business_date?->format('Y-m-d');
                 $close = $bd && isset($closingMap[$bd]) ? $closingMap[$bd] : null;
             @endphp
@@ -116,6 +137,13 @@
                 <td>{{ $close ? (\Illuminate\Support\Str::limit($close['day_closed_at'] ?? '', 16).' — '.($close['day_closed_by'] ?? '')) : '—' }}</td>
             </tr>
             @endforeach
+            @if($rows->count() > 0)
+            <tr style="font-weight: bold; background: #fafafa; border-top: 2px solid #ccc;">
+                <td colspan="3">TOTAL DISCOUNTS</td>
+                <td class="text-right num">₹{{ number_format($totalDiscounts, 2) }}</td>
+                <td colspan="2"></td>
+            </tr>
+            @endif
         </tbody>
     </table>
     @endif

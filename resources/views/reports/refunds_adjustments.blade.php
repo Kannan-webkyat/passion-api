@@ -20,6 +20,7 @@
     <div class="header">
         <h1>Refund register</h1>
         <p>{{ $restaurant->name }}</p>
+        <p><strong>{{ $category === 'all' ? 'All Items' : ($category === 'bar' ? 'Bar (Liquor)' : 'Kitchen (Food)') }}</strong></p>
         <p>Period: {{ date('d M Y', strtotime($from)) }} to {{ date('d M Y', strtotime($to)) }}</p>
         <p>Rows: {{ $rows->count() }}</p>
     </div>
@@ -39,8 +40,12 @@
             </tr>
         </thead>
         <tbody>
+            @php $totalAmount = 0; @endphp
             @foreach($rows as $r)
-            @php $o = $r->order; @endphp
+            @php 
+                $o = $r->order; 
+                $totalAmount += (float) $r->amount;
+            @endphp
             <tr>
                 <td>#{{ $r->order_id }}</td>
                 <td>
@@ -58,6 +63,13 @@
                 <td>{{ $r->refundedBy?->name ?? '—' }}</td>
             </tr>
             @endforeach
+            @if($rows->count() > 0)
+            <tr style="font-weight: bold; background: #fafafa; border-top: 2px solid #ccc;">
+                <td colspan="4">TOTAL REFUNDS</td>
+                <td class="text-right num">₹{{ number_format($totalAmount, 2) }}</td>
+                <td colspan="4"></td>
+            </tr>
+            @endif
         </tbody>
     </table>
 

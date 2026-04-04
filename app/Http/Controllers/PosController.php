@@ -2369,12 +2369,14 @@ class PosController extends Controller
             'to' => 'required|date|after_or_equal:from',
             'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
             'page' => 'nullable|integer|min:1',
+            'category' => 'nullable|string|in:all,kitchen,bar',
         ]);
 
         $user = auth()->user();
         $from = $validated['from'];
         $to = $validated['to'];
         $restaurantId = $validated['restaurant_id'] ?? null;
+        $category = $validated['category'] ?? 'all';
 
         if ($restaurantId) {
             $this->authorizeRestaurantId((int) $restaurantId);
@@ -2431,24 +2433,104 @@ class PosController extends Controller
                 });
             });
 
-        $amountTotal = (float) (clone $base)->sum('amount');
+        if ($category !== 'all') {
+            $isLiquor = $category === 'bar';
+            $base->whereExists(function ($q) use ($isLiquor) {
+                $q->select(DB::raw(1))
+                    ->from('pos_order_items as poi')
+                    ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                    ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                    ->whereColumn('poi.order_id', 'pos_order_refunds.order_id')
+                    ->where(function ($sq) use ($isLiquor) {
+                        $taxFilter = "(poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                            SELECT 1 FROM combo_items ci
+                            JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                            JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                            WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                        ))";
+                        if ($isLiquor) $sq->whereRaw($taxFilter);
+                        else $sq->whereRaw("NOT $taxFilter");
+                    });
+            });
+        }
+
+        if ($category === 'all') {
+            $amountTotal = (float) (clone $base)->sum('amount');
+        } else {
+            $allMatching = (clone $base)->with(['order.items' => function($q) {
+                $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                  ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                  ->select('pos_order_items.*', 'it.type as tax_type');
+            }])->get();
+
+            $amountTotal = 0;
+            $isLiquor = $category === 'bar';
+            foreach ($allMatching as $r) {
+                $orderSubtotal = (float) $r->order->total_amount;
+                if ($orderSubtotal <= 0) continue;
+                $deptSubtotal = 0;
+                foreach ($r->order->items as $item) {
+                     $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                     if (!$taxFilter && $item->combo_id) {
+                         $taxFilter = DB::table('combo_items as ci')
+                            ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                            ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                            ->where('ci.combo_id', $item->combo_id)
+                            ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                            ->exists();
+                     }
+                     if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                }
+                $amountTotal += $r->amount * ($deptSubtotal / $orderSubtotal);
+            }
+        }
         $entryCount = (clone $base)->count();
 
         $paginated = (clone $base)
-            ->with(['order.restaurant:id,name', 'order.waiter:id,name', 'refundedBy:id,name'])
+            ->with([
+                'order.restaurant:id,name',
+                'order.waiter:id,name',
+                'refundedBy:id,name',
+                'order.items' => function($q) {
+                    $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                      ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                      ->select('pos_order_items.*', 'it.type as tax_type');
+                }
+             ])
             ->orderByDesc('refunded_at')
             ->orderByDesc('id')
             ->paginate($perPage);
 
-        $data = collect($paginated->items())->map(function ($r) {
+        $data = collect($paginated->items())->map(function ($r) use ($category) {
             $o = $r->order;
+            $displayAmount = (float) $r->amount;
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $orderSubtotal = (float) ($o->total_amount ?? 0);
+                if ($orderSubtotal > 0) {
+                    $deptSubtotal = 0;
+                    foreach ($o->items as $item) {
+                        $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                        if (!$taxFilter && $item->combo_id) {
+                             $taxFilter = DB::table('combo_items as ci')
+                                ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                ->where('ci.combo_id', $item->combo_id)
+                                ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                ->exists();
+                        }
+                        if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                    }
+                    $displayAmount = $r->amount * ($deptSubtotal / $orderSubtotal);
+                }
+            }
 
             return [
                 'id' => $r->id,
                 'order_id' => $r->order_id,
                 'refund_business_date' => $r->business_date?->format('Y-m-d'),
                 'refunded_at' => $r->refunded_at?->toDateTimeString(),
-                'amount' => (float) $r->amount,
+                'amount' => $displayAmount,
                 'method' => $r->method,
                 'reference_no' => $r->reference_no,
                 'reason' => $r->reason,
@@ -2483,6 +2565,7 @@ class PosController extends Controller
         $from = $request->query('from') ?? now()->toDateString();
         $to = $request->query('to') ?? now()->toDateString();
         $type = $request->query('type', 'csv');
+        $category = $request->query('category', 'all');
 
         if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
             abort(403, 'Unauthorized access to this outlet.');
@@ -2490,7 +2573,7 @@ class PosController extends Controller
 
         $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
 
-        $rows = PosOrderRefund::query()
+        $rowsQuery = PosOrderRefund::query()
             ->whereHas('order', fn ($q) => $q->where('restaurant_id', (int) $restaurantId))
             ->where(function ($q) use ($from, $to) {
                 $q->where(function ($q2) use ($from, $to) {
@@ -2501,10 +2584,60 @@ class PosController extends Controller
                         ->whereDate('refunded_at', '<=', $to);
                 });
             })
-            ->with(['order.waiter:id,name', 'refundedBy:id,name'])
-            ->orderByDesc('refunded_at')
+            ->with(['order.waiter:id,name', 'refundedBy:id,name', 'order.items' => function($q) {
+                $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                  ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                  ->select('pos_order_items.*', 'it.type as tax_type');
+            }]);
+
+        if ($category !== 'all') {
+            $isLiquor = $category === 'bar';
+            $rowsQuery->whereExists(function ($q) use ($isLiquor) {
+                $q->select(DB::raw(1))
+                    ->from('pos_order_items as poi')
+                    ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                    ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                    ->whereColumn('poi.order_id', 'pos_order_refunds.order_id')
+                    ->where(function ($sq) use ($isLiquor) {
+                        $taxFilter = "(poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                            SELECT 1 FROM combo_items ci
+                            JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                            JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                            WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                        ))";
+                        if ($isLiquor) $sq->whereRaw($taxFilter);
+                        else $sq->whereRaw("NOT $taxFilter");
+                    });
+            });
+        }
+
+        $rows = $rowsQuery->orderByDesc('refunded_at')
             ->orderByDesc('id')
             ->get();
+
+        // Pro-rate if filtered
+        if ($category !== 'all') {
+            $isLiquor = $category === 'bar';
+            foreach ($rows as $r) {
+                $orderSubtotal = (float) ($r->order->total_amount ?? 0);
+                if ($orderSubtotal > 0) {
+                    $deptSubtotal = 0;
+                    foreach ($r->order->items as $item) {
+                        $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                        if (!$taxFilter && $item->combo_id) {
+                             $taxFilter = DB::table('combo_items as ci')
+                                ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                ->where('ci.combo_id', $item->combo_id)
+                                ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                ->exists();
+                        }
+                        if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                    }
+                    $r->amount = $r->amount * ($deptSubtotal / $orderSubtotal);
+                }
+            }
+        }
 
         if ($type === 'pdf') {
             $pdf = Pdf::loadView('reports.refunds_adjustments', [
@@ -2512,6 +2645,7 @@ class PosController extends Controller
                 'restaurant' => $restaurant,
                 'from' => $from,
                 'to' => $to,
+                'category' => $category,
             ]);
 
             return $pdf->download("refund_register_{$from}_to_{$to}.pdf");
@@ -2569,6 +2703,7 @@ class PosController extends Controller
             'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
             'section' => 'required|in:void_bills,void_items,discounts',
             'page' => 'nullable|integer|min:1',
+            'category' => 'nullable|string|in:all,kitchen,bar',
         ]);
 
         $user = auth()->user();
@@ -2576,6 +2711,7 @@ class PosController extends Controller
         $to = $validated['to'];
         $section = $validated['section'];
         $restaurantId = $validated['restaurant_id'] ?? null;
+        $category = $validated['category'] ?? 'all';
 
         if ($restaurantId) {
             $this->authorizeRestaurantId((int) $restaurantId);
@@ -2633,7 +2769,56 @@ class PosController extends Controller
                         });
                 });
 
-            $amountTotal = (float) (clone $base)->sum('total_amount');
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $base->whereExists(function ($q) use ($isLiquor) {
+                    $q->select(DB::raw(1))
+                        ->from('pos_order_items as poi')
+                        ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                        ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                        ->whereColumn('poi.order_id', 'pos_orders.id')
+                        ->where(function($sq) use ($isLiquor) {
+                            $taxFilter = "(poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                                SELECT 1 FROM combo_items ci
+                                JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                                JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                                WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                            ))";
+                            if ($isLiquor) $sq->whereRaw($taxFilter);
+                            else $sq->whereRaw("NOT $taxFilter");
+                        });
+                });
+            }
+
+            if ($category === 'all') {
+                $amountTotal = (float) (clone $base)->sum('total_amount');
+            } else {
+                $allMatching = (clone $base)->with(['items' => function($q) {
+                    $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                      ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                      ->select('pos_order_items.*', 'it.type as tax_type');
+                }])->get();
+                $amountTotal = 0;
+                $isLiquor = $category === 'bar';
+                foreach ($allMatching as $o) {
+                    $orderSubtotal = (float) ($o->total_amount ?? 0);
+                    if ($orderSubtotal <= 0) continue;
+                    $deptSubtotal = 0;
+                    foreach ($o->items as $item) {
+                        $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                        if (!$taxFilter && $item->combo_id) {
+                             $taxFilter = DB::table('combo_items as ci')
+                                ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                ->where('ci.combo_id', $item->combo_id)
+                                ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                ->exists();
+                        }
+                        if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                    }
+                    $amountTotal += (float) $o->total_amount * ($deptSubtotal / $orderSubtotal);
+                }
+            }
             $entryCount = (clone $base)->count();
 
             $paginated = (clone $base)
@@ -2645,15 +2830,37 @@ class PosController extends Controller
             $dates = collect($paginated->items())->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
             $closingMap = $this->posDayClosingMapForDates($rid, $dates);
 
-            $data = collect($paginated->items())->map(function ($o) use ($closingMap) {
+            $data = collect($paginated->items())->map(function ($o) use ($closingMap, $category) {
                 $bd = $o->business_date?->format('Y-m-d');
                 $close = $bd ? ($closingMap[$bd] ?? null) : null;
+                $displayAmount = (float) $o->total_amount;
+
+                if ($category !== 'all') {
+                    $isLiquor = $category === 'bar';
+                    $orderSubtotal = (float) ($o->total_amount ?? 0);
+                    if ($orderSubtotal > 0) {
+                        $deptSubtotal = 0;
+                        foreach ($o->items as $item) {
+                            $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                            if (!$taxFilter && $item->combo_id) {
+                                 $taxFilter = DB::table('combo_items as ci')
+                                    ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                    ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                    ->where('ci.combo_id', $item->combo_id)
+                                    ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                    ->exists();
+                            }
+                            if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                        }
+                        $displayAmount = (float) $o->total_amount * ($deptSubtotal / $orderSubtotal);
+                    }
+                }
 
                 return [
                     'id' => $o->id,
                     'business_date' => $bd,
                     'voided_at' => $o->voided_at?->toDateTimeString(),
-                    'total_amount' => (float) $o->total_amount,
+                    'total_amount' => $displayAmount,
                     'void_reason' => $o->void_reason,
                     'void_notes' => $o->void_notes,
                     'order_type' => $o->order_type ?? 'dine_in',
@@ -2684,6 +2891,31 @@ class PosController extends Controller
                 ->whereHas('order', fn ($q) => $q->where('restaurant_id', $rid))
                 ->whereDate('cancelled_at', '>=', $from)
                 ->whereDate('cancelled_at', '<=', $to);
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $base->where(function($q) use ($isLiquor) {
+                    $q->whereExists(function ($sq) use ($isLiquor) {
+                        $sq->select(DB::raw(1))
+                            ->from('menu_items as mi')
+                            ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                            ->whereColumn('mi.id', 'pos_order_items.menu_item_id')
+                            ->whereRaw('LOWER(it.type) ' . ($isLiquor ? '=' : '!=') . ' ?', ['vat']);
+                    })
+                    ->orWhere(function($sq) use ($isLiquor) {
+                        if ($isLiquor) $sq->where('pos_order_items.tax_regime', 'vat_liquor');
+                        else $sq->where('pos_order_items.tax_regime', '!=', 'vat_liquor');
+                    })
+                    ->orWhereExists(function ($sq) use ($isLiquor) {
+                        $sq->select(DB::raw(1))
+                            ->from('combo_items as ci')
+                            ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                            ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                            ->whereColumn('ci.combo_id', 'pos_order_items.combo_id')
+                            ->whereRaw('LOWER(it2.type) ' . ($isLiquor ? '=' : '!=') . ' ?', ['vat']);
+                    });
+                });
+            }
 
             $amountTotal = (float) (clone $base)->sum('line_total');
             $entryCount = (clone $base)->count();
@@ -2755,11 +2987,69 @@ class PosController extends Controller
                 });
             });
 
-        $amountTotal = (float) (clone $base)->sum('discount_amount');
+        if ($category !== 'all') {
+            $isLiquor = $category === 'bar';
+            $base->whereExists(function ($q) use ($isLiquor) {
+                $q->select(DB::raw(1))
+                    ->from('pos_order_items as poi')
+                    ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                    ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                    ->whereColumn('poi.order_id', 'pos_orders.id')
+                    ->where(function ($sq) use ($isLiquor) {
+                        $taxFilter = "(poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                            SELECT 1 FROM combo_items ci
+                            JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                            JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                            WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                        ))";
+                        if ($isLiquor) $sq->whereRaw($taxFilter);
+                        else $sq->whereRaw("NOT $taxFilter");
+                    });
+            });
+        }
+
+        if ($category === 'all') {
+            $amountTotal = (float) (clone $base)->sum('discount_amount');
+        } else {
+            $allMatching = (clone $base)->with(['items' => function($q) {
+                $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                  ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                  ->select('pos_order_items.*', 'it.type as tax_type');
+            }])->get();
+            $amountTotal = 0;
+            $isLiquor = $category === 'bar';
+            foreach ($allMatching as $o) {
+                $orderSubtotal = (float) ($o->total_amount + $o->discount_amount);
+                if ($orderSubtotal <= 0) continue;
+                $deptSubtotal = 0;
+                foreach ($o->items as $item) {
+                    $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                    if (!$taxFilter && $item->combo_id) {
+                         $taxFilter = DB::table('combo_items as ci')
+                            ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                            ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                            ->where('ci.combo_id', $item->combo_id)
+                            ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                            ->exists();
+                    }
+                    if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                }
+                $amountTotal += (float) $o->discount_amount * ($deptSubtotal / $orderSubtotal);
+            }
+        }
         $entryCount = (clone $base)->count();
 
         $paginated = (clone $base)
-            ->with(['restaurant:id,name', 'waiter:id,name', 'discountApprovedBy:id,name'])
+            ->with([
+                'restaurant:id,name',
+                'waiter:id,name',
+                'discountApprovedBy:id,name',
+                'items' => function($q) {
+                    $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                      ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                      ->select('pos_order_items.*', 'it.type as tax_type');
+                }
+            ])
             ->orderByDesc('closed_at')
             ->orderByDesc('id')
             ->paginate($perPage);
@@ -2767,15 +3057,37 @@ class PosController extends Controller
         $dates = collect($paginated->items())->map(fn ($o) => $o->business_date?->format('Y-m-d'))->filter()->unique()->values()->all();
         $closingMap = $this->posDayClosingMapForDates($rid, $dates);
 
-        $data = collect($paginated->items())->map(function ($o) use ($closingMap) {
+        $data = collect($paginated->items())->map(function ($o) use ($closingMap, $category) {
             $bd = $o->business_date?->format('Y-m-d');
             $close = $bd ? ($closingMap[$bd] ?? null) : null;
+            $displayAmount = (float) $o->discount_amount;
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $orderSubtotal = (float) ($o->total_amount + $o->discount_amount);
+                if ($orderSubtotal > 0) {
+                    $deptSubtotal = 0;
+                    foreach ($o->items as $item) {
+                        $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                        if (!$taxFilter && $item->combo_id) {
+                             $taxFilter = DB::table('combo_items as ci')
+                                ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                ->where('ci.combo_id', $item->combo_id)
+                                ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                ->exists();
+                        }
+                        if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                    }
+                    $displayAmount = (float) $o->discount_amount * ($deptSubtotal / $orderSubtotal);
+                }
+            }
 
             return [
                 'id' => $o->id,
                 'business_date' => $bd,
                 'closed_at' => $o->closed_at?->toDateTimeString(),
-                'discount_amount' => (float) $o->discount_amount,
+                'discount_amount' => $displayAmount,
                 'discount_type' => $o->discount_type,
                 'discount_value' => (float) ($o->discount_value ?? 0),
                 'is_complimentary' => (bool) $o->is_complimentary,
@@ -2814,6 +3126,7 @@ class PosController extends Controller
         $to = $request->query('to') ?? now()->toDateString();
         $section = $request->query('section', 'void_bills');
         $type = $request->query('type', 'csv');
+        $category = $request->query('category', 'all');
 
         if (! in_array($section, ['void_bills', 'void_items', 'discounts'], true)) {
             abort(422, 'Invalid section.');
@@ -2827,7 +3140,7 @@ class PosController extends Controller
         $rid = (int) $restaurantId;
 
         if ($section === 'void_bills') {
-            $rows = PosOrder::query()
+            $rowsQuery = PosOrder::query()
                 ->where('status', 'void')
                 ->where('restaurant_id', $rid)
                 ->where(function ($q) use ($from, $to) {
@@ -2835,24 +3148,99 @@ class PosController extends Controller
                         ->orWhere(function ($sq) use ($from, $to) {
                             $sq->whereDate('voided_at', '>=', $from)->whereDate('voided_at', '<=', $to);
                         });
-                })
-                ->with(['waiter:id,name', 'voidedBy:id,name'])
+                });
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $rowsQuery->whereExists(function ($q) use ($isLiquor) {
+                    $q->select(DB::raw(1))
+                        ->from('pos_order_items as poi')
+                        ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                        ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                        ->whereColumn('poi.order_id', 'pos_orders.id')
+                        ->where(function($sq) use ($isLiquor) {
+                            $taxFilter = "(poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                                SELECT 1 FROM combo_items ci
+                                JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                                JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                                WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                            ))";
+                            if ($isLiquor) $sq->whereRaw($taxFilter);
+                            else $sq->whereRaw("NOT $taxFilter");
+                        });
+                });
+            }
+
+            $rows = $rowsQuery->with(['waiter:id,name', 'voidedBy:id,name', 'items' => function($q) {
+                $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                  ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                  ->select('pos_order_items.*', 'it.type as tax_type');
+            }])
                 ->orderByDesc('voided_at')
                 ->orderByDesc('id')
                 ->get();
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                foreach ($rows as $r) {
+                    $orderSubtotal = (float) ($r->total_amount ?? 0);
+                    if ($orderSubtotal > 0) {
+                        $deptSubtotal = 0;
+                        foreach ($r->items as $item) {
+                            $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                            if (!$taxFilter && $item->combo_id) {
+                                 $taxFilter = DB::table('combo_items as ci')
+                                    ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                    ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                    ->where('ci.combo_id', $item->combo_id)
+                                    ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                    ->exists();
+                            }
+                            if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                        }
+                        $r->total_amount = $r->total_amount * ($deptSubtotal / $orderSubtotal);
+                    }
+                }
+            }
         } elseif ($section === 'void_items') {
-            $rows = PosOrderItem::query()
+            $rowsQuery = PosOrderItem::query()
                 ->where('status', 'cancelled')
                 ->whereNotNull('cancelled_at')
                 ->whereHas('order', fn ($q) => $q->where('restaurant_id', $rid))
                 ->whereDate('cancelled_at', '>=', $from)
-                ->whereDate('cancelled_at', '<=', $to)
-                ->with(['order', 'order.waiter:id,name', 'menuItem:id,name', 'combo:id,name', 'cancelledBy:id,name'])
+                ->whereDate('cancelled_at', '<=', $to);
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $rowsQuery->where(function($q) use ($isLiquor) {
+                    $q->whereExists(function ($sq) use ($isLiquor) {
+                        $sq->select(DB::raw(1))
+                            ->from('menu_items as mi')
+                            ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                            ->whereColumn('mi.id', 'pos_order_items.menu_item_id')
+                            ->whereRaw('LOWER(it.type) ' . ($isLiquor ? '=' : '!=') . ' ?', ['vat']);
+                    })
+                    ->orWhere(function($sq) use ($isLiquor) {
+                        if ($isLiquor) $sq->where('pos_order_items.tax_regime', 'vat_liquor');
+                        else $sq->where('pos_order_items.tax_regime', '!=', 'vat_liquor');
+                    })
+                    ->orWhereExists(function ($sq) use ($isLiquor) {
+                        $sq->select(DB::raw(1))
+                            ->from('combo_items as ci')
+                            ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                            ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                            ->whereColumn('ci.combo_id', 'pos_order_items.combo_id')
+                            ->whereRaw('LOWER(it2.type) ' . ($isLiquor ? '=' : '!=') . ' ?', ['vat']);
+                    });
+                });
+            }
+
+            $rows = $rowsQuery->with(['order', 'order.waiter:id,name', 'menuItem:id,name', 'combo:id,name', 'cancelledBy:id,name'])
                 ->orderByDesc('cancelled_at')
                 ->orderByDesc('id')
                 ->get();
         } else {
-            $rows = PosOrder::query()
+            $rowsQuery = PosOrder::query()
                 ->whereIn('status', ['paid', 'refunded'])
                 ->where('restaurant_id', $rid)
                 ->where(function ($q) {
@@ -2865,11 +3253,60 @@ class PosController extends Controller
                     })->orWhere(function ($sq) use ($from, $to) {
                         $sq->whereDate('closed_at', '>=', $from)->whereDate('closed_at', '<=', $to);
                     });
-                })
-                ->with(['waiter:id,name', 'discountApprovedBy:id,name'])
+                });
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                $rowsQuery->whereExists(function ($q) use ($isLiquor) {
+                    $q->select(DB::raw(1))
+                        ->from('pos_order_items as poi')
+                        ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                        ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                        ->whereColumn('poi.order_id', 'pos_orders.id')
+                        ->where(function ($sq) use ($isLiquor) {
+                            $taxFilter = "(poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                                SELECT 1 FROM combo_items ci
+                                JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                                JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                                WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                            ))";
+                            if ($isLiquor) $sq->whereRaw($taxFilter);
+                            else $sq->whereRaw("NOT $taxFilter");
+                        });
+                });
+            }
+
+            $rows = $rowsQuery->with(['waiter:id,name', 'discountApprovedBy:id,name', 'items' => function($q) {
+                $q->leftJoin('menu_items as mi', 'pos_order_items.menu_item_id', '=', 'mi.id')
+                  ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                  ->select('pos_order_items.*', 'it.type as tax_type');
+            }])
                 ->orderByDesc('closed_at')
                 ->orderByDesc('id')
                 ->get();
+
+            if ($category !== 'all') {
+                $isLiquor = $category === 'bar';
+                foreach ($rows as $r) {
+                    $orderSubtotal = (float) ($r->total_amount + $r->discount_amount);
+                    if ($orderSubtotal > 0) {
+                        $deptSubtotal = 0;
+                        foreach ($r->items as $item) {
+                            $taxFilter = ($item->tax_regime === 'vat_liquor' || (isset($item->tax_type) && strtolower($item->tax_type) === 'vat'));
+                            if (!$taxFilter && $item->combo_id) {
+                                 $taxFilter = DB::table('combo_items as ci')
+                                    ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                    ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                    ->where('ci.combo_id', $item->combo_id)
+                                    ->whereRaw('LOWER(it2.type) = ?', ['vat'])
+                                    ->exists();
+                            }
+                            if ($isLiquor === (bool)$taxFilter) $deptSubtotal += (float) $item->line_total;
+                        }
+                        $r->discount_amount = $r->discount_amount * ($deptSubtotal / $orderSubtotal);
+                    }
+                }
+            }
         }
 
         if ($type === 'pdf') {
@@ -2894,6 +3331,7 @@ class PosController extends Controller
                 'from' => $from,
                 'to' => $to,
                 'section' => $section,
+                'category' => $category,
                 'closingMap' => $closingMap,
             ]);
 
@@ -3084,13 +3522,14 @@ class PosController extends Controller
         $from = $request->query('from') ?? now()->toDateString();
         $to = $request->query('to') ?? now()->toDateString();
         $type = $request->query('type', 'csv');
+        $category = $request->query('category', 'all');
 
         if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
             abort(403, 'Unauthorized access to this outlet.');
         }
 
         $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
-        $payload = $this->buildOrderTypeMixData((int) $restaurantId, $from, $to);
+        $payload = $this->handleOrderTypeMixBucket((int) $restaurantId, $from, $to, $category);
 
         if ($type === 'pdf') {
             $pdf = Pdf::loadView('reports.order_type_mix', [
@@ -3099,6 +3538,7 @@ class PosController extends Controller
                 'to' => $to,
                 'by_type' => $payload['by_type'],
                 'totals' => $payload['totals'],
+                'category' => $category,
             ]);
 
             return $pdf->download("order_type_mix_{$from}_to_{$to}.pdf");
@@ -3150,6 +3590,7 @@ class PosController extends Controller
             'to' => 'required|date|after_or_equal:from',
             'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
             'page' => 'nullable|integer|min:1',
+            'category' => 'nullable|string|in:all,kitchen,bar',
         ]);
 
         $user = auth()->user();
@@ -3157,6 +3598,7 @@ class PosController extends Controller
         $to = $validated['to'];
         $page = (int) ($validated['page'] ?? 1);
         $restaurantId = $validated['restaurant_id'] ?? null;
+        $category = $validated['category'] ?? 'all';
 
         if ($restaurantId) {
             $this->authorizeRestaurantId((int) $restaurantId);
@@ -3205,8 +3647,16 @@ class PosController extends Controller
         }
 
         $rid = (int) $restaurantId;
-        $rows = $this->buildMenuPerformanceRows($rid, $from, $to);
-        $summary = $this->buildMenuPerformanceSummary($rid, $from, $to, $rows);
+        $allRows = $this->buildMenuPerformanceRows($rid, $from, $to);
+
+        $rows = $allRows;
+        if ($category === 'kitchen') {
+            $rows = $allRows->filter(fn ($r) => ! $r->is_liquor)->values();
+        } elseif ($category === 'bar') {
+            $rows = $allRows->filter(fn ($r) => (bool) $r->is_liquor)->values();
+        }
+
+        $summary = $this->buildMenuPerformanceSummary($rid, $from, $to, $rows, $category);
 
         $perPage = 50;
         $total = $rows->count();
@@ -3263,8 +3713,17 @@ class PosController extends Controller
         }
 
         $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
-        $rows = $this->buildMenuPerformanceRows((int) $restaurantId, $from, $to);
-        $summary = $this->buildMenuPerformanceSummary((int) $restaurantId, $from, $to, $rows);
+        $category = $request->query('category', 'all');
+        $allRows = $this->buildMenuPerformanceRows((int) $restaurantId, $from, $to);
+        
+        $rows = $allRows;
+        if ($category === 'kitchen') {
+            $rows = $allRows->filter(fn ($r) => ! $r->is_liquor)->values();
+        } elseif ($category === 'bar') {
+            $rows = $allRows->filter(fn ($r) => (bool) $r->is_liquor)->values();
+        }
+
+        $summary = $this->buildMenuPerformanceSummary((int) $restaurantId, $from, $to, $rows, $category);
 
         if ($type === 'pdf') {
             $pdf = Pdf::loadView('reports.menu_performance', [
@@ -3273,6 +3732,7 @@ class PosController extends Controller
                 'to' => $to,
                 'rows' => $rows,
                 'summary' => $summary,
+                'category' => $category,
             ]);
 
             return $pdf->download("menu_performance_{$from}_to_{$to}.pdf");
@@ -7200,54 +7660,188 @@ class PosController extends Controller
      */
     private function buildOrderTypeMixData(int $restaurantId, string $from, string $to): array
     {
-        $grossRows = DB::table('pos_orders')
-            ->whereIn('status', ['paid', 'refunded'])
-            ->where('restaurant_id', $restaurantId)
-            ->whereDate('business_date', '>=', $from)
-            ->whereDate('business_date', '<=', $to)
-            ->select(
-                DB::raw('COALESCE(order_type, \'dine_in\') as order_type'),
+        $all = $this->handleOrderTypeMixBucket($restaurantId, $from, $to, 'all');
+        $food = $this->handleOrderTypeMixBucket($restaurantId, $from, $to, 'food');
+        $liquor = $this->handleOrderTypeMixBucket($restaurantId, $from, $to, 'liquor');
+
+        return [
+            'all' => $all,
+            'food' => $food,
+            'liquor' => $liquor,
+            'by_type' => $all['by_type'],
+            'totals' => $all['totals'],
+        ];
+    }
+
+    private function handleOrderTypeMixBucket(int $restaurantId, string $from, string $to, string $category): array
+    {
+        // 1. Gross Revenue & Orders Count
+        $grossQuery = DB::table('pos_orders as po')
+            ->whereIn('po.status', ['paid', 'refunded'])
+            ->where('po.restaurant_id', $restaurantId)
+            ->whereDate('po.business_date', '>=', $from)
+            ->whereDate('po.business_date', '<=', $to);
+
+        if ($category !== 'all') {
+            $isLiquor = $category === 'liquor';
+            $grossQuery->whereExists(function ($q) use ($isLiquor) {
+                $q->select(DB::raw(1))
+                    ->from('pos_order_items as poi')
+                    ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                    ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                    ->whereColumn('poi.order_id', 'po.id')
+                    ->where('poi.status', 'active');
+                if ($isLiquor) {
+                    $q->where(function ($w) {
+                        $w->where('poi.tax_regime', 'vat_liquor')
+                            ->orWhereRaw('LOWER(it.type) = ?', ['vat'])
+                            ->orWhereExists(function ($sq) {
+                                $sq->select(DB::raw(1))
+                                    ->from('combo_items as ci')
+                                    ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                    ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                    ->whereColumn('ci.combo_id', 'poi.combo_id')
+                                    ->whereNotNull('poi.combo_id')
+                                    ->whereRaw('LOWER(it2.type) = ?', ['vat']);
+                            });
+                    });
+                } else {
+                    // Food: everything NOT liquor
+                    $q->whereNot(function ($w) {
+                        $w->where('poi.tax_regime', 'vat_liquor')
+                            ->orWhereRaw('LOWER(it.type) = ?', ['vat'])
+                            ->orWhereExists(function ($sq) {
+                                $sq->select(DB::raw(1))
+                                    ->from('combo_items as ci')
+                                    ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                                    ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                                    ->whereColumn('ci.combo_id', 'poi.combo_id')
+                                    ->whereNotNull('poi.combo_id')
+                                    ->whereRaw('LOWER(it2.type) = ?', ['vat']);
+                            });
+                    });
+                }
+            });
+        }
+
+        if ($category === 'all') {
+            $grossData = (clone $grossQuery)->select(
+                DB::raw('COALESCE(po.order_type, \'dine_in\') as order_type'),
                 DB::raw('COUNT(*) as orders_count'),
-                DB::raw('SUM(total_amount) as gross_revenue')
+                DB::raw('SUM(po.total_amount) as gross_revenue')
             )
-            ->groupBy(DB::raw('COALESCE(order_type, \'dine_in\')'))
-            ->get();
+            ->groupBy(DB::raw('COALESCE(po.order_type, \'dine_in\')'))
+            ->get()->keyBy('order_type');
 
-        $gross = $grossRows->keyBy('order_type');
+            $refundQuery = DB::table('pos_order_refunds as por')
+                ->join('pos_orders as po', 'por.order_id', '=', 'po.id')
+                ->where('po.restaurant_id', $restaurantId)
+                ->whereDate('por.business_date', '>=', $from)
+                ->whereDate('por.business_date', '<=', $to);
 
-        $refundRows = DB::table('pos_order_refunds')
-            ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
-            ->where('pos_orders.restaurant_id', $restaurantId)
-            ->whereDate('pos_order_refunds.business_date', '>=', $from)
-            ->whereDate('pos_order_refunds.business_date', '<=', $to)
-            ->select(
-                DB::raw('COALESCE(pos_orders.order_type, \'dine_in\') as order_type'),
-                DB::raw('SUM(pos_order_refunds.amount) as refund_amount')
+            $refundData = (clone $refundQuery)->select(
+                DB::raw('COALESCE(po.order_type, \'dine_in\') as order_type'),
+                DB::raw('SUM(por.amount) as refund_amount')
             )
-            ->groupBy(DB::raw('COALESCE(pos_orders.order_type, \'dine_in\')'))
-            ->get();
+            ->groupBy(DB::raw('COALESCE(po.order_type, \'dine_in\')'))
+            ->get()->keyBy('order_type');
 
-        $refunds = $refundRows->pluck('refund_amount', 'order_type')->map(fn ($v) => (float) $v);
+            $grossByType = $grossData;
+            $refunds = $refundData->pluck('refund_amount', 'order_type')->map(fn ($v) => (float)$v);
+        } else {
+            $isLiquor = $category === 'liquor';
+            $lineGross = "(CASE WHEN poi.price_tax_inclusive THEN poi.line_total ELSE poi.line_total * (1 + COALESCE(poi.tax_rate, 0)/100) END)";
+            $totalGross = "(SELECT COALESCE(SUM(CASE WHEN ps.price_tax_inclusive THEN ps.line_total ELSE ps.line_total * (1+COALESCE(ps.tax_rate,0)/100) END), 0) FROM pos_order_items ps WHERE ps.order_id = po.id AND ps.status = 'active')";
 
+            // 1. Bill Counts (Fastest SQL)
+            $grossByType = (clone $grossQuery)->select(
+                DB::raw('COALESCE(po.order_type, \'dine_in\') as order_type'),
+                DB::raw('COUNT(*) as orders_count')
+            )
+            ->groupBy(DB::raw('COALESCE(po.order_type, \'dine_in\')'))
+            ->get()->keyBy('order_type');
+
+            // 2. Revenue - Sum of categorical shares
+            $revRows = DB::table('pos_order_items as poi')
+                ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
+                ->leftJoin('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
+                ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                ->whereIn('po.status', ['paid', 'refunded'])
+                ->where('po.restaurant_id', $restaurantId)
+                ->whereDate('po.business_date', '>=', $from)
+                ->whereDate('po.business_date', '<=', $to)
+                ->where('poi.status', 'active')
+                ->where(function($q) use ($isLiquor) {
+                    $itemIsLiquor = " (poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') OR EXISTS (
+                        SELECT 1 FROM combo_items ci
+                        JOIN menu_items mi2 ON ci.menu_item_id = mi2.id
+                        JOIN inventory_taxes it2 ON mi2.tax_id = it2.id
+                        WHERE ci.combo_id = poi.combo_id AND LOWER(it2.type) = 'vat'
+                    )) ";
+                    if ($isLiquor) $q->whereRaw($itemIsLiquor);
+                    else $q->whereRaw("NOT $itemIsLiquor");
+                })
+                ->select(
+                    DB::raw('COALESCE(po.order_type, \'dine_in\') as order_type'),
+                    DB::raw("SUM($lineGross * (CASE WHEN po.total_amount > 0 THEN po.total_amount / NULLIF($totalGross, 0) ELSE 1 END)) as gross_revenue")
+                )
+                ->groupBy(DB::raw('COALESCE(po.order_type, \'dine_in\')'))
+                ->get()->keyBy('order_type');
+
+            foreach ($grossByType as $type => $row) {
+                $row->gross_revenue = $revRows[$type]->gross_revenue ?? 0.0;
+            }
+
+            // 3. Refunds — per-refund allocation in inner query, then SUM by order_type (MySQL ONLY_FULL_GROUP_BY)
+            $vatFilter = ($isLiquor ? "" : "NOT ") . "(
+                            poi.tax_regime = 'vat_liquor'
+                            OR it.type IS NOT NULL AND LOWER(it.type) = 'vat'
+                            OR EXISTS (
+                                SELECT 1 FROM combo_items ci2
+                                JOIN menu_items mi4 ON ci2.menu_item_id = mi4.id
+                                JOIN inventory_taxes it4 ON mi4.tax_id = it4.id
+                                WHERE ci2.combo_id = poi.combo_id AND LOWER(it4.type) = 'vat'
+                            )
+                        )";
+            $refundAllocSub = DB::table('pos_order_refunds as por')
+                ->join('pos_orders as po', 'por.order_id', '=', 'po.id')
+                ->where('po.restaurant_id', $restaurantId)
+                ->whereDate('por.business_date', '>=', $from)
+                ->whereDate('por.business_date', '<=', $to)
+                ->select(
+                    DB::raw('COALESCE(po.order_type, \'dine_in\') as order_type'),
+                    DB::raw("(por.amount * (
+                        SELECT COALESCE(SUM($lineGross), 0)
+                        FROM pos_order_items poi
+                        LEFT JOIN menu_items mi ON poi.menu_item_id = mi.id
+                        LEFT JOIN inventory_taxes it ON mi.tax_id = it.id
+                        WHERE poi.order_id = po.id AND poi.status = 'active'
+                        AND $vatFilter
+                    ) / NULLIF($totalGross, 0)) as alloc")
+                );
+            $refRows = DB::query()
+                ->fromSub($refundAllocSub, 'allocated')
+                ->select('order_type', DB::raw('SUM(alloc) as refund_amount'))
+                ->groupBy('order_type')
+                ->get();
+            $refunds = $refRows->pluck('refund_amount', 'order_type')->map(fn ($v) => (float)$v);
+        }
+
+        $gross = $grossByType;
+
+        // 3. Assemble
         $preferredOrder = ['dine_in', 'takeaway', 'delivery', 'room_service', 'walk_in'];
         $keys = $gross->keys()->merge($refunds->keys())->unique()->values();
         $orderedTypes = [];
         foreach ($preferredOrder as $p) {
-            if ($keys->contains($p)) {
-                $orderedTypes[] = $p;
-            }
+            if ($keys->contains($p)) { $orderedTypes[] = $p; }
         }
         foreach ($keys->sort()->values() as $k) {
-            if (! in_array($k, $orderedTypes, true)) {
-                $orderedTypes[] = $k;
-            }
+            if (! in_array($k, $orderedTypes, true)) { $orderedTypes[] = $k; }
         }
 
         $byType = [];
-        $totOrders = 0;
-        $totGross = 0.0;
-        $totRef = 0.0;
-        $totNet = 0.0;
+        $totOrders = 0; $totGross = 0.0; $totRef = 0.0; $totNet = 0.0;
 
         foreach ($orderedTypes as $type) {
             $row = $gross->get($type);
@@ -7264,10 +7858,7 @@ class PosController extends Controller
                 'net_revenue' => round($netRev, 2),
             ];
 
-            $totOrders += $ordersCount;
-            $totGross += $grossRev;
-            $totRef += $refAmt;
-            $totNet += $netRev;
+            $totOrders += $ordersCount; $totGross += $grossRev; $totRef += $refAmt; $totNet += $netRev;
         }
 
         return [
@@ -7310,8 +7901,10 @@ class PosController extends Controller
                 DB::raw('SUM(poi.quantity) as qty_sold'),
                 DB::raw('SUM(poi.line_total) as revenue'),
                 DB::raw('COUNT(*) as lines_sold'),
-                DB::raw('COUNT(DISTINCT poi.order_id) as bills_count')
+                DB::raw('COUNT(DISTINCT poi.order_id) as bills_count'),
+                DB::raw("MAX(CASE WHEN poi.tax_regime = 'vat_liquor' OR (it.type IS NOT NULL AND LOWER(it.type) = 'vat') THEN 1 ELSE 0 END) as is_liquor")
             )
+            ->leftJoin('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
             ->get();
 
         $comboRows = DB::table('pos_order_items as poi')
@@ -7335,7 +7928,13 @@ class PosController extends Controller
                 DB::raw('SUM(poi.quantity) as qty_sold'),
                 DB::raw('SUM(poi.line_total) as revenue'),
                 DB::raw('COUNT(*) as lines_sold'),
-                DB::raw('COUNT(DISTINCT poi.order_id) as bills_count')
+                DB::raw('COUNT(DISTINCT poi.order_id) as bills_count'),
+                DB::raw("(CASE WHEN EXISTS (
+                    SELECT 1 FROM combo_items ci_inner
+                    JOIN menu_items mi_inner ON ci_inner.menu_item_id = mi_inner.id
+                    JOIN inventory_taxes it_inner ON mi_inner.tax_id = it_inner.id
+                    WHERE ci_inner.combo_id = c.id AND LOWER(it_inner.type) = 'vat'
+                ) THEN 1 ELSE 0 END) as is_liquor")
             )
             ->get();
 
@@ -7346,22 +7945,48 @@ class PosController extends Controller
      * @param  \Illuminate\Support\Collection<int, object>  $rows
      * @return array{sku_rows: int, qty_sold: float, revenue: float, bills_with_sales: int}
      */
-    private function buildMenuPerformanceSummary(int $restaurantId, string $from, string $to, $rows): array
+    private function buildMenuPerformanceSummary(int $restaurantId, string $from, string $to, $rows, string $category = 'all'): array
     {
-        $billCount = (int) DB::table('pos_order_items as poi')
+        $billCountQuery = DB::table('pos_order_items as poi')
             ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
             ->whereIn('po.status', ['paid', 'refunded'])
             ->where('po.restaurant_id', $restaurantId)
             ->whereDate('po.business_date', '>=', $from)
             ->whereDate('po.business_date', '<=', $to)
-            ->where('poi.status', 'active')
-            ->where(function ($q) {
+            ->where('poi.status', 'active');
+
+        if ($category !== 'all') {
+            $isLiquor = $category === 'bar';
+            $billCount = $billCountQuery->where(function ($q) use ($isLiquor) {
+                $q->whereNotNull('poi.menu_item_id')
+                    ->whereExists(function ($sq) use ($isLiquor) {
+                        $sq->select(DB::raw(1))
+                            ->from('menu_items as mi')
+                            ->join('inventory_taxes as it', 'mi.tax_id', '=', 'it.id')
+                            ->whereColumn('mi.id', 'poi.menu_item_id')
+                            ->whereRaw('LOWER(it.type) ' . ($isLiquor ? '=' : '!=') . ' ?', ['vat']);
+                    })
+                    ->orWhereNotNull('poi.combo_id')
+                    ->whereExists(function ($sq) use ($isLiquor) {
+                        $sq->select(DB::raw(1))
+                            ->from('combo_items as ci')
+                            ->join('menu_items as mi2', 'ci.menu_item_id', '=', 'mi2.id')
+                            ->join('inventory_taxes as it2', 'mi2.tax_id', '=', 'it2.id')
+                            ->whereColumn('ci.combo_id', 'poi.combo_id')
+                            ->whereRaw('LOWER(it2.type) ' . ($isLiquor ? '=' : '!=') . ' ?', ['vat']);
+                    });
+            })
+            ->selectRaw('COUNT(DISTINCT poi.order_id) as c')
+            ->value('c');
+        } else {
+            $billCount = $billCountQuery->where(function ($q) {
                 $q->where(function ($q2) {
                     $q2->whereNotNull('poi.menu_item_id')->whereNull('poi.combo_id');
                 })->orWhereNotNull('poi.combo_id');
             })
             ->selectRaw('COUNT(DISTINCT poi.order_id) as c')
             ->value('c');
+        }
 
         return [
             'sku_rows' => $rows->count(),
