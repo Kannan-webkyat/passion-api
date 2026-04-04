@@ -33,7 +33,11 @@ class SettingController extends Controller
     {
         $this->checkPermission('manage-settings');
         $validated = $request->validate([
-            'company_name' => 'nullable|string|max:255',
+            'company_name' => ['required', 'string', 'max:255', function (string $attribute, mixed $value, \Closure $fail): void {
+                if (trim((string) $value) === '') {
+                    $fail('The property / company name field is required.');
+                }
+            }],
             'gstin' => 'nullable|string|max:20',
             'address' => 'nullable|string|max:1000',
             'email' => 'nullable|email|max:255',
@@ -41,6 +45,11 @@ class SettingController extends Controller
         ]);
 
         foreach ($validated as $key => $value) {
+            if ($key === 'company_name') {
+                Setting::set('receipt_company_name', trim((string) $value));
+
+                continue;
+            }
             Setting::set("receipt_{$key}", $value ?? '');
         }
 
