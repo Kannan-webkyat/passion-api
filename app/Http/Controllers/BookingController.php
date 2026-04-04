@@ -6,6 +6,7 @@ use App\Support\SeasonalRoomPricing;
 use App\Models\Booking;
 use App\Models\BookingGroup;
 use App\Models\BookingSegment;
+use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
@@ -261,9 +262,9 @@ class BookingController extends Controller
     {
         $booking->loadMissing(['room.roomType.tax', 'room.roomType.ratePlans']);
 
-        // Keep hourly as stored value (includes overtime logic already computed server-side).
+        // Keep hourly room rent as stored value (overtime etc.); folio postings are separate.
         if (($booking->booking_unit ?? 'day') === 'hour_package') {
-            return (float) ($booking->total_price ?? 0);
+            return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
         }
 
         $roomType = $booking->room?->roomType;
@@ -1849,6 +1850,100 @@ class BookingController extends Controller
         $pdf = Pdf::loadHTML($html)->setPaper('a4', 'portrait');
 
         return $pdf->download('Billing_Statement_'.$booking->id.'.pdf');
+    }
+
+    /**
+     * POS orders with room charge posted to this booking (for reception checkout breakdown).
+     */
+    public function folioPostings(Booking $booking)
+    {
+        $this->checkPermission('view-rooms');
+
+        $orders = PosOrder::query()
+            ->where('booking_id', $booking->id)
+            ->where('status', 'paid')
+            ->with([
+                'restaurant:id,name',
+                'payments' => function ($q) {
+                    $q->where('method', 'room_charge');
+                },
+            ])
+            ->orderByDesc('closed_at')
+            ->get();
+
+        $items = [];
+        foreach ($orders as $order) {
+            $roomCharge = (float) $order->payments->where('method', 'room_charge')->sum('amount');
+            if ($roomCharge <= 0) {
+                continue;
+            }
+            $items[] = [
+                'pos_order_id' => $order->id,
+                'outlet' => $order->restaurant?->name ?? 'Outlet',
+                'amount' => round($roomCharge, 2),
+                'posted_at' => $order->closed_at?->toIso8601String(),
+                'order_type' => $order->order_type,
+            ];
+        }
+
+        return response()->json([
+            'extra_charges_total' => (float) ($booking->extra_charges ?? 0),
+            'items' => $items,
+        ]);
+    }
+
+    /**
+     * Line-item detail for a single POS order on this booking’s folio (reception drill-down).
+     */
+    public function folioOrderDetail(Booking $booking, PosOrder $order)
+    {
+        $this->checkPermission('view-rooms');
+
+        if ((int) $order->booking_id !== (int) $booking->id) {
+            abort(404, 'Order is not linked to this booking.');
+        }
+
+        $order->load([
+            'restaurant:id,name',
+            'items.menuItem.category',
+            'items.combo',
+            'items.variant',
+            'payments' => function ($q) {
+                $q->where('method', 'room_charge');
+            },
+        ]);
+
+        $roomCharge = (float) $order->payments->where('method', 'room_charge')->sum('amount');
+
+        $lines = $order->items->where('status', 'active')->values()->map(function ($i) {
+            $name = $i->combo_id
+                ? ($i->combo?->name ?? 'Combo')
+                : ($i->menu_item_variant_id
+                    ? trim(($i->menuItem?->name ?? 'Item').' — '.($i->variant?->size_label ?? ''))
+                    : ($i->menuItem?->name ?? 'Item'));
+
+            return [
+                'name' => $name,
+                'category' => $i->menuItem?->category?->name ?? ($i->combo_id ? 'Combo' : null),
+                'quantity' => (float) $i->quantity,
+                'unit_price' => (float) $i->unit_price,
+                'line_total' => (float) $i->line_total,
+                'notes' => $i->notes ? (string) $i->notes : null,
+            ];
+        });
+
+        return response()->json([
+            'order_id' => $order->id,
+            'outlet' => $order->restaurant?->name ?? 'Outlet',
+            'order_type' => $order->order_type,
+            'status' => $order->status,
+            'total_amount' => (float) $order->total_amount,
+            'room_charge_amount' => round($roomCharge, 2),
+            'opened_at' => $order->opened_at?->toIso8601String(),
+            'closed_at' => $order->closed_at?->toIso8601String(),
+            'order_notes' => $order->notes ? (string) $order->notes : null,
+            'lines' => $lines,
+        ]);
     }
 
     public function destroy(Booking $booking)
