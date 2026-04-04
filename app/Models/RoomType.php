@@ -6,6 +6,18 @@ use Illuminate\Database\Eloquent\Model;
 
 class RoomType extends Model
 {
+    /**
+     * API/clients expect `seasonal_prices`; the relation is `seasons`.
+     * @see RoomTypeSeason
+     */
+    protected $hidden = [
+        'seasons',
+    ];
+
+    protected $appends = [
+        'seasonal_prices',
+    ];
+
     protected $fillable = [
         'name',
         'description',
@@ -65,5 +77,15 @@ class RoomType extends Model
     public function seasons()
     {
         return $this->hasMany(RoomTypeSeason::class);
+    }
+
+    /**
+     * @return \Illuminate\Database\Eloquent\Collection<int, RoomTypeSeason>
+     */
+    public function getSeasonalPricesAttribute()
+    {
+        return $this->relationLoaded('seasons')
+            ? $this->getRelation('seasons')
+            : $this->seasons()->get();
     }
 }

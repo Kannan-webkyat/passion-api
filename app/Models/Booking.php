@@ -23,6 +23,7 @@ class Booking extends Model
         'country',
         'adults_count',
         'children_count',
+        'child_ages',
         'infants_count',
         'extra_beds_count',
         'check_in',
@@ -37,6 +38,8 @@ class Booking extends Model
         'payment_status',
         'payment_method',
         'deposit_amount',
+        'refund_amount',
+        'refund_method',
         'extra_charges',
         'status',
         'booking_source',
@@ -74,9 +77,11 @@ class Booking extends Model
     protected $appends = ['guest_name'];
 
     protected $casts = [
+        'child_ages' => 'array',
         'guest_identities' => 'array',
         'guest_identity_types' => 'array',
         'check_in_at' => 'datetime',
         'check_out_at' => 'datetime',
+        'refund_amount' => 'decimal:2',
     ];
 }

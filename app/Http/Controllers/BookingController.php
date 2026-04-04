@@ -2,24 +2,194 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\SeasonalRoomPricing;
 use App\Models\Booking;
 use App\Models\BookingGroup;
 use App\Models\BookingSegment;
+use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 
 class BookingController extends Controller
 {
     private function checkPermission(string $permission)
     {
-        $user = auth()->user();
+        $user = Auth::user();
         if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
+    }
+
+    /**
+     * Append structured audit lines to booking notes when PATCH changes guest, rate, deposit, etc.
+     * Format: [Tag: … by Name on Y-m-d H:i:s] (by Name optional)
+     */
+    private function appendAuditNotesForBookingUpdate(Booking $booking, array &$validated, Request $request): void
+    {
+        $user = Auth::user();
+        $userName = $user ? (string) $user->name : '';
+        $when = now()->format('Y-m-d H:i:s');
+        $byPart = $userName !== '' ? " by {$userName}" : '';
+        $onPart = " on {$when}";
+
+        $sanitize = static fn (?string $s): string => trim(str_replace(["\n", "\r", ']'], [' ', ' ', ''], (string) $s));
+
+        $lines = [];
+
+        $guestBits = [];
+        foreach (['first_name' => 'First name', 'last_name' => 'Last name', 'email' => 'Email', 'phone' => 'Phone', 'city' => 'City', 'country' => 'Country'] as $field => $label) {
+            if (! array_key_exists($field, $validated)) {
+                continue;
+            }
+            $old = $sanitize((string) ($booking->{$field} ?? ''));
+            $new = $sanitize((string) $validated[$field]);
+            if ($old !== $new) {
+                $guestBits[] = "{$label}: ".($old !== '' ? $old : '—').' → '.($new !== '' ? $new : '—');
+            }
+        }
+        foreach (['adults_count' => 'Adults', 'children_count' => 'Children', 'infants_count' => 'Infants', 'extra_beds_count' => 'Extra beds'] as $field => $label) {
+            if (! array_key_exists($field, $validated)) {
+                continue;
+            }
+            $old = (int) ($booking->{$field} ?? 0);
+            $new = (int) $validated[$field];
+            if ($old !== $new) {
+                $guestBits[] = "{$label}: {$old} → {$new}";
+            }
+        }
+        if (array_key_exists('child_ages', $validated)) {
+            $oldJson = json_encode($booking->child_ages ?? []);
+            $newJson = json_encode($validated['child_ages'] ?? []);
+            if ($oldJson !== $newJson) {
+                $guestBits[] = 'Child ages updated';
+            }
+        }
+        if (array_key_exists('booking_unit', $validated)) {
+            $old = (string) ($booking->booking_unit ?? 'day');
+            $new = (string) $validated['booking_unit'];
+            if ($old !== $new) {
+                $guestBits[] = "Booking unit: {$old} → {$new}";
+            }
+        }
+        if ($guestBits !== []) {
+            $lines[] = '[Guest / stay: '.implode('; ', $guestBits).$byPart.$onPart.']';
+        }
+
+        if (array_key_exists('rate_plan_id', $validated)) {
+            $oldId = $booking->rate_plan_id ? (int) $booking->rate_plan_id : null;
+            $nv = $validated['rate_plan_id'] ?? null;
+            $newId = $nv !== null && $nv !== '' ? (int) $nv : null;
+            if ($oldId !== $newId) {
+                $oldName = $oldId ? (RatePlan::find($oldId)?->name ?? "#{$oldId}") : '—';
+                $newName = $newId ? (RatePlan::find($newId)?->name ?? "#{$newId}") : '—';
+                $lines[] = "[Rate plan: {$oldName} → {$newName}{$byPart}{$onPart}]";
+            }
+        }
+
+        if (array_key_exists('deposit_amount', $validated)) {
+            $old = (float) ($booking->deposit_amount ?? 0);
+            $new = (float) $validated['deposit_amount'];
+            if (abs($old - $new) > 0.004) {
+                $d = $new - $old;
+                $sign = $d >= 0 ? '+' : '−';
+                $lines[] = sprintf(
+                    '[Deposit: ₹%s → ₹%s (%s₹%s)%s%s]',
+                    number_format($old, 2, '.', ''),
+                    number_format($new, 2, '.', ''),
+                    $sign,
+                    number_format(abs($d), 2, '.', ''),
+                    $byPart,
+                    $onPart
+                );
+            }
+        }
+
+        if (array_key_exists('refund_amount', $validated) && $validated['refund_amount'] !== null) {
+            $old = (float) ($booking->refund_amount ?? 0);
+            $new = (float) $validated['refund_amount'];
+            if (abs($old - $new) > 0.004) {
+                $method = (string) ($validated['refund_method'] ?? $booking->refund_method ?? '');
+                $lines[] = sprintf(
+                    '[Refund recorded: ₹%s%s%s]',
+                    number_format($new, 2, '.', ''),
+                    $method !== '' ? " ({$method})" : '',
+                    $byPart.$onPart
+                );
+            }
+        }
+
+        if (array_key_exists('total_price', $validated)) {
+            $old = (float) ($booking->total_price ?? 0);
+            $new = (float) $validated['total_price'];
+            if (abs($old - $new) > 0.004) {
+                $lines[] = sprintf('[Total: ₹%s → ₹%s%s%s]', number_format($old, 2, '.', ''), number_format($new, 2, '.', ''), $byPart, $onPart);
+            }
+        }
+        if (array_key_exists('payment_status', $validated)) {
+            $old = (string) ($booking->payment_status ?? '');
+            $new = (string) $validated['payment_status'];
+            if ($old !== $new) {
+                $lines[] = "[Payment status: {$old} → {$new}{$byPart}{$onPart}]";
+            }
+        }
+        if (array_key_exists('payment_method', $validated)) {
+            $old = (string) ($booking->payment_method ?? '');
+            $new = (string) ($validated['payment_method'] ?? '');
+            if ($old !== $new) {
+                $lines[] = '[Payment method: '.($old !== '' ? $old : '—').' → '.($new !== '' ? $new : '—').$byPart.$onPart.']';
+            }
+        }
+        foreach (['adult_breakfast_count' => 'Adult breakfast', 'child_breakfast_count' => 'Child breakfast'] as $field => $label) {
+            if (! array_key_exists($field, $validated)) {
+                continue;
+            }
+            $old = (int) ($booking->{$field} ?? 0);
+            $new = (int) $validated[$field];
+            if ($old !== $new) {
+                $lines[] = "[{$label}: {$old} → {$new}{$byPart}{$onPart}]";
+            }
+        }
+
+        if ($request->has('guest_identities')) {
+            $oldSig = json_encode($booking->guest_identities ?? []);
+            $newSig = json_encode($validated['guest_identities'] ?? []);
+            if ($oldSig !== $newSig) {
+                $lines[] = "[Guest IDs: documents updated{$byPart}{$onPart}]";
+            }
+        }
+
+        if (array_key_exists('room_id', $validated)) {
+            $oldR = (int) $booking->room_id;
+            $newR = (int) $validated['room_id'];
+            if ($oldR !== $newR) {
+                $o = Room::find($oldR)?->room_number ?? (string) $oldR;
+                $n = Room::find($newR)?->room_number ?? (string) $newR;
+                $lines[] = "[Room: #{$o} → #{$n}{$byPart}{$onPart}]";
+            }
+        }
+
+        if (array_key_exists('check_in', $validated) || array_key_exists('check_out', $validated)) {
+            $oldCi = (string) $booking->check_in;
+            $newCi = (string) ($validated['check_in'] ?? $booking->check_in);
+            $oldCo = (string) $booking->check_out;
+            $newCo = (string) ($validated['check_out'] ?? $booking->check_out);
+            if ($oldCi !== $newCi || $oldCo !== $newCo) {
+                $lines[] = "[Stay dates: {$oldCi} → {$oldCo} changed to {$newCi} → {$newCo}{$byPart}{$onPart}]";
+            }
+        }
+
+        if ($lines === []) {
+            return;
+        }
+
+        $block = implode("\n", $lines);
+        $existing = $validated['notes'] ?? $booking->notes ?? '';
+        $validated['notes'] = $existing !== '' ? $existing."\n".$block : $block;
     }
 
     private function dateEndExclusiveFromDateTime(Carbon $dt): string
@@ -52,6 +222,9 @@ class BookingController extends Controller
         }
 
         $base = (float) ($plan->package_price ?? $plan->base_price ?? 0);
+        $rt->loadMissing('seasons');
+        $season = SeasonalRoomPricing::seasonForDate($rt->seasons ?? [], $checkInAt->copy()->startOfDay());
+        $base = SeasonalRoomPricing::applyToBase($base, $season);
         $total = $base;
 
         // Hourly package: extra bed is charged once per booking/package window.
@@ -94,6 +267,7 @@ class BookingController extends Controller
         }
 
         $roomType = $booking->room?->roomType;
+        $roomType?->loadMissing('seasons');
         $plan = $roomType?->ratePlans?->firstWhere('id', $booking->rate_plan_id);
         if (! $plan) {
             return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
@@ -101,12 +275,18 @@ class BookingController extends Controller
 
         $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
         $checkOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
-        $nights = max(1, $checkInAt->copy()->startOfDay()->diffInDays($checkOutAt->copy()->startOfDay()));
 
         $basePerNight = (float) ($plan->base_price ?? 0);
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
         $extraBedCost = (float) ($roomType?->extra_bed_cost ?? 0);
-        $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
+        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
+            $basePerNight,
+            $extraBedCost,
+            $extraBeds,
+            $checkInAt->copy()->startOfDay(),
+            $checkOutAt->copy()->startOfDay(),
+            $roomType->seasons ?? []
+        );
         $taxRate = (float) ($roomType?->tax?->rate ?? 0);
 
         $grand = round($beforeTax * (1 + ($taxRate / 100)), 2);
@@ -163,7 +343,7 @@ class BookingController extends Controller
         // end is a date on the grid; include the whole end day by making end-exclusive = next day start
         $rangeEndAt = $end->copy()->addDay()->startOfDay();
 
-        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'statusBlocks' => function ($q) use ($start, $end) {
+        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons', 'statusBlocks' => function ($q) use ($start, $end) {
             $q->where('is_active', true)
                 ->where('start_date', '<', $end->toDateString())
                 ->where('end_date', '>', $start->toDateString());
@@ -266,6 +446,8 @@ class BookingController extends Controller
             'country' => 'nullable|string|max:255',
             'adults_count' => 'required|integer|min:1',
             'children_count' => 'nullable|integer|min:0',
+            'child_ages' => 'nullable|array',
+            'child_ages.*' => 'nullable|integer|min:1|max:17',
             'infants_count' => 'nullable|integer|min:0',
             'extra_beds_count' => 'nullable|integer|min:0',
             'booking_unit' => 'nullable|in:day,hour_package',
@@ -286,7 +468,7 @@ class BookingController extends Controller
             'rate_plan_id' => 'nullable|exists:rate_plans,id',
         ]);
 
-        $creatorId = $request->user()?->id;
+        $creatorId = Auth::id();
         $roomIds = $request->input('room_ids', [$request->input('room_id')]);
         $bookingUnit = $validated['booking_unit'] ?? 'day';
         $checkInAt = Carbon::parse($validated['check_in']);
@@ -442,12 +624,15 @@ class BookingController extends Controller
                 $bookingData['extra_beds_count'] = $occ['extra_beds'] ?? ($bookingData['extra_beds_count'] ?? 0);
                 $bookingData['adult_breakfast_count'] = $occ['adult_breakfast'] ?? $bookingData['adult_breakfast_count'];
                 $bookingData['child_breakfast_count'] = $occ['child_breakfast'] ?? $bookingData['child_breakfast_count'];
+                if (! empty($occ['child_ages']) && is_array($occ['child_ages'])) {
+                    $bookingData['child_ages'] = array_values(array_map('intval', $occ['child_ages']));
+                }
                 if (! empty($occ['rate_plan_id'])) {
                     $bookingData['rate_plan_id'] = $occ['rate_plan_id'];
                 }
             }
 
-            $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail($roomId);
+            $room = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons'])->findOrFail($roomId);
 
             // Compute/check datetime and totals for hourly packages
             $finalCheckInAt = $checkInAt->copy();
@@ -485,11 +670,17 @@ class BookingController extends Controller
                     $plan = $room->roomType?->ratePlans?->firstWhere('id', $planId);
                     if ($plan) {
                         $effectiveCheckOutAt = $finalCheckOutAt ? $finalCheckOutAt->copy() : $finalCheckInAt->copy()->addDay();
-                        $nights = max(1, $finalCheckInAt->copy()->startOfDay()->diffInDays($effectiveCheckOutAt->startOfDay()));
                         $basePerNight = (float) ($plan->base_price ?? 0);
                         $extraBeds = (int) ($bookingData['extra_beds_count'] ?? 0);
                         $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
-                        $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
+                        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
+                            $basePerNight,
+                            $extraBedCost,
+                            $extraBeds,
+                            $finalCheckInAt->copy()->startOfDay(),
+                            $effectiveCheckOutAt->copy()->startOfDay(),
+                            $room->roomType?->seasons ?? []
+                        );
                         $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
                         $totalPrice = round($beforeTax * (1 + ($taxRate / 100)), 2);
                     }
@@ -574,8 +765,12 @@ class BookingController extends Controller
             'last_name' => 'string|max:255',
             'email' => 'nullable|email',
             'phone' => 'nullable|string',
+            'city' => 'nullable|string|max:255',
+            'country' => 'nullable|string|max:255',
             'adults_count' => 'integer|min:1',
             'children_count' => 'nullable|integer|min:0',
+            'child_ages' => 'nullable|array',
+            'child_ages.*' => 'nullable|integer|min:1|max:17',
             'infants_count' => 'nullable|integer|min:0',
             'extra_beds_count' => 'nullable|integer|min:0',
             'booking_unit' => 'nullable|in:day,hour_package',
@@ -587,6 +782,8 @@ class BookingController extends Controller
             'payment_status' => 'in:pending,partial,paid,refunded',
             'payment_method' => 'nullable|string',
             'deposit_amount' => 'nullable|numeric|min:0',
+            'refund_amount' => 'nullable|numeric|min:0',
+            'refund_method' => 'nullable|string|in:cash,card,upi,bank_transfer',
             'status' => 'in:pending,confirmed,checked_in,checked_out,cancelled',
             'booking_source' => 'nullable|string',
             'notes' => 'nullable|string',
@@ -618,6 +815,10 @@ class BookingController extends Controller
 
         // Checkout validation: must be paid
         if (isset($validated['status']) && $validated['status'] === 'checked_out' && $booking->status !== 'checked_out') {
+            if ((float) ($validated['refund_amount'] ?? 0) > 0.0001 && empty($validated['refund_method'])) {
+                return response()->json(['message' => 'Select how the refund will be issued (cash, card, UPI, or bank transfer).'], 422);
+            }
+
             $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
             $isPaid = ($currentPaymentStatus === 'paid');
 
@@ -630,7 +831,17 @@ class BookingController extends Controller
                     ->get();
                 $groupGrand = (float) $groupBookings->sum(fn ($b) => $this->effectiveBookingGrand($b));
                 $groupPaid = (float) $groupBookings->sum(fn ($b) => (float) ($b->deposit_amount ?? 0));
-                $isPaid = $groupPaid >= $groupGrand;
+                $isPaid = $groupPaid + 0.009 >= $groupGrand;
+            }
+
+            // Single booking: allow checkout when advance/deposit covers the bill, even if
+            // payment_status was never flipped to "paid" (common after deposits or when totals were adjusted).
+            if (! $isPaid && empty($booking->booking_group_id)) {
+                $paid = (float) ($booking->deposit_amount ?? 0);
+                $grand = $this->effectiveBookingGrand($booking);
+                $storedTotal = (float) ($booking->total_price ?? 0);
+                $bill = max($grand, $storedTotal);
+                $isPaid = $paid + 0.009 >= $bill;
             }
 
             if (! $isPaid) {
@@ -643,7 +854,7 @@ class BookingController extends Controller
             if ($currentCheckOut > $today) {
                 $validated['check_out'] = $today;
 
-                $user = $request->user();
+                $user = Auth::user();
                 $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
                 $auditMsg = "[Early CO: on {$today}".($userName ? " by {$userName}" : '').']';
                 $existingNotes = $validated['notes'] ?? $booking->notes;
@@ -687,6 +898,8 @@ class BookingController extends Controller
         if (isset($validated['check_out_at'])) {
             $validated['check_out'] = Carbon::parse($validated['check_out_at'])->toDateString();
         }
+
+        $this->appendAuditNotesForBookingUpdate($booking, $validated, $request);
 
         $booking->update($validated);
 
@@ -749,11 +962,27 @@ class BookingController extends Controller
             // When a booking is checked out, mark the affected rooms as DIRTY for that checkout date
             // via room_status_blocks so Room Chart + availability reflect housekeeping correctly.
             if ($validated['status'] === 'checked_out') {
-                // Use actual checkout action day to ensure the room is immediately shown as dirty on chart.
-                $co = Carbon::today()->toDateString();
-                $coNext = Carbon::today()->addDay()->toDateString(); // [today, today+1)
+                // Dirty block uses each segment's checkout day (falls back to booking) so the chart shows
+                // housekeeping on the departure column, not the server's "today".
+                $segmentsForHk = $booking->segments()->get();
+                if ($segmentsForHk->isEmpty()) {
+                    $segmentsForHk = collect([
+                        (object) [
+                            'room_id' => $booking->room_id,
+                            'check_out' => $booking->check_out,
+                            'check_out_at' => $booking->check_out_at,
+                        ],
+                    ]);
+                }
 
-                foreach ($allRoomIds as $rid) {
+                foreach ($segmentsForHk as $segment) {
+                    $rid = (int) $segment->room_id;
+                    $checkoutDay = Carbon::parse(
+                        $segment->check_out_at ?? $segment->check_out ?? $booking->check_out_at ?? $booking->check_out
+                    )->startOfDay();
+                    $co = $checkoutDay->toDateString();
+                    $coNext = $checkoutDay->copy()->addDay()->toDateString();
+
                     $hasBlock = RoomStatusBlock::where('room_id', $rid)
                         ->where('is_active', true)
                         ->where('start_date', '<', $coNext)
@@ -768,7 +997,7 @@ class BookingController extends Controller
                             'end_date' => $coNext,
                             'note' => 'Auto: checkout',
                             'is_active' => true,
-                            'created_by' => $request->user()?->id,
+                            'created_by' => Auth::id(),
                         ]);
                     }
                 }
@@ -810,9 +1039,9 @@ class BookingController extends Controller
             ], 422);
         }
 
-        $user = $request->user();
+        $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Early CI: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+        $auditMsg = "[Early CI: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
         
         $rt = $booking->room?->roomType;
         $standardTime = Setting::get('standard_check_in_time', '14:00');
@@ -886,9 +1115,9 @@ class BookingController extends Controller
             ], 422);
         }
 
-        $user = $request->user();
+        $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Late CO: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+        $auditMsg = "[Late CO: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
 
         $rt = $booking->room?->roomType;
         $standardTime = Setting::get('standard_check_out_time', '11:00');
@@ -935,12 +1164,9 @@ class BookingController extends Controller
     // ── Reservation Extension ─────────────────────────────────────────────────
     public function extendReservation(Request $request, Booking $booking)
     {
-        $request->validate([
-            'new_check_out' => 'required|date|after:'.$booking->check_out,
-        ]);
-
-        // IMPORTANT: for multi-segment (room-change) stays, extensions must continue
-        // from the LAST segment (latest check_out), not from booking.room_id.
+        // IMPORTANT: for multi-segment (room-change) stays, extensions continue from the
+        // LAST segment (latest check_out). Validate against that anchor — not only
+        // bookings.check_out — or the API rejects valid dates while the UI shows the segment end.
         $lastSegment = $booking->segments()->orderBy('check_out', 'desc')->first();
         if (! $lastSegment) {
             // Safety for legacy data: if no segment exists, create one mirroring the booking
@@ -958,6 +1184,11 @@ class BookingController extends Controller
                 'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
             ]);
         }
+
+        $anchorCheckOut = $lastSegment->check_out;
+        $request->validate([
+            'new_check_out' => 'required|date|after:'.$anchorCheckOut,
+        ]);
 
         $oldCheckOut = $lastSegment->check_out;
         $newCheckOut = $request->input('new_check_out');
@@ -1038,9 +1269,9 @@ class BookingController extends Controller
         }
         $newTotalPrice = (float) $booking->total_price + $extraCost;
 
-        $user = $request->user();
+        $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
         $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
 
         $booking->update([
@@ -1131,10 +1362,10 @@ class BookingController extends Controller
         $newTotal = (float) $calc['total'];
         $newCheckOutDate = $this->dateEndExclusiveFromDateTime($newCheckOutAt);
 
-        $user = $request->user();
+        $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
         $hoursLabel = round(((int) $validated['extend_minutes']) / 60, 2);
-        $auditMsg = "[Hourly Extension: +{$hoursLabel}h to ".$newCheckOutAt->format('Y-m-d H:i').($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+        $auditMsg = "[Hourly Extension: +{$hoursLabel}h to ".$newCheckOutAt->format('Y-m-d H:i:s').($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
         $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
 
         $booking->update([
@@ -1163,11 +1394,13 @@ class BookingController extends Controller
         $validated = $request->validate([
             'new_room_id' => 'required|exists:rooms,id',
             'new_check_out' => 'required|date|after:'.$booking->check_out,
+            'complimentary_upgrade' => 'nullable|boolean',
         ]);
 
         $oldCheckOut = $booking->check_out;
         $newCheckOut = $validated['new_check_out'];
         $newRoomId = $validated['new_room_id'];
+        $complimentaryUpgrade = ! empty($validated['complimentary_upgrade']);
 
         // Calculate price for the new segment
         $newRoom = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail($newRoomId);
@@ -1177,24 +1410,27 @@ class BookingController extends Controller
         // Try to match existing rate plan if possible
         $ratePlan = $booking->rate_plan_id ? $rt->ratePlans->find($booking->rate_plan_id) : $rt->ratePlans->first();
 
-        $basePrice = $ratePlan ? $ratePlan->base_price : ($rt->base_price ?? 0);
-        $extraBedCost = $rt->extra_bed_cost ?? 0;
-        $extraBeds = $booking->extra_beds_count ?? 0;
+        $segmentTotal = 0.0;
+        if (! $complimentaryUpgrade) {
+            $basePrice = $ratePlan ? $ratePlan->base_price : ($rt->base_price ?? 0);
+            $extraBedCost = $rt->extra_bed_cost ?? 0;
+            $extraBeds = $booking->extra_beds_count ?? 0;
 
-        $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+            $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
 
-        // Breakfast inclusion
-        if ($ratePlan && $ratePlan->includes_breakfast) {
-            $adults = $booking->adults_count ?? 1;
-            $children = $booking->children_count ?? 0;
-            $nightlyRoomCost += (($rt->breakfast_price ?? 0) * $adults) + (($rt->child_breakfast_price ?? 0) * $children);
-        }
+            // Breakfast inclusion
+            if ($ratePlan && $ratePlan->includes_breakfast) {
+                $adults = $booking->adults_count ?? 1;
+                $children = $booking->children_count ?? 0;
+                $nightlyRoomCost += (($rt->breakfast_price ?? 0) * $adults) + (($rt->child_breakfast_price ?? 0) * $children);
+            }
 
-        $segmentSubtotal = $nightlyRoomCost * $nights;
-        $segmentTotal = $segmentSubtotal;
+            $segmentSubtotal = $nightlyRoomCost * $nights;
+            $segmentTotal = $segmentSubtotal;
 
-        if ($rt->tax) {
-            $segmentTotal += $segmentSubtotal * ($rt->tax->rate / 100);
+            if ($rt->tax) {
+                $segmentTotal += $segmentSubtotal * ($rt->tax->rate / 100);
+            }
         }
 
         // End the stay in the current room at $oldCheckOut (same as booking.check_out) before adding
@@ -1250,9 +1486,11 @@ class BookingController extends Controller
         ]);
 
         // Update main booking
-        $user = $request->user();
+        $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i').']';
+        $auditMsg = $complimentaryUpgrade
+            ? "[Split Stay: Complimentary upgrade to Room #{$newRoom->room_number} ({$rt->name}) from {$oldCheckOut} to {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']'
+            : "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
         $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
 
         $booking->update([

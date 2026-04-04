@@ -18,7 +18,9 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * List housekeeping-relevant status blocks (dirty / in cleaning) overlapping a calendar date.
+     * List active housekeeping status blocks (dirty / in cleaning).
+     * By default returns all active blocks so rooms stay visible even when the dirty window is tied to
+     * a future checkout day on the chart. Pass overlap_only=1 to restrict to blocks overlapping `date`.
      */
     public function index(Request $request)
     {
@@ -38,12 +40,18 @@ class HousekeepingController extends Controller
 
         $statuses = $hkStatus === 'all' ? ['dirty', 'cleaning'] : [$hkStatus];
 
+        // List all active HK blocks — checkout may be scheduled on a future calendar day while the room
+        // is already dirty today; strict date overlap would hide those from housekeeping.
         $query = RoomStatusBlock::query()
             ->with(['room.roomType'])
             ->where('is_active', true)
-            ->whereIn('status', $statuses)
-            ->where('start_date', '<', $dNext)
-            ->where('end_date', '>', $d);
+            ->whereIn('status', $statuses);
+
+        $overlapOnly = $request->boolean('overlap_only');
+        if ($overlapOnly) {
+            $query->where('start_date', '<', $dNext)
+                ->where('end_date', '>', $d);
+        }
 
         $query->whereHas('room', function ($q) use ($validated) {
             if (! empty($validated['floor'])) {
