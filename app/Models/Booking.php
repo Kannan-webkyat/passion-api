@@ -38,6 +38,8 @@ class Booking extends Model
         'payment_status',
         'payment_method',
         'deposit_amount',
+        'refund_amount',
+        'refund_method',
         'extra_charges',
         'status',
         'booking_source',
@@ -80,5 +82,6 @@ class Booking extends Model
         'guest_identity_types' => 'array',
         'check_in_at' => 'datetime',
         'check_out_at' => 'datetime',
+        'refund_amount' => 'decimal:2',
     ];
 }

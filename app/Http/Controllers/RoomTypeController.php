@@ -4,13 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\RoomType;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 
 class RoomTypeController extends Controller
 {
     private function checkPermission(string $permission)
     {
-        $user = auth()->user();
+        $user = Auth::user();
         if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
@@ -93,14 +94,18 @@ class RoomTypeController extends Controller
 
         $this->validateCapacity($validated);
 
+        $ratePlans = $validated['rate_plans'] ?? [];
+        $seasonalPrices = $validated['seasonal_prices'] ?? [];
+        unset($validated['rate_plans'], $validated['seasonal_prices']);
+
         $roomType = RoomType::create($validated);
 
-        if (! empty($validated['rate_plans'])) {
-            $roomType->ratePlans()->createMany($validated['rate_plans']);
+        if (! empty($ratePlans)) {
+            $roomType->ratePlans()->createMany($ratePlans);
         }
 
-        if (! empty($validated['seasonal_prices'])) {
-            $roomType->seasons()->createMany($validated['seasonal_prices']);
+        if (! empty($seasonalPrices)) {
+            $roomType->seasons()->createMany($seasonalPrices);
         }
 
         return response()->json($roomType->load(['tax', 'ratePlans', 'seasons']), 201);
@@ -139,6 +144,7 @@ class RoomTypeController extends Controller
             'seasonal_prices.*.season_name' => 'required_with:seasonal_prices|string|max:255',
             'seasonal_prices.*.start_date' => 'required_with:seasonal_prices|date',
             'seasonal_prices.*.end_date' => 'required_with:seasonal_prices|date',
+            'seasonal_prices.*.adjustment_type' => 'nullable|string|in:override,add_fixed,add_percent,discount',
             'seasonal_prices.*.price_adjustment' => 'required_with:seasonal_prices|numeric',
             'rate_plans' => 'nullable|array',
             'rate_plans.*.id' => 'nullable|exists:rate_plans,id',
@@ -173,10 +179,16 @@ class RoomTypeController extends Controller
 
         $this->validateCapacity($merged);
 
+        $syncRatePlans = array_key_exists('rate_plans', $validated);
+        $syncSeasonalPrices = array_key_exists('seasonal_prices', $validated);
+        $ratePlansPayload = $validated['rate_plans'] ?? [];
+        $seasonalPricesPayload = $validated['seasonal_prices'] ?? [];
+        unset($validated['rate_plans'], $validated['seasonal_prices']);
+
         $roomType->update($validated);
 
-        if (array_key_exists('rate_plans', $validated)) {
-            $incomingPlans = $validated['rate_plans'] ?? [];
+        if ($syncRatePlans) {
+            $incomingPlans = is_array($ratePlansPayload) ? $ratePlansPayload : [];
             $incomingIds = collect($incomingPlans)->pluck('id')->filter()->toArray();
             $roomType->ratePlans()->whereNotIn('id', $incomingIds)->delete();
 
@@ -209,8 +221,8 @@ class RoomTypeController extends Controller
             }
         }
 
-        if (array_key_exists('seasonal_prices', $validated)) {
-            $incomingSeasons = $validated['seasonal_prices'] ?? [];
+        if ($syncSeasonalPrices) {
+            $incomingSeasons = is_array($seasonalPricesPayload) ? $seasonalPricesPayload : [];
             $incomingSeasonIds = collect($incomingSeasons)->pluck('id')->filter()->toArray();
             $roomType->seasons()->whereNotIn('id', $incomingSeasonIds)->delete();
 

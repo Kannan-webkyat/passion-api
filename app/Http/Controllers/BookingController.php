@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Support\SeasonalRoomPricing;
 use App\Models\Booking;
 use App\Models\BookingGroup;
 use App\Models\BookingSegment;
@@ -108,6 +109,20 @@ class BookingController extends Controller
             }
         }
 
+        if (array_key_exists('refund_amount', $validated) && $validated['refund_amount'] !== null) {
+            $old = (float) ($booking->refund_amount ?? 0);
+            $new = (float) $validated['refund_amount'];
+            if (abs($old - $new) > 0.004) {
+                $method = (string) ($validated['refund_method'] ?? $booking->refund_method ?? '');
+                $lines[] = sprintf(
+                    '[Refund recorded: ₹%s%s%s]',
+                    number_format($new, 2, '.', ''),
+                    $method !== '' ? " ({$method})" : '',
+                    $byPart.$onPart
+                );
+            }
+        }
+
         if (array_key_exists('total_price', $validated)) {
             $old = (float) ($booking->total_price ?? 0);
             $new = (float) $validated['total_price'];
@@ -207,6 +222,9 @@ class BookingController extends Controller
         }
 
         $base = (float) ($plan->package_price ?? $plan->base_price ?? 0);
+        $rt->loadMissing('seasons');
+        $season = SeasonalRoomPricing::seasonForDate($rt->seasons ?? [], $checkInAt->copy()->startOfDay());
+        $base = SeasonalRoomPricing::applyToBase($base, $season);
         $total = $base;
 
         // Hourly package: extra bed is charged once per booking/package window.
@@ -249,6 +267,7 @@ class BookingController extends Controller
         }
 
         $roomType = $booking->room?->roomType;
+        $roomType?->loadMissing('seasons');
         $plan = $roomType?->ratePlans?->firstWhere('id', $booking->rate_plan_id);
         if (! $plan) {
             return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
@@ -256,12 +275,18 @@ class BookingController extends Controller
 
         $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
         $checkOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
-        $nights = max(1, $checkInAt->copy()->startOfDay()->diffInDays($checkOutAt->copy()->startOfDay()));
 
         $basePerNight = (float) ($plan->base_price ?? 0);
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
         $extraBedCost = (float) ($roomType?->extra_bed_cost ?? 0);
-        $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
+        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
+            $basePerNight,
+            $extraBedCost,
+            $extraBeds,
+            $checkInAt->copy()->startOfDay(),
+            $checkOutAt->copy()->startOfDay(),
+            $roomType->seasons ?? []
+        );
         $taxRate = (float) ($roomType?->tax?->rate ?? 0);
 
         $grand = round($beforeTax * (1 + ($taxRate / 100)), 2);
@@ -318,7 +343,7 @@ class BookingController extends Controller
         // end is a date on the grid; include the whole end day by making end-exclusive = next day start
         $rangeEndAt = $end->copy()->addDay()->startOfDay();
 
-        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'statusBlocks' => function ($q) use ($start, $end) {
+        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons', 'statusBlocks' => function ($q) use ($start, $end) {
             $q->where('is_active', true)
                 ->where('start_date', '<', $end->toDateString())
                 ->where('end_date', '>', $start->toDateString());
@@ -607,7 +632,7 @@ class BookingController extends Controller
                 }
             }
 
-            $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail($roomId);
+            $room = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons'])->findOrFail($roomId);
 
             // Compute/check datetime and totals for hourly packages
             $finalCheckInAt = $checkInAt->copy();
@@ -645,11 +670,17 @@ class BookingController extends Controller
                     $plan = $room->roomType?->ratePlans?->firstWhere('id', $planId);
                     if ($plan) {
                         $effectiveCheckOutAt = $finalCheckOutAt ? $finalCheckOutAt->copy() : $finalCheckInAt->copy()->addDay();
-                        $nights = max(1, $finalCheckInAt->copy()->startOfDay()->diffInDays($effectiveCheckOutAt->startOfDay()));
                         $basePerNight = (float) ($plan->base_price ?? 0);
                         $extraBeds = (int) ($bookingData['extra_beds_count'] ?? 0);
                         $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
-                        $beforeTax = ($basePerNight + ($extraBeds > 0 ? $extraBeds * $extraBedCost : 0)) * $nights;
+                        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
+                            $basePerNight,
+                            $extraBedCost,
+                            $extraBeds,
+                            $finalCheckInAt->copy()->startOfDay(),
+                            $effectiveCheckOutAt->copy()->startOfDay(),
+                            $room->roomType?->seasons ?? []
+                        );
                         $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
                         $totalPrice = round($beforeTax * (1 + ($taxRate / 100)), 2);
                     }
@@ -751,6 +782,8 @@ class BookingController extends Controller
             'payment_status' => 'in:pending,partial,paid,refunded',
             'payment_method' => 'nullable|string',
             'deposit_amount' => 'nullable|numeric|min:0',
+            'refund_amount' => 'nullable|numeric|min:0',
+            'refund_method' => 'nullable|string|in:cash,card,upi,bank_transfer',
             'status' => 'in:pending,confirmed,checked_in,checked_out,cancelled',
             'booking_source' => 'nullable|string',
             'notes' => 'nullable|string',
@@ -782,6 +815,10 @@ class BookingController extends Controller
 
         // Checkout validation: must be paid
         if (isset($validated['status']) && $validated['status'] === 'checked_out' && $booking->status !== 'checked_out') {
+            if ((float) ($validated['refund_amount'] ?? 0) > 0.0001 && empty($validated['refund_method'])) {
+                return response()->json(['message' => 'Select how the refund will be issued (cash, card, UPI, or bank transfer).'], 422);
+            }
+
             $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
             $isPaid = ($currentPaymentStatus === 'paid');
 
@@ -794,7 +831,17 @@ class BookingController extends Controller
                     ->get();
                 $groupGrand = (float) $groupBookings->sum(fn ($b) => $this->effectiveBookingGrand($b));
                 $groupPaid = (float) $groupBookings->sum(fn ($b) => (float) ($b->deposit_amount ?? 0));
-                $isPaid = $groupPaid >= $groupGrand;
+                $isPaid = $groupPaid + 0.009 >= $groupGrand;
+            }
+
+            // Single booking: allow checkout when advance/deposit covers the bill, even if
+            // payment_status was never flipped to "paid" (common after deposits or when totals were adjusted).
+            if (! $isPaid && empty($booking->booking_group_id)) {
+                $paid = (float) ($booking->deposit_amount ?? 0);
+                $grand = $this->effectiveBookingGrand($booking);
+                $storedTotal = (float) ($booking->total_price ?? 0);
+                $bill = max($grand, $storedTotal);
+                $isPaid = $paid + 0.009 >= $bill;
             }
 
             if (! $isPaid) {
