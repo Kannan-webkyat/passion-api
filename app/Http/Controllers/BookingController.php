@@ -737,6 +737,8 @@ class BookingController extends Controller
             $notesIncoming = trim((string) ($bookingData['notes'] ?? ''));
             $bookingData['notes'] = $notesIncoming !== '' ? $creationAudit."\n".$notesIncoming : $creationAudit;
 
+            $this->assignEarlyCheckinTimeFromEstimatedArrival($bookingData, $bookingUnit);
+
             $booking = Booking::create($bookingData);
 
             // Create initial Stay Segment
@@ -763,6 +765,37 @@ class BookingController extends Controller
         }
 
         return response()->json($isGroup ? $bookings : $bookings[0], 201);
+    }
+
+    /**
+     * When creating a day booking, if estimated arrival is before property standard check-in time,
+     * persist early_checkin_time (same rule as POST .../early-checkin) so reception sees early
+     * check-in as already applied. Does not add extra_charges here — total_price from the client
+     * already reflects negotiated charges.
+     */
+    private function assignEarlyCheckinTimeFromEstimatedArrival(array &$bookingData, string $bookingUnit): void
+    {
+        if ($bookingUnit === 'hour_package') {
+            return;
+        }
+        $raw = trim((string) ($bookingData['estimated_arrival_time'] ?? ''));
+        if ($raw === '') {
+            return;
+        }
+        try {
+            $actual = Carbon::parse($raw)->format('H:i');
+        } catch (\Throwable $e) {
+            return;
+        }
+        $standardTime = (string) Setting::get('standard_check_in_time', '14:00');
+        try {
+            $standardTime = Carbon::parse($standardTime)->format('H:i');
+        } catch (\Throwable $e) {
+            $standardTime = '14:00';
+        }
+        if ($actual < $standardTime) {
+            $bookingData['early_checkin_time'] = $actual;
+        }
     }
 
     // --- Booking Group Management ---
