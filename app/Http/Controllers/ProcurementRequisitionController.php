@@ -170,6 +170,13 @@ class ProcurementRequisitionController extends Controller
         if ($procurementRequisition->status === 'po_generated') {
             return response()->json(['message' => 'Invalid status'], 422);
         }
+        if ($procurementRequisition->status !== 'draft') {
+            return response()->json([
+                'message' => $procurementRequisition->status === 'quotation_requested'
+                    ? 'Quotation request has already been sent.'
+                    : 'Quotation request can only be sent while the requisition is in draft.',
+            ], 422);
+        }
         $procurementRequisition->update(['status' => 'quotation_requested']);
 
         return response()->json($procurementRequisition->fresh()->load([
