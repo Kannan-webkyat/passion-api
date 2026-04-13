@@ -216,6 +216,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
         Route::apiResource('purchase-orders', PurchaseOrderController::class);
         Route::post('purchase-orders/{purchaseOrder}/receive', [PurchaseOrderController::class, 'receive']);
+        Route::post('purchase-orders/{purchaseOrder}/send', [PurchaseOrderController::class, 'send']);
+        Route::post('purchase-orders/{purchaseOrder}/cancel', [PurchaseOrderController::class, 'cancel']);
         Route::post('purchase-orders/{purchaseOrder}/pay', [PurchaseOrderController::class, 'pay']);
 
         Route::apiResource('procurement-requisitions', ProcurementRequisitionController::class);

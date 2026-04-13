@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\StoreRequest;
@@ -327,12 +328,18 @@ class StoreRequestController extends Controller
 
                 $refId = (string) Str::uuid();
 
+                // Resolve unit cost for transaction audit trail (WAC per issue unit)
+                $invItem = InventoryItem::find($requestItem->inventory_item_id);
+                $unitCost = floatval($invItem?->cost_price ?? 0) / floatval($invItem?->conversion_factor ?? 1);
+
                 InventoryTransaction::create([
                     'inventory_item_id' => $requestItem->inventory_item_id,
                     'inventory_location_id' => $storeRequest->to_location_id,
                     'department_id' => $storeRequest->department_id,
                     'type' => 'out',
                     'quantity' => $qtyToMove,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($qtyToMove * $unitCost, 2),
                     'reason' => 'Store Issue',
                     'notes' => 'Issued to '.$storeRequest->fromLocation->name.' (Req: '.$storeRequest->request_number.')',
                     'user_id' => auth()->id(),
@@ -347,6 +354,8 @@ class StoreRequestController extends Controller
                     'department_id' => $storeRequest->department_id,
                     'type' => 'in',
                     'quantity' => $qtyToMove,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($qtyToMove * $unitCost, 2),
                     'reason' => 'Store Receipt',
                     'notes' => 'Received from '.$storeRequest->toLocation->name.' (Req: '.$storeRequest->request_number.')',
                     'user_id' => auth()->id(),
@@ -354,6 +363,9 @@ class StoreRequestController extends Controller
                     'reference_id' => $refId,
                     'reference_type' => 'requisition',
                 ]);
+
+                // Sync cached current_stock column for the transferred item
+                InventoryItem::syncStoredCurrentStockFromLocations($requestItem->inventory_item_id);
             }
 
             $storeRequest->refresh()->load('items');

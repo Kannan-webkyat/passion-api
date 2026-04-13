@@ -2,11 +2,11 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\InventoryItem;
 use App\Models\ProcurementRequisition;
 use App\Models\ProcurementRequisitionItem;
 use App\Models\Setting;
 use App\Models\Vendor;
+use App\Services\PurchaseOrderLineAmounts;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -28,6 +28,7 @@ class ProcurementRequisitionController extends Controller
                 'location',
                 'items.inventoryItem.purchaseUom',
                 'items.vendors',
+                'creator',
             ])->latest()->get()
         );
     }
@@ -86,6 +87,7 @@ class ProcurementRequisitionController extends Controller
                 'location',
                 'items.inventoryItem.purchaseUom',
                 'items.vendors',
+                'creator',
             ]), 201);
         });
     }
@@ -97,7 +99,9 @@ class ProcurementRequisitionController extends Controller
             'items.inventoryItem.tax',
             'items.inventoryItem.purchaseUom',
             'items.vendors',
+            'creator',
             'purchaseOrders.vendor',
+            'purchaseOrders.creator',
         ]));
     }
 
@@ -149,6 +153,7 @@ class ProcurementRequisitionController extends Controller
                 'location',
                 'items.inventoryItem.purchaseUom',
                 'items.vendors',
+                'creator',
             ]));
         });
     }
@@ -172,17 +177,19 @@ class ProcurementRequisitionController extends Controller
         }
         if ($procurementRequisition->status !== 'draft') {
             return response()->json([
-                'message' => $procurementRequisition->status === 'quotation_requested'
-                    ? 'Quotation request has already been sent.'
+                'message' => $procurementRequisition->status === 'comparison'
+                    ? 'Comparison is already in progress.'
                     : 'Quotation request can only be sent while the requisition is in draft.',
             ], 422);
         }
-        $procurementRequisition->update(['status' => 'quotation_requested']);
+        // Treat quote request as the start of comparison.
+        $procurementRequisition->update(['status' => 'comparison']);
 
         return response()->json($procurementRequisition->fresh()->load([
             'location',
             'items.inventoryItem.purchaseUom',
             'items.vendors',
+            'creator',
         ]));
     }
 
@@ -198,6 +205,7 @@ class ProcurementRequisitionController extends Controller
             'location',
             'items.inventoryItem.purchaseUom',
             'items.vendors',
+            'creator',
         ]));
     }
 
@@ -340,6 +348,7 @@ class ProcurementRequisitionController extends Controller
 
             $pos = [];
             foreach ($byVendor as $vendorId => $lines) {
+                $vendorBasis = Vendor::find($vendorId)?->default_tax_price_basis ?? PurchaseOrderLineAmounts::BASIS_EXCLUSIVE;
                 $itemsPayload = [];
                 foreach ($lines as $line) {
                     $inv = $line->inventoryItem;
@@ -349,6 +358,7 @@ class ProcurementRequisitionController extends Controller
                         'quantity' => $line->quantity,
                         'unit_price' => floatval($line->winning_unit_price),
                         'tax_rate' => $taxRate,
+                        'tax_price_basis' => $vendorBasis,
                     ];
                 }
 
@@ -361,7 +371,8 @@ class ProcurementRequisitionController extends Controller
                     'items' => $itemsPayload,
                 ];
 
-                $pos[] = $service->createFromValidatedData($validated, $procurementRequisition->id);
+                // Create as "sent" so it can be received without an extra edit step.
+                $pos[] = $service->createFromValidatedData($validated, $procurementRequisition->id, 'sent');
             }
 
             $procurementRequisition->update(['status' => 'po_generated']);
@@ -371,7 +382,7 @@ class ProcurementRequisitionController extends Controller
 
         return response()->json([
             'message' => 'Purchase orders created',
-            'purchase_orders' => collect($created)->map(fn ($po) => $po->load('vendor', 'items.inventoryItem')),
+            'purchase_orders' => collect($created)->map(fn ($po) => $po->load('vendor', 'items.inventoryItem', 'creator')),
         ], 201);
     }
 }

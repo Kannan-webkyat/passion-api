@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
 use App\Models\PosOrderItem;
+use App\Models\Vendor;
 
 class InventoryReportController extends Controller
 {
@@ -148,7 +149,9 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * Consumption Reconciliation: Theoretical (Sales * Recipe) vs Actual (Out-transactions)
+     * Consumption Reconciliation: Theoretical (Sales × Recipe) vs actual issues (sum of `out`
+     * transactions, excluding transfers/production/finished goods) minus POS void reversals (`in`
+     * with reason Inventory Reversal). Purchase receipts and store receipts are not subtracted.
      */
     public function consumption(Request $request)
     {
@@ -197,7 +200,12 @@ class InventoryReportController extends Controller
 
             if ($recipe && $recipe->is_active && !($recipe->requires_production ?? true)) {
                 $yield = max(1, (float)($recipe->yield_quantity ?? 1));
-                $multiplier = $qty / $yield;
+                // Apply variant portion-size scaling (matches POS deduction logic)
+                $scale = 1.0;
+                if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
+                    $scale = $ml;
+                }
+                $multiplier = ($qty * $scale) / $yield;
                 foreach ($recipe->ingredients as $ing) {
                     $theoretical[$ing->inventory_item_id] = ($theoretical[$ing->inventory_item_id] ?? 0) + ($ing->raw_quantity * $multiplier);
                 }
@@ -228,25 +236,41 @@ class InventoryReportController extends Controller
             }
         }
 
-        $actualsQuery = InventoryTransaction::whereDate('created_at', '>=', $startDate)
+        $consumptionOutReasonsExcluded = ['Transfer', 'Internal Issue', 'Production', 'Finished Goods'];
+
+        $outsQuery = InventoryTransaction::whereDate('created_at', '>=', $startDate)
             ->whereDate('created_at', '<=', $endDate)
-            ->whereNotIn('reason', ['Transfer', 'Internal Issue', 'Production', 'Finished Goods']);
+            ->where('type', 'out')
+            ->whereNotIn('reason', $consumptionOutReasonsExcluded);
 
         if ($locationId) {
-            $actualsQuery->where('inventory_location_id', $locationId);
+            $outsQuery->where('inventory_location_id', $locationId);
         }
 
-        $actualsData = $actualsQuery->select('inventory_item_id', 'type', DB::raw('SUM(quantity) as total_qty'))
-            ->groupBy('inventory_item_id', 'type')
+        $outsData = $outsQuery->select('inventory_item_id', DB::raw('SUM(quantity) as total_qty'))
+            ->groupBy('inventory_item_id')
+            ->get();
+
+        $reversalInsQuery = InventoryTransaction::whereDate('created_at', '>=', $startDate)
+            ->whereDate('created_at', '<=', $endDate)
+            ->where('type', 'in')
+            ->where('reason', 'Inventory Reversal');
+
+        if ($locationId) {
+            $reversalInsQuery->where('inventory_location_id', $locationId);
+        }
+
+        $reversalInsData = $reversalInsQuery->select('inventory_item_id', DB::raw('SUM(quantity) as total_qty'))
+            ->groupBy('inventory_item_id')
             ->get();
 
         $actuals = [];
-        foreach ($actualsData as $data) {
-            $current = $actuals[$data->inventory_item_id] ?? 0;
-            // Subtract 'in' (reversals/returns) from 'out' (sales/wastage)
-            $actuals[$data->inventory_item_id] = ($data->type === 'out') 
-                ? $current + (float)$data->total_qty 
-                : $current - (float)$data->total_qty;
+        foreach ($outsData as $row) {
+            $actuals[$row->inventory_item_id] = (float) $row->total_qty;
+        }
+        foreach ($reversalInsData as $row) {
+            $id = $row->inventory_item_id;
+            $actuals[$id] = ($actuals[$id] ?? 0) - (float) $row->total_qty;
         }
 
         $itemIds = collect($theoretical)->keys()->merge(collect($actuals)->keys())->unique();
@@ -286,7 +310,7 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * Wastage & Adjustments Report
+     * Wastage & Adjustments Report — reasons must match {@see InventoryController::adjustStock}.
      */
     public function adjustments(Request $request)
     {
@@ -294,23 +318,48 @@ class InventoryReportController extends Controller
         $reason = $request->query('reason');
         $startDate = $request->query('from') ?? $request->query('start_date');
         $endDate = $request->query('to') ?? $request->query('end_date');
+        $search = trim((string) $request->query('search', ''));
+
+        $adjustmentReasons = [
+            'Wastage', 'Expired', 'Breakage', 'Theft', 'Staff meal',
+            'Manual Adjustment', 'Correction', 'Components Stored', 'Assembled from Storage',
+        ];
 
         $query = InventoryTransaction::with(['item.issueUom', 'user', 'location'])
-            ->whereIn('reason', ['Wastage', 'Expired', 'Breakage', 'Theft', 'Manual Adjustment', 'Correction', 'Components Stored', 'Assembled from Storage'])
+            ->whereIn('reason', $adjustmentReasons)
             ->orderBy('created_at', 'desc');
 
-        if ($reason && $reason !== 'all') $query->where('reason', $reason);
-        if ($startDate) $query->whereDate('created_at', '>=', $startDate);
-        if ($endDate) $query->whereDate('created_at', '<=', $endDate);
+        if ($reason && $reason !== 'all') {
+            $query->where('reason', $reason);
+        }
+        if ($startDate) {
+            $query->whereDate('created_at', '>=', $startDate);
+        }
+        if ($endDate) {
+            $query->whereDate('created_at', '<=', $endDate);
+        }
+        if ($search !== '') {
+            $term = '%'.addcslashes($search, '%_\\').'%';
+            $query->where(function ($q) use ($term) {
+                $q->whereHas('item', function ($iq) use ($term) {
+                    $iq->where('name', 'like', $term)
+                        ->orWhere('sku', 'like', $term);
+                })->orWhereHas('user', function ($uq) use ($term) {
+                    $uq->where('name', 'like', $term);
+                });
+            });
+        }
 
         $results = $query->get();
 
         $data = $results->map(function ($t) {
             return [
                 'id' => $t->id,
+                'inventory_item_id' => $t->inventory_item_id,
                 'item_name' => $t->item?->name ?? 'Unknown',
                 'sku' => $t->item?->sku ?? '-',
-                'qty' => (float) abs($t->quantity),
+                'qty' => (float) $t->quantity,
+                'transaction_type' => $t->type,
                 'uom' => $t->item?->issueUom?->short_name ?? '-',
                 'unit_cost' => (float) $t->unit_cost,
                 'total_loss' => (float) $t->total_cost,
@@ -321,23 +370,27 @@ class InventoryReportController extends Controller
             ];
         });
 
+        $outRows = $data->filter(fn (array $r) => ($r['transaction_type'] ?? '') === 'out');
+        $inRows = $data->filter(fn (array $r) => ($r['transaction_type'] ?? '') === 'in');
+
         $summary = [
-            'total_loss_value' => $data->sum('total_loss'),
+            'total_loss_value' => round((float) $outRows->sum('total_loss'), 2),
+            'total_addition_value' => round((float) $inRows->sum('total_loss'), 2),
             'total_incidents' => $data->count(),
             'by_reason' => $data->groupBy('reason')->map(fn ($group) => [
                 'count' => $group->count(),
-                'value' => $group->sum('total_loss'),
+                'value' => round((float) $group->sum('total_loss'), 2),
             ]),
         ];
 
         return response()->json([
-            'data' => $data,
+            'data' => $data->values(),
             'summary' => $summary,
         ]);
     }
 
     /**
-     * Purchase History & Price Trending
+     * Purchase History & Price Trending (received PO lines; amounts prorated to quantity received).
      */
     public function purchaseHistory(Request $request)
     {
@@ -346,117 +399,226 @@ class InventoryReportController extends Controller
         $itemId = $request->query('item_id');
         $startDate = $request->query('from') ?? $request->query('start_date');
         $endDate = $request->query('to') ?? $request->query('end_date');
+        $search = trim((string) $request->query('search', ''));
 
         $query = PurchaseOrder::with(['vendor', 'items.inventoryItem.issueUom'])
-            ->where('status', 'Received')
+            ->where('status', 'received')
             ->orderBy('received_at', 'desc');
 
-        if ($vendorId && $vendorId !== 'all') $query->where('vendor_id', $vendorId);
-        if ($startDate) $query->whereDate('received_at', '>=', $startDate);
-        if ($endDate) $query->whereDate('received_at', '<=', $endDate);
+        if ($vendorId && $vendorId !== 'all') {
+            $query->where('vendor_id', $vendorId);
+        }
+        if ($startDate) {
+            $query->whereDate('received_at', '>=', $startDate);
+        }
+        if ($endDate) {
+            $query->whereDate('received_at', '<=', $endDate);
+        }
 
         $pos = $query->get();
 
         $flatItems = [];
         foreach ($pos as $po) {
+            $receivedAt = $po->received_at;
+            if ($receivedAt !== null) {
+                $receivedAt = $receivedAt instanceof \DateTimeInterface
+                    ? $receivedAt->format(\DateTimeInterface::ATOM)
+                    : (string) $receivedAt;
+            }
+
             foreach ($po->items as $pi) {
-                if ($itemId && $pi->inventory_item_id != $itemId) continue;
+                if ($itemId && (int) $pi->inventory_item_id !== (int) $itemId) {
+                    continue;
+                }
+
+                $qtyOrdered = (float) ($pi->quantity_ordered ?: 0);
+                $qtyReceived = (float) $pi->quantity_received;
+                // Vendor payable gross for received qty (supports partial receipts)
+                $totalCost = (float) ($qtyOrdered > 0
+                    ? ((float) ($pi->total_amount ?? 0)) * ($qtyReceived / $qtyOrdered)
+                    : 0);
 
                 $flatItems[] = [
+                    'id' => $pi->id,
                     'po_number' => $po->po_number,
-                    'received_at' => $po->received_at,
-                    'vendor' => $po->vendor?->name ?? '—',
+                    'received_at' => $receivedAt,
+                    'vendor_name' => $po->vendor?->name ?? '—',
                     'item_id' => $pi->inventory_item_id,
                     'item_name' => $pi->inventoryItem?->name ?? '—',
                     'uom' => $pi->inventoryItem?->issueUom?->short_name ?? '—',
-                    'quantity' => (float) $pi->received_quantity,
-                    'unit_price' => (float) $pi->unit_price,
-                    'total_price' => (float) $pi->total_price,
+                    'qty' => $qtyReceived,
+                    'unit_cost' => (float) $pi->unit_price,
+                    'total_cost' => $totalCost,
                 ];
             }
         }
 
+        if ($search !== '') {
+            $needle = mb_strtolower($search);
+            $flatItems = array_values(array_filter($flatItems, function (array $row) use ($needle) {
+                return str_contains(mb_strtolower((string) ($row['item_name'] ?? '')), $needle)
+                    || str_contains(mb_strtolower((string) ($row['po_number'] ?? '')), $needle);
+            }));
+        }
+
+        $collection = collect($flatItems);
+
         return response()->json([
             'data' => $flatItems,
             'summary' => [
-                'total_spend' => collect($flatItems)->sum('total_price'),
-                'avg_unit_price' => count($flatItems) > 0 ? collect($flatItems)->avg('unit_price') : 0
-            ]
+                'total_spend' => round((float) $collection->sum('total_cost'), 2),
+                'avg_unit_price' => $collection->isNotEmpty()
+                    ? round((float) $collection->avg('unit_cost'), 4)
+                    : 0,
+            ],
+            'vendors' => Vendor::query()->orderBy('name')->get(['id', 'name']),
         ]);
     }
 
     /**
-     * Reorder Planning Report
+     * Reorder Planning Report — uses sum of location quantities (same source of truth as stock status),
+     * not the cached inventory_items.current_stock column. Skips items with no reorder threshold.
      */
     public function reorderReport(Request $request)
     {
         $this->checkPermission('inventory-report-reorder');
+
+        $candidateIds = DB::table('inventory_items as i')
+            ->leftJoinSub(
+                DB::table('inventory_item_locations')
+                    ->selectRaw('inventory_item_id, SUM(quantity) as qty_sum')
+                    ->groupBy('inventory_item_id'),
+                'loc',
+                'i.id',
+                '=',
+                'loc.inventory_item_id'
+            )
+            ->where('i.reorder_level', '>', 0)
+            ->whereRaw('COALESCE(loc.qty_sum, 0) <= i.reorder_level')
+            ->pluck('i.id');
+
+        if ($candidateIds->isEmpty()) {
+            return response()->json([
+                'data' => [],
+                'summary' => [
+                    'items_to_reorder' => 0,
+                    'total_reorder_cost' => 0,
+                    'critical_shortfall' => 0,
+                ],
+            ]);
+        }
+
+        $qtyByItemId = DB::table('inventory_item_locations')
+            ->whereIn('inventory_item_id', $candidateIds)
+            ->selectRaw('inventory_item_id, SUM(quantity) as qty_sum')
+            ->groupBy('inventory_item_id')
+            ->pluck('qty_sum', 'inventory_item_id');
+
         $items = InventoryItem::with(['category', 'issueUom', 'vendor'])
-            ->whereColumn('current_stock', '<=', 'reorder_level')
+            ->whereIn('id', $candidateIds)
+            ->orderBy('name')
             ->get();
 
-        $report = $items->map(function ($item) {
-            $suggestedOrder = max(0, ($item->reorder_level * 2) - $item->current_stock);
+        $report = $items->map(function ($item) use ($qtyByItemId) {
+            $onHand = (float) ($qtyByItemId[$item->id] ?? 0);
+            $reorder = (float) $item->reorder_level;
+            $suggestedOrder = max(0, (2 * $reorder) - $onHand);
+            $issueUnitCost = (float) ($item->cost_price ?? 0) / (float) ($item->conversion_factor ?: 1);
+
             return [
                 'id' => $item->id,
                 'item_name' => $item->name,
                 'sku' => $item->sku,
                 'category' => $item->category?->name ?? 'Uncategorized',
                 'uom' => $item->issueUom?->short_name ?? 'unit',
-                'current_stock' => (float) $item->current_stock,
-                'reorder_level' => (float) $item->reorder_level,
+                'current_stock' => round($onHand, 3),
+                'reorder_level' => $reorder,
                 'suggested_order' => round($suggestedOrder, 2),
                 'vendor_name' => $item->vendor?->name ?? 'Not Assigned',
-                'estimated_cost' => round($suggestedOrder * ($item->cost_price / ($item->conversion_factor ?: 1)), 2)
+                'estimated_cost' => round($suggestedOrder * $issueUnitCost, 2),
             ];
-        });
+        })->values();
 
         return response()->json([
             'data' => $report,
             'summary' => [
                 'items_to_reorder' => $report->count(),
-                'total_reorder_cost' => $report->sum('estimated_cost'),
-                'critical_shortfall' => $report->where('current_stock', 0)->count()
-            ]
+                'total_reorder_cost' => round((float) $report->sum('estimated_cost'), 2),
+                'critical_shortfall' => $report->where('current_stock', '<=', 0)->count(),
+            ],
         ]);
     }
 
     /**
-     * Slow Moving Stock Analysis
+     * Slow-moving stock: positive on-hand (sum of locations) with no `out` transaction in the last N days.
+     * Uses location totals, not inventory_items.current_stock. Omits zero on-hand SKUs (no tied-up capital).
      */
     public function slowMovingReport(Request $request)
     {
         $this->checkPermission('inventory-report-slow-moving');
-        $days = (int) $request->query('days', 30);
+        $days = max(1, min(365, (int) $request->query('days', 30)));
         $cutoff = now()->subDays($days);
 
-        $recentlyUsedIds = InventoryTransaction::where('type', 'out')
+        $positiveStockIds = DB::table('inventory_item_locations')
+            ->select('inventory_item_id')
+            ->groupBy('inventory_item_id')
+            ->havingRaw('SUM(quantity) > 0')
+            ->pluck('inventory_item_id');
+
+        $recentlyUsedIds = InventoryTransaction::query()
+            ->where('type', 'out')
             ->where('created_at', '>=', $cutoff)
-            ->pluck('inventory_item_id')
-            ->unique();
+            ->distinct()
+            ->pluck('inventory_item_id');
+
+        $slowIds = $positiveStockIds->diff($recentlyUsedIds)->values();
+
+        if ($slowIds->isEmpty()) {
+            return response()->json([
+                'data' => [],
+                'summary' => [
+                    'stagnant_items' => 0,
+                    'stagnant_valuation' => 0,
+                    'avg_inactivity_days' => 0,
+                ],
+            ]);
+        }
+
+        $qtyByItemId = DB::table('inventory_item_locations')
+            ->whereIn('inventory_item_id', $slowIds)
+            ->selectRaw('inventory_item_id, SUM(quantity) as qty_sum')
+            ->groupBy('inventory_item_id')
+            ->pluck('qty_sum', 'inventory_item_id');
+
+        $lastOutByItem = InventoryTransaction::query()
+            ->select('inventory_item_id', DB::raw('MAX(created_at) as last_out_at'))
+            ->where('type', 'out')
+            ->whereIn('inventory_item_id', $slowIds)
+            ->groupBy('inventory_item_id')
+            ->pluck('last_out_at', 'inventory_item_id');
 
         $items = InventoryItem::with(['category', 'issueUom'])
-            ->whereNotIn('id', $recentlyUsedIds)
+            ->whereIn('id', $slowIds)
+            ->orderBy('name')
             ->get();
 
-        $report = $items->map(function ($item) {
-            $lastTx = InventoryTransaction::where('inventory_item_id', $item->id)
-                ->where('type', 'out')
-                ->latest()
-                ->first();
-
+        $report = $items->map(function ($item) use ($qtyByItemId, $lastOutByItem) {
+            $onHand = (float) ($qtyByItemId[$item->id] ?? 0);
             $unitCost = (float) ($item->cost_price ?? 0) / (float) ($item->conversion_factor ?: 1);
-            
+            $lastRaw = $lastOutByItem[$item->id] ?? null;
+            $lastAt = $lastRaw ? \Carbon\Carbon::parse($lastRaw) : null;
+            $daysInactive = $lastAt ? now()->diffInDays($lastAt) : 999;
+
             return [
                 'id' => $item->id,
                 'item_name' => $item->name,
                 'sku' => $item->sku,
                 'category' => $item->category?->name ?? 'Uncategorized',
                 'uom' => $item->issueUom?->short_name ?? 'unit',
-                'current_stock' => (float) $item->current_stock,
-                'valuation' => round($item->current_stock * $unitCost, 2),
-                'last_movement' => $lastTx ? ($lastTx->created_at ? $lastTx->created_at->toIso8601String() : null) : null,
-                'days_inactive' => $lastTx && $lastTx->created_at ? now()->diffInDays($lastTx->created_at) : 999
+                'current_stock' => round($onHand, 3),
+                'valuation' => round($onHand * $unitCost, 2),
+                'last_movement' => $lastAt ? $lastAt->toIso8601String() : null,
+                'days_inactive' => (int) $daysInactive,
             ];
         })->sortByDesc('valuation')->values();
 
@@ -464,59 +626,100 @@ class InventoryReportController extends Controller
             'data' => $report,
             'summary' => [
                 'stagnant_items' => $report->count(),
-                'stagnant_valuation' => (float) $report->sum('valuation'),
-                'avg_inactivity_days' => $report->where('days_inactive', '<', 999)->avg('days_inactive') ?: 0
-            ]
+                'stagnant_valuation' => round((float) $report->sum('valuation'), 2),
+                'avg_inactivity_days' => round((float) ($report->where('days_inactive', '<', 999)->avg('days_inactive') ?: 0), 1),
+            ],
         ]);
     }
 
     /**
-     * Overstock Analysis Report
+     * Overstock Analysis — on-hand = sum of location quantities (not inventory_items.current_stock).
+     * Rule: (reorder &gt; 0 and on_hand &gt; 1.5 × reorder) OR (reorder = 0 and on_hand &gt; 100).
+     * Excess qty = max(0, on_hand − target) where target = reorder × 1.2 if reorder &gt; 0 else 50.
      */
     public function overstockReport(Request $request)
     {
         $this->checkPermission('inventory-report-overstock');
-        // Items where current stock is more than 150% of reorder level (and reorder level > 0)
-        // Or if reorder level is 0, where stock is unusually high (e.g. > 100)
+
+        $overstockIds = DB::table('inventory_items as i')
+            ->leftJoinSub(
+                DB::table('inventory_item_locations')
+                    ->selectRaw('inventory_item_id, SUM(quantity) as qty_sum')
+                    ->groupBy('inventory_item_id'),
+                'loc',
+                'i.id',
+                '=',
+                'loc.inventory_item_id'
+            )
+            ->where(function ($q) {
+                $q->where(function ($q2) {
+                    $q2->where('i.reorder_level', '>', 0)
+                        ->whereRaw('COALESCE(loc.qty_sum, 0) > i.reorder_level * 1.5');
+                })->orWhere(function ($q3) {
+                    $q3->where(function ($q4) {
+                        $q4->where('i.reorder_level', '=', 0)->orWhereNull('i.reorder_level');
+                    })->whereRaw('COALESCE(loc.qty_sum, 0) > 100');
+                });
+            })
+            ->pluck('i.id');
+
+        if ($overstockIds->isEmpty()) {
+            return response()->json([
+                'data' => [],
+                'summary' => [
+                    'overstocked_items' => 0,
+                    'total_excess_valuation' => 0,
+                    'avg_overstock_pct' => 0,
+                ],
+            ]);
+        }
+
+        $qtyByItemId = DB::table('inventory_item_locations')
+            ->whereIn('inventory_item_id', $overstockIds)
+            ->selectRaw('inventory_item_id, SUM(quantity) as qty_sum')
+            ->groupBy('inventory_item_id')
+            ->pluck('qty_sum', 'inventory_item_id');
+
         $items = InventoryItem::with(['category', 'issueUom', 'vendor'])
-            ->where(function($q) {
-                $q->whereColumn('current_stock', '>', DB::raw('reorder_level * 1.5'))
-                  ->where('reorder_level', '>', 0);
-            })
-            ->orWhere(function($q) {
-                $q->where('reorder_level', 0)
-                  ->where('current_stock', '>', 100);
-            })
+            ->whereIn('id', $overstockIds)
+            ->orderBy('name')
             ->get();
 
-        $report = $items->map(function ($item) {
-            $targetStock = $item->reorder_level > 0 ? $item->reorder_level * 1.2 : 50;
-            $excessQty = max(0, $item->current_stock - $targetStock);
+        $report = $items->map(function ($item) use ($qtyByItemId) {
+            $onHand = (float) ($qtyByItemId[$item->id] ?? 0);
+            $reorder = (float) $item->reorder_level;
+            $targetStock = $reorder > 0 ? $reorder * 1.2 : 50;
+            $excessQty = max(0, $onHand - $targetStock);
             $unitCost = (float) ($item->cost_price ?? 0) / (float) ($item->conversion_factor ?: 1);
-            
+
             return [
                 'id' => $item->id,
                 'item_name' => $item->name,
                 'sku' => $item->sku,
                 'category' => $item->category?->name ?? 'Uncategorized',
                 'uom' => $item->issueUom?->short_name ?? 'unit',
-                'current_stock' => (float) $item->current_stock,
-                'reorder_level' => (float) $item->reorder_level,
+                'current_stock' => round($onHand, 3),
+                'reorder_level' => $reorder,
+                'target_level' => round($targetStock, 3),
                 'excess_qty' => round($excessQty, 2),
                 'excess_valuation' => round($excessQty * $unitCost, 2),
                 'vendor_name' => $item->vendor?->name ?? 'Not Assigned',
             ];
         })->sortByDesc('excess_valuation')->values();
 
+        $withReorder = $report->filter(fn (array $r) => ($r['reorder_level'] ?? 0) > 0);
+
         return response()->json([
             'data' => $report,
             'summary' => [
                 'overstocked_items' => $report->count(),
-                'total_excess_valuation' => $report->sum('excess_valuation'),
-                'avg_overstock_pct' => $report->avg(function($item) {
-                    return $item['reorder_level'] > 0 ? ($item['current_stock'] / $item['reorder_level']) * 100 : 200;
-                })
-            ]
+                'total_excess_valuation' => round((float) $report->sum('excess_valuation'), 2),
+                'avg_overstock_pct' => $withReorder->isNotEmpty()
+                    ? round((float) $withReorder->avg(
+                        fn (array $r) => ($r['current_stock'] / $r['reorder_level']) * 100
+                    ), 1)
+                    : null,
+            ],
         ]);
     }
 

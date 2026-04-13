@@ -60,14 +60,16 @@ class InventoryController extends Controller
             'reorder_level' => 'nullable|numeric|min:0',
             'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
+            'is_prepared_item' => 'nullable|boolean',
             'description' => 'nullable|string',
         ]);
 
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
+        $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
         $item = InventoryItem::create($validated);
 
-        $purchaseUnitCost = round((float) ($validated['cost_price'] ?? 0), 4);
-        $item->update(['cost_price' => $purchaseUnitCost]);
+        $purchaseUnitCost = (float) $validated['cost_price'];
 
         $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
             $purchaseUnitCost,
@@ -125,15 +127,16 @@ class InventoryController extends Controller
             'reorder_level' => 'nullable|numeric|min:0',
             'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
+            'is_prepared_item' => 'nullable|boolean',
             'description' => 'nullable|string',
         ]);
 
         $oldStock = $item->current_stock;
+        $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
         $item->update($validated);
 
         // Stored cost is per purchase UOM (WAC on GRN; manual entry same convention).
-        $purchaseUnitCost = round((float) ($validated['cost_price'] ?? 0), 4);
-        $item->update(['cost_price' => $purchaseUnitCost]);
+        $purchaseUnitCost = (float) $validated['cost_price'];
 
         $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
             $purchaseUnitCost,

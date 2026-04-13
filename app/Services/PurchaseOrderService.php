@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\InventoryItem;
+use App\Models\ProcurementRequisition;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use Illuminate\Support\Facades\DB;
@@ -10,31 +11,60 @@ use Illuminate\Support\Facades\DB;
 class PurchaseOrderService
 {
     /**
+     * Mutates each line with subtotal (exclusive net), tax_amount, total_amount, tax_rate, tax_price_basis.
+     *
+     * @param  array<int, array<string, mixed>>  $items
+     * @return array{subtotal: float, tax_amount: float}
+     */
+    public static function applyLineAmountsToItems(array &$items): array
+    {
+        $subtotalSum = 0.0;
+        $taxSum = 0.0;
+
+        foreach ($items as &$line) {
+            $basis = PurchaseOrderLineAmounts::normalizeBasis($line['tax_price_basis'] ?? null);
+            $qty = (float) $line['quantity'];
+            $up = (float) $line['unit_price'];
+            $rate = (float) ($line['tax_rate'] ?? 0);
+
+            if ($basis === PurchaseOrderLineAmounts::BASIS_NON_TAXABLE) {
+                $rate = 0.0;
+            }
+
+            $computed = PurchaseOrderLineAmounts::compute($qty, $up, $rate, $basis);
+
+            $line['tax_price_basis'] = $basis;
+            $line['tax_rate'] = $computed['tax_rate'];
+            $line['subtotal'] = $computed['subtotal'];
+            $line['tax_amount'] = $computed['tax_amount'];
+            $line['total_amount'] = $computed['total_amount'];
+
+            $subtotalSum += $computed['subtotal'];
+            $taxSum += $computed['tax_amount'];
+        }
+        unset($line);
+
+        return ['subtotal' => $subtotalSum, 'tax_amount' => $taxSum];
+    }
+
+    /**
      * @param  array<string, mixed>  $validated
      */
-    public function createFromValidatedData(array $validated, ?int $procurementRequisitionId = null): PurchaseOrder
+    public function createFromValidatedData(array $validated, ?int $procurementRequisitionId = null, string $initialStatus = 'draft'): PurchaseOrder
     {
-        return DB::transaction(function () use ($validated, $procurementRequisitionId) {
-            return $this->createFromValidatedDataWithinTransaction($validated, $procurementRequisitionId);
+        return DB::transaction(function () use ($validated, $procurementRequisitionId, $initialStatus) {
+            return $this->createFromValidatedDataWithinTransaction($validated, $procurementRequisitionId, $initialStatus);
         });
     }
 
     /**
      * @param  array<string, mixed>  $validated
      */
-    public function createFromValidatedDataWithinTransaction(array $validated, ?int $procurementRequisitionId = null): PurchaseOrder
+    public function createFromValidatedDataWithinTransaction(array $validated, ?int $procurementRequisitionId = null, string $initialStatus = 'draft'): PurchaseOrder
     {
-        $subtotal = 0;
-        $taxAmount = 0;
-
-        foreach ($validated['items'] as &$line) {
-            $line['subtotal'] = $line['quantity'] * $line['unit_price'];
-            $line['tax_amount'] = ($line['subtotal'] * ($line['tax_rate'] ?? 0)) / 100;
-            $line['total_amount'] = $line['subtotal'] + $line['tax_amount'];
-
-            $subtotal += $line['subtotal'];
-            $taxAmount += $line['tax_amount'];
-        }
+        $totals = self::applyLineAmountsToItems($validated['items']);
+        $subtotal = $totals['subtotal'];
+        $taxAmount = $totals['tax_amount'];
 
         $year = date('Y', strtotime($validated['order_date']));
         $lastPO = PurchaseOrder::whereYear('order_date', $year)
@@ -54,7 +84,7 @@ class PurchaseOrderService
             'order_date' => $validated['order_date'],
             'expected_delivery_date' => $validated['expected_delivery_date'] ?? null,
             'notes' => $validated['notes'] ?? null,
-            'status' => 'draft',
+            'status' => $initialStatus,
             'subtotal' => $subtotal,
             'tax_amount' => $taxAmount,
             'total_amount' => $subtotal + $taxAmount,
@@ -69,6 +99,7 @@ class PurchaseOrderService
                 'inventory_item_id' => $line['inventory_item_id'],
                 'quantity_ordered' => $line['quantity'],
                 'unit_price' => $line['unit_price'],
+                'tax_price_basis' => $line['tax_price_basis'],
                 'subtotal' => $line['subtotal'],
                 'tax_rate' => $line['tax_rate'] ?? 0,
                 'tax_amount' => $line['tax_amount'],
@@ -78,9 +109,8 @@ class PurchaseOrderService
 
         self::addStockExpectedForPurchaseOrder($po->fresh(['items']));
 
-        return $po->load('vendor', 'items.inventoryItem', 'location');
+        return $po->load('vendor', 'items.inventoryItem', 'location', 'creator');
     }
-
 
     public static function addStockExpectedForPurchaseOrder(PurchaseOrder $po): void
     {
@@ -102,6 +132,39 @@ class PurchaseOrderService
                     'stock_expected' => DB::raw('GREATEST(0, COALESCE(stock_expected, 0) - '.$q.')'),
                     'updated_at' => now(),
                 ]);
+        }
+    }
+
+    /**
+     * Keep procurement requisition status consistent with linked POs.
+     *
+     * Rules:
+     * - If there is at least one non-cancelled PO linked: status = po_generated
+     * - If there are zero non-cancelled linked POs and status was po_generated: revert to comparison
+     */
+    public static function syncProcurementRequisitionStatus(?int $procurementRequisitionId): void
+    {
+        if (! $procurementRequisitionId) {
+            return;
+        }
+
+        /** @var ProcurementRequisition|null $req */
+        $req = ProcurementRequisition::find($procurementRequisitionId);
+        if (! $req) {
+            return;
+        }
+
+        $activePoCount = PurchaseOrder::where('procurement_requisition_id', $procurementRequisitionId)
+            ->where('status', '!=', 'cancelled')
+            ->count();
+
+        if ($activePoCount > 0 && $req->status !== 'po_generated') {
+            $req->update(['status' => 'po_generated']);
+            return;
+        }
+
+        if ($activePoCount === 0 && $req->status === 'po_generated') {
+            $req->update(['status' => 'comparison']);
         }
     }
 }

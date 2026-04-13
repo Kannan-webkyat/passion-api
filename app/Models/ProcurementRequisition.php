@@ -32,4 +32,9 @@ class ProcurementRequisition extends Model
     {
         return $this->hasMany(PurchaseOrder::class);
     }
+
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
 }

@@ -479,24 +479,33 @@ class PosController extends Controller
 
         // ── 2. Payment Breakdown for Dashboard ──
         $orderIds = $baseOrdersQ->pluck('id')->all();
-        $payByMethod = [];
-        if (!empty($orderIds)) {
-            $payByMethod = DB::table('pos_payments')
+        $paymentRows = !empty($orderIds) 
+            ? DB::table('pos_payments')
                 ->whereIn('order_id', $orderIds)
                 ->select('method', DB::raw('SUM(amount) as amount'), DB::raw('COUNT(*) as count'))
                 ->groupBy('method')
                 ->get()
-                ->map(function($p) use ($refundsByMethod) {
-                    $refAmt = (float)($refundsByMethod[$p->method] ?? 0);
-                    return [
-                        'method' => $p->method,
-                        'gross_amount' => (float)$p->amount,
-                        'refund_amount' => $refAmt,
-                        'net_amount' => (float)$p->amount - $refAmt,
-                        'count' => $p->count
-                    ];
-                });
-        }
+            : collect([]);
+            
+        $allMethods = $refundsByMethod->keys()
+            ->merge($paymentRows->pluck('method'))
+            ->unique()
+            ->values();
+            
+        $payByMethod = $allMethods->map(function($method) use ($paymentRows, $refundsByMethod) {
+            $paymentData = $paymentRows->firstWhere('method', $method);
+            $grossAmt = (float)($paymentData->amount ?? 0);
+            $count = (int)($paymentData->count ?? 0);
+            $refAmt = (float)($refundsByMethod[$method] ?? 0);
+            
+            return [
+                'method' => $method,
+                'gross_amount' => $grossAmt,
+                'refund_amount' => $refAmt,
+                'net_amount' => $grossAmt - $refAmt,
+                'count' => $count
+            ];
+        });
 
         // ── 3. Paginated Bills for Table ──
         $ordersQ = PosOrder::whereIn('status', ['paid', 'refunded', 'void'])
@@ -4318,12 +4327,13 @@ class PosController extends Controller
                     $committedPortions = DB::table('pos_order_items')
                         ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
                         ->join('restaurant_masters', 'pos_orders.restaurant_id', '=', 'restaurant_masters.id')
+                        ->leftJoin('menu_item_variants', 'pos_order_items.menu_item_variant_id', '=', 'menu_item_variants.id')
                         ->whereIn('pos_orders.status', ['open', 'billed'])
                         ->where('pos_order_items.status', 'active')
                         ->where('pos_order_items.inventory_deducted', false)
                         ->whereIn('pos_order_items.menu_item_id', $noInvItemIds)
                         ->where('restaurant_masters.kitchen_location_id', $kitchenLocationId)
-                        ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
+                        ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity * CASE WHEN menu_item_variants.ml_quantity > 0 AND menu_item_variants.ml_quantity <= 10 THEN menu_item_variants.ml_quantity ELSE 1 END) as total'))
                         ->groupBy('pos_order_items.menu_item_id')
                         ->pluck('total', 'menu_item_id');
 
@@ -4943,6 +4953,7 @@ class PosController extends Controller
                 ->where('pos_orders.status', '!=', 'refunded')
                 ->where('pos_order_items.order_id', '!=', $order->id)
                 ->where('pos_order_items.status', 'active')
+                ->where('pos_order_items.inventory_deducted', false)
                 ->whereNotNull('pos_order_items.combo_id')
                 ->select('combo_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity) as total'))
                 ->groupBy('combo_items.menu_item_id')
@@ -5035,8 +5046,16 @@ class PosController extends Controller
                     continue;
                 } elseif ($item->requires_production) {
                     // Legacy batch-produced items tracked only by production logs (no inventory_item_id).
-                    // If no production logs exist, available = 0 which correctly blocks the sale.
-                    $available = max(0, ($produced->get($menuItemId, 0)) - ($soldExcludingThis->get($menuItemId, 0)));
+                    // Count ALL sold quantities (including settled orders) — these items have no physical
+                    // stock deduction, so inventory_deducted flag must NOT filter out settled sales.
+                    $totalSoldForItem = (float) DB::table('pos_order_items')
+                        ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+                        ->whereNotIn('pos_orders.status', ['void', 'refunded'])
+                        ->where('pos_order_items.order_id', '!=', $order->id)
+                        ->where('pos_order_items.status', 'active')
+                        ->where('pos_order_items.menu_item_id', $menuItemId)
+                        ->sum('pos_order_items.quantity');
+                    $available = max(0, ($produced->get($menuItemId, 0)) - $totalSoldForItem);
                 } else {
                     // menu_item.requires_production=false + no inventory_item_id + MTO recipe:
                     // item goes to bar/direct path but still needs ingredient check.
@@ -7026,7 +7045,7 @@ class PosController extends Controller
         }
         DB::table('inventory_item_locations')->updateOrInsert(
             ['inventory_item_id' => $itemId, 'inventory_location_id' => $locId],
-            ['updated_at' => now()]
+            ['updated_at' => now(), 'created_at' => now()]
         );
         DB::table('inventory_item_locations')->where('inventory_item_id', $itemId)->where('inventory_location_id', $locId)->increment('quantity', $qty);
 
@@ -7059,7 +7078,7 @@ class PosController extends Controller
 
         DB::table('inventory_item_locations')->updateOrInsert(
             ['inventory_item_id' => $itemId, 'inventory_location_id' => $locId],
-            ['updated_at' => now()],
+            ['updated_at' => now(), 'created_at' => now()],
         );
 
         $row = DB::table('inventory_item_locations')

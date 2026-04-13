@@ -33,6 +33,7 @@ class VendorController extends Controller
             'pan' => 'nullable|string|max:10|regex:/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/',
             'state' => 'nullable|string|max:100',
             'is_registered_dealer' => 'boolean',
+            'default_tax_price_basis' => 'nullable|string|in:tax_exclusive,tax_inclusive,non_taxable',
         ]);
         $vendor = Vendor::create($validated);
 
@@ -57,6 +58,7 @@ class VendorController extends Controller
             'pan' => 'nullable|string|max:10|regex:/^[A-Z]{5}[0-9]{4}[A-Z]{1}$/',
             'state' => 'nullable|string|max:100',
             'is_registered_dealer' => 'boolean',
+            'default_tax_price_basis' => 'nullable|string|in:tax_exclusive,tax_inclusive,non_taxable',
         ]);
         $vendor->update($validated);
 

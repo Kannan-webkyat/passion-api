@@ -10,7 +10,7 @@ class InventoryItem extends Model
     protected $fillable = [
         'name', 'sku', 'description', 'category_id', 'vendor_id', 'tax_id',
         'purchase_uom_id', 'issue_uom_id', 'conversion_factor',
-        'cost_price', 'reorder_level', 'current_stock', 'stock_expected', 'is_direct_sale',
+        'cost_price', 'reorder_level', 'current_stock', 'stock_expected', 'is_direct_sale', 'is_prepared_item',
     ];
 
     protected $casts = [
@@ -21,6 +21,7 @@ class InventoryItem extends Model
         'conversion_factor' => 'float',
         'tax_id' => 'integer',
         'is_direct_sale' => 'boolean',
+        'is_prepared_item' => 'boolean',
     ];
 
     public function tax()
