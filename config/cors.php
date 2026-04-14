@@ -19,7 +19,11 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => ['*'],
+    'allowed_origins' => [
+        '*',
+        'https://passion.in',
+        'https://api.passion.in',
+    ],
 
     'allowed_origins_patterns' => [],
 
