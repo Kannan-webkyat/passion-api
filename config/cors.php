@@ -23,6 +23,10 @@ return [
         '*',
         'https://passions.in',
         'https://api.passions.in',
+        'www.passions.in',
+        'www.api.passions.in',
+        'passion.in',
+        'api.passion.in',
     ],
 
     'allowed_origins_patterns' => [],
