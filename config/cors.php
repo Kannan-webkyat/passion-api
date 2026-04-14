@@ -21,8 +21,8 @@ return [
 
     'allowed_origins' => [
         '*',
-        'https://passion.in',
-        'https://api.passion.in',
+        'https://passions.in',
+        'https://api.passions.in',
     ],
 
     'allowed_origins_patterns' => [],
