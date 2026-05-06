@@ -96,6 +96,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
     Route::get('settings/global', [SettingController::class, 'globalConfig']);
     Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);
+    Route::get('settings/invoice-profile', [SettingController::class, 'invoiceProfile']);
+    Route::put('settings/invoice-profile', [SettingController::class, 'updateInvoiceProfile']);
+    Route::get('settings/invoice-bank', [SettingController::class, 'invoiceBank']);
+    Route::put('settings/invoice-bank', [SettingController::class, 'updateInvoiceBank']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);

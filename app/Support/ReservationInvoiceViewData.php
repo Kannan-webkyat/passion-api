@@ -7,6 +7,7 @@ use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Setting;
 use Carbon\Carbon;
+use DateTimeInterface;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Str;
 
@@ -24,8 +25,8 @@ final class ReservationInvoiceViewData
         $guestName = strtoupper(trim(($booking->first_name ?? '').' '.($booking->last_name ?? '')));
         $guestName = $guestName !== '' ? $guestName : 'GUEST';
 
-        $checkIn = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
-        $checkOut = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
+        $checkInRaw = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
+        $checkOutRaw = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
 
         $roomNo = (string) ($booking->room?->room_number ?? '-');
         $roomType = (string) ($booking->room?->roomType?->name ?? '-');
@@ -33,13 +34,21 @@ final class ReservationInvoiceViewData
 
         $ratePlan = $booking->rate_plan_id ? RatePlan::find($booking->rate_plan_id) : null;
         $meal = (string) ($ratePlan?->meal_plan_type ?? '');
-        $rateTypeLabel = match ($meal) {
-            'breakfast' => 'CP',
-            'half_board' => 'MAP',
-            'full_board' => 'AP',
-            'room_only' => 'RO',
-            default => $ratePlan ? Str::limit((string) $ratePlan->name, 16, '') : '—',
-        };
+        // Prefer admin-configured plan name; abbreviations only when name is empty (matches Room Types).
+        $planName = trim((string) ($ratePlan?->name ?? ''));
+        if ($planName !== '') {
+            $rateTypeLabel = Str::limit($planName, 96, '…');
+        } elseif ($ratePlan && $meal !== '') {
+            $rateTypeLabel = match ($meal) {
+                'breakfast' => 'CP',
+                'half_board' => 'MAP',
+                'full_board' => 'AP',
+                'room_only' => 'EP',
+                default => '—',
+            };
+        } else {
+            $rateTypeLabel = '—';
+        }
 
         $adults = (int) ($booking->adults_count ?? 1);
         $children = (int) ($booking->children_count ?? 0);
@@ -47,12 +56,17 @@ final class ReservationInvoiceViewData
 
         $nights = 1;
         if (($booking->booking_unit ?? 'day') !== 'hour_package') {
-            $nights = max(1, (int) $checkIn->copy()->startOfDay()->diffInDays($checkOut->copy()->startOfDay()));
+            $nights = max(1, (int) $checkInRaw->copy()->startOfDay()->diffInDays($checkOutRaw->copy()->startOfDay()));
         }
 
-        $extraCharges = (float) ($booking->extra_charges ?? 0);
-        $roomGrand = (float) ($booking->total_price ?? 0);
-        $grossBill = $roomGrand + $extraCharges;
+        $hourPackage = ($booking->booking_unit ?? 'day') === 'hour_package';
+        $checkInDisplay = self::invoiceArrivalDisplayMoment($checkInRaw, $booking);
+        $checkOutDisplay = self::invoiceDepartureDisplayMoment($checkOutRaw, $booking);
+
+        $staySummary = BookingInvoiceRoomStay::summarizeForInvoice($booking);
+        $roomGrand = $staySummary['room_inclusive_grand'];
+        $extraCharges = $staySummary['additive_extra_charges'];
+        $grossBill = $staySummary['gross_before_checkout_discount'];
         $checkoutDisc = max(0.0, min((float) ($booking->checkout_discount_amount ?? 0), $grossBill));
         $grand = max(0.0, $grossBill - $checkoutDisc);
         $paid = (float) ($booking->deposit_amount ?? 0);
@@ -66,7 +80,10 @@ final class ReservationInvoiceViewData
         $roomSgst = $roomTaxAmount / 2;
         $roomCgst = $roomTaxAmount / 2;
 
-        $roomSac = Setting::get('invoice_room_sac', '996311');
+        $roomSac = trim((string) (Setting::get('invoice_room_sac') ?? ''));
+        if ($roomSac === '') {
+            $roomSac = '—';
+        }
 
         $ratePerNightPreTax = $nights > 0 ? ($roomSubTotal / $nights) : $roomSubTotal;
 
@@ -112,7 +129,13 @@ final class ReservationInvoiceViewData
             $sgst = (float) $order->sgst_amount * $ratio;
             $igst = (float) $order->igst_amount * $ratio;
             $outlet = $order->restaurant?->name ?? 'Outlet';
-            $sac = $order->restaurant?->sac_code ?: Setting::get('invoice_fnb_sac', '996331');
+            $sac = trim((string) ($order->restaurant?->sac_code ?? ''));
+            if ($sac === '') {
+                $sac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
+            }
+            if ($sac === '') {
+                $sac = '—';
+            }
             $qty = 1;
             $rate = $rc;
             $particular = 'Room posting ('.$outlet.' · REC-'.$order->id.')';
@@ -141,10 +164,11 @@ final class ReservationInvoiceViewData
             $divF = 1 + ($fbRate / 100);
             $taxableF = $divF > 0 ? ($extraCharges / $divF) : $extraCharges;
             $gstF = $extraCharges - $taxableF;
+            $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
             $lines[] = self::lineRow(
                 $sr++,
                 'Posted to room (F&B / extras)',
-                (string) Setting::get('invoice_fnb_sac', '996331'),
+                $fbSac !== '' ? $fbSac : '—',
                 '1',
                 $fmt($extraCharges),
                 $fmt($extraCharges),
@@ -249,7 +273,7 @@ final class ReservationInvoiceViewData
         $hotelAddress = Setting::get('invoice_address', (string) ($defaults['address'] ?? ''));
         $hotelGstin = Setting::get('invoice_gstin', '');
         $bankCompanyName = Setting::get('invoice_bank_legal_name', $hotelName);
-        $bankDetails = Setting::get('invoice_bank_details', '');
+        $bankDetails = self::invoiceBankDetailLines();
         $sourceOfSupply = Setting::get('property_city', (string) ($booking->city ?? ''));
 
         $remark = trim((string) preg_replace('/\[[^\]]+\]/', '', (string) ($booking->notes ?? '')));
@@ -262,8 +286,8 @@ final class ReservationInvoiceViewData
         $resNo = (string) $booking->id;
 
         $invoiceDate = Carbon::now()->format('d/m/Y h:i:s A');
-        $arrivalStr = $checkIn->format('d/m/Y h:i:s A');
-        $departureStr = $checkOut->format('d/m/Y h:i:s A');
+        $arrivalStr = self::formatInvoiceStayInstant($checkInDisplay, $hourPackage);
+        $departureStr = self::formatInvoiceStayInstant($checkOutDisplay, $hourPackage);
 
         $bookingSource = (string) ($booking->booking_source ?? '—');
         $taVoucher = (string) ($booking->source_reference ?? '—');
@@ -336,6 +360,147 @@ final class ReservationInvoiceViewData
             'bankCompanyName' => $bankCompanyName,
             'bankDetails' => $bankDetails,
         ];
+    }
+
+    /**
+     * Day stays: show arrival clock when early check-in is recorded, ETA is before standard check-in,
+     * or (late checkout is recorded and ETA carries a time — keeps invoice symmetric with departure).
+     * Otherwise date-only when stored check-in is midnight.
+     */
+    private static function invoiceArrivalDisplayMoment(Carbon $raw, Booking $booking): Carbon
+    {
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return $raw->copy();
+        }
+        if ($raw->format('H:i:s') !== '00:00:00') {
+            return $raw->copy();
+        }
+
+        $early = self::normalizeBookingTimeField($booking->early_checkin_time ?? null);
+        if ($early !== '') {
+            return self::mergeBookingClockOntoStayDate($raw, $early);
+        }
+
+        $eta = trim((string) ($booking->estimated_arrival_time ?? ''));
+        if ($eta === '') {
+            return $raw->copy()->startOfDay();
+        }
+
+        // Date-only ETA strings parse as midnight — do not treat as arrival clock.
+        if (! preg_match('/\d{1,2}\s*:\s*\d{2}|am|pm/i', $eta)) {
+            return $raw->copy()->startOfDay();
+        }
+
+        try {
+            $etaCarbon = Carbon::parse($eta);
+            $etaHi = $etaCarbon->format('H:i');
+        } catch (\Throwable) {
+            return $raw->copy()->startOfDay();
+        }
+
+        $standardRaw = (string) Setting::get('standard_check_in_time', '14:00');
+        try {
+            $standardHi = Carbon::parse($standardRaw)->format('H:i');
+        } catch (\Throwable) {
+            $standardHi = '14:00';
+        }
+
+        $hasLateCheckout = self::normalizeBookingTimeField($booking->late_checkout_time ?? null) !== '';
+
+        // Before policy check-in → show (matches assignEarlyCheckinTimeFromEstimatedArrival intent).
+        if ($etaHi < $standardHi) {
+            return self::mergeBookingClockOntoStayDate($raw, $eta);
+        }
+
+        // Same as policy but departure shows negotiated late time — show requested arrival too.
+        if ($hasLateCheckout) {
+            return self::mergeBookingClockOntoStayDate($raw, $eta);
+        }
+
+        return $raw->copy()->startOfDay();
+    }
+
+    /** Day stays: show clock only when late checkout is recorded; else date-only if midnight. */
+    private static function invoiceDepartureDisplayMoment(Carbon $raw, Booking $booking): Carbon
+    {
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return $raw->copy();
+        }
+        if ($raw->format('H:i:s') !== '00:00:00') {
+            return $raw->copy();
+        }
+        $late = self::normalizeBookingTimeField($booking->late_checkout_time ?? null);
+        if ($late === '') {
+            return $raw->copy()->startOfDay();
+        }
+
+        return self::mergeBookingClockOntoStayDate($raw, $late);
+    }
+
+    private static function normalizeBookingTimeField(mixed $value): string
+    {
+        if ($value === null) {
+            return '';
+        }
+        if ($value instanceof \Carbon\CarbonInterface) {
+            return $value->format('H:i:s');
+        }
+        if ($value instanceof DateTimeInterface) {
+            return Carbon::parse($value)->format('H:i:s');
+        }
+
+        return trim((string) $value);
+    }
+
+    /** Interpret booking time / datetime field as clock on the stay date for invoice lines. */
+    private static function mergeBookingClockOntoStayDate(Carbon $raw, string $clockOrDatetime): Carbon
+    {
+        $clockOrDatetime = trim($clockOrDatetime);
+        if ($clockOrDatetime === '') {
+            return $raw->copy()->startOfDay();
+        }
+        try {
+            $t = Carbon::parse($clockOrDatetime);
+            if (preg_match('/^\d{4}-\d{2}-\d{2}/', $clockOrDatetime)) {
+                return $t->copy();
+            }
+
+            return $raw->copy()->startOfDay()->setTime($t->hour, $t->minute, 0);
+        } catch (\Throwable) {
+            return $raw->copy()->startOfDay();
+        }
+    }
+
+    /**
+     * Labelled bank lines for invoice footer; falls back to legacy free-text invoice_bank_details when no structured fields are set.
+     */
+    private static function invoiceBankDetailLines(): string
+    {
+        $rows = [
+            ['Bank name', trim((string) Setting::get('invoice_bank_name', ''))],
+            ['Account no.', trim((string) Setting::get('invoice_bank_account_no', ''))],
+            ['IFSC', trim((string) Setting::get('invoice_bank_ifsc', ''))],
+            ['Branch', trim((string) Setting::get('invoice_bank_branch', ''))],
+            ['SWIFT / BIC', trim((string) Setting::get('invoice_bank_swift', ''))],
+        ];
+        $lines = [];
+        foreach ($rows as [$label, $value]) {
+            if ($value !== '') {
+                $lines[] = $label.': '.$value;
+            }
+        }
+        $composed = implode("\n", $lines);
+
+        return $composed !== '' ? $composed : trim((string) Setting::get('invoice_bank_details', ''));
+    }
+
+    private static function formatInvoiceStayInstant(Carbon $moment, bool $hourPackage): string
+    {
+        if ($hourPackage || $moment->format('H:i:s') !== '00:00:00') {
+            return $moment->format('d/m/Y h:i:s A');
+        }
+
+        return $moment->format('d/m/Y');
     }
 
     private static function lineRow(
