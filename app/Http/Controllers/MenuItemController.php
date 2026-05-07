@@ -37,12 +37,24 @@ class MenuItemController extends Controller
         }
     }
 
+    /** Empty or whitespace-only item code is stored as null (multiple nulls allowed under unique). */
+    private function mergeNormalizedItemCode(Request $request): void
+    {
+        if (! $request->has('item_code')) {
+            return;
+        }
+        $raw = $request->input('item_code');
+        $normalized = (is_string($raw) && trim($raw) !== '') ? trim($raw) : null;
+        $request->merge(['item_code' => $normalized]);
+    }
+
     public function store(Request $request)
     {
         $this->checkPermission('manage-menu');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
+        $this->mergeNormalizedItemCode($request);
         $validated = $request->validate([
-            'item_code' => 'required|string|unique:menu_items',
+            'item_code' => 'nullable|string|max:255|unique:menu_items,item_code',
             'name' => 'required|string|max:255',
             'menu_category_id' => 'required|exists:menu_categories,id',
             'menu_sub_category_id' => [
@@ -104,8 +116,9 @@ class MenuItemController extends Controller
     {
         $this->checkPermission('manage-menu');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
+        $this->mergeNormalizedItemCode($request);
         $validated = $request->validate([
-            'item_code' => 'sometimes|required|string|unique:menu_items,item_code,'.$menuItem->id,
+            'item_code' => 'nullable|string|max:255|unique:menu_items,item_code,'.$menuItem->id,
             'name' => 'sometimes|required|string|max:255',
             'menu_category_id' => 'sometimes|required|exists:menu_categories,id',
             'menu_sub_category_id' => [

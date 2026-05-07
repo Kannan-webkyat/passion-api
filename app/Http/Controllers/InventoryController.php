@@ -3,9 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryItem;
+use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class InventoryController extends Controller
 {
@@ -28,6 +30,17 @@ class InventoryController extends Controller
         }
     }
 
+    /** Empty or whitespace-only SKU is stored as null (multiple nulls allowed under unique). */
+    private function mergeNormalizedSku(Request $request): void
+    {
+        if (! $request->has('sku')) {
+            return;
+        }
+        $raw = $request->input('sku');
+        $normalized = (is_string($raw) && trim($raw) !== '') ? trim($raw) : null;
+        $request->merge(['sku' => $normalized]);
+    }
+
     public function index()
     {
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get();
@@ -47,9 +60,10 @@ class InventoryController extends Controller
     public function store(Request $request)
     {
         $this->checkPermission('manage-inventory');
+        $this->mergeNormalizedSku($request);
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'sku' => 'required|string|max:100|unique:inventory_items,sku',
+            'sku' => 'nullable|string|max:100|unique:inventory_items,sku',
             'category_id' => 'required|exists:inventory_categories,id',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
             'purchase_uom_id' => 'required|exists:inventory_uoms,id',
@@ -114,9 +128,10 @@ class InventoryController extends Controller
     public function update(Request $request, InventoryItem $item)
     {
         $this->checkPermission('manage-inventory');
+        $this->mergeNormalizedSku($request);
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'sku' => 'required|string|max:100|unique:inventory_items,sku,'.$item->id,
+            'sku' => 'nullable|string|max:100|unique:inventory_items,sku,'.$item->id,
             'category_id' => 'required|exists:inventory_categories,id',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
             'purchase_uom_id' => 'required|exists:inventory_uoms,id',
@@ -214,16 +229,16 @@ class InventoryController extends Controller
     {
         $this->checkPermission('manage-inventory');
         $validated = $request->validate([
-            'item_id'        => 'required|exists:inventory_items,id',
-            'location_id'    => 'required|exists:inventory_locations,id',
-            'quantity'       => 'required|numeric|min:0.01',
+            'item_id' => 'required|exists:inventory_items,id',
+            'location_id' => 'required|exists:inventory_locations,id',
+            'quantity' => 'required|numeric|min:0.01',
             'to_location_id' => 'nullable|exists:inventory_locations,id',
-            'notes'          => 'nullable|string',
+            'notes' => 'nullable|string',
         ]);
 
-        $item        = \App\Models\InventoryItem::findOrFail($validated['item_id']);
+        $item = \App\Models\InventoryItem::findOrFail($validated['item_id']);
         $sourceLocation = \App\Models\InventoryLocation::findOrFail($validated['location_id']);
-        $destLocation   = isset($validated['to_location_id'])
+        $destLocation = isset($validated['to_location_id'])
             ? \App\Models\InventoryLocation::find($validated['to_location_id'])
             : null;
 
@@ -242,22 +257,22 @@ class InventoryController extends Controller
                 ->decrement('quantity', $validated['quantity']);
 
             $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
-            $qty      = (float) $validated['quantity'];
-            $refId    = (string) \Illuminate\Support\Str::uuid();
+            $qty = (float) $validated['quantity'];
+            $refId = (string) \Illuminate\Support\Str::uuid();
 
             // 3. Log OUT Transaction
             $outTx = \App\Models\InventoryTransaction::create([
-                'inventory_item_id'    => $item->id,
-                'inventory_location_id'=> $sourceLocation->id,
-                'type'                 => 'out',
-                'quantity'             => $qty,
-                'unit_cost'            => round($unitCost, 4),
-                'total_cost'           => round($qty * $unitCost, 2),
-                'reason'               => $destLocation ? 'Transfer' : 'Consumption',
-                'notes'                => $validated['notes'] ?? ($destLocation ? "Transfer to {$destLocation->name}" : "Manual consumption"),
-                'user_id'              => auth()->id(),
-                'reference_id'         => $refId,
-                'reference_type'       => 'requisition',
+                'inventory_item_id' => $item->id,
+                'inventory_location_id' => $sourceLocation->id,
+                'type' => 'out',
+                'quantity' => $qty,
+                'unit_cost' => round($unitCost, 4),
+                'total_cost' => round($qty * $unitCost, 2),
+                'reason' => $destLocation ? 'Transfer' : 'Consumption',
+                'notes' => $validated['notes'] ?? ($destLocation ? "Transfer to {$destLocation->name}" : 'Manual consumption'),
+                'user_id' => auth()->id(),
+                'reference_id' => $refId,
+                'reference_type' => 'requisition',
             ]);
 
             // 4. Handle Transfer (Increment Destination)
@@ -272,17 +287,17 @@ class InventoryController extends Controller
                     ->increment('quantity', $qty);
 
                 \App\Models\InventoryTransaction::create([
-                    'inventory_item_id'    => $item->id,
-                    'inventory_location_id'=> $destLocation->id,
-                    'type'                 => 'in',
-                    'quantity'             => $qty,
-                    'unit_cost'            => round($unitCost, 4),
-                    'total_cost'           => round($qty * $unitCost, 2),
-                    'reason'               => 'Transfer',
-                    'notes'                => "Received from {$sourceLocation->name}",
-                    'user_id'              => auth()->id(),
-                    'reference_id'         => $refId,
-                    'reference_type'       => 'requisition',
+                    'inventory_item_id' => $item->id,
+                    'inventory_location_id' => $destLocation->id,
+                    'type' => 'in',
+                    'quantity' => $qty,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($qty * $unitCost, 2),
+                    'reason' => 'Transfer',
+                    'notes' => "Received from {$sourceLocation->name}",
+                    'user_id' => auth()->id(),
+                    'reference_id' => $refId,
+                    'reference_type' => 'requisition',
                 ]);
             }
 
@@ -368,7 +383,239 @@ class InventoryController extends Controller
             ]);
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
+    }
+
+    /**
+     * Single linked "recovery / breakdown" posting: consume a source SKU at a location,
+     * optionally add recovered SKUs and post wastage lines — all share one reference_id.
+     */
+    public function recoveryBreakdown(Request $request)
+    {
+        $this->checkPermission('manage-inventory');
+
+        $validated = $request->validate([
+            'inventory_location_id' => 'required|exists:inventory_locations,id',
+            'source_inventory_item_id' => 'required|exists:inventory_items,id',
+            'source_quantity' => 'required|numeric|min:0.001',
+            'recovered' => 'nullable|array',
+            'recovered.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'recovered.*.quantity' => 'required|numeric|min:0.001',
+            'wasted' => 'nullable|array',
+            'wasted.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'wasted.*.quantity' => 'required|numeric|min:0.001',
+            'notes' => 'nullable|string|max:500',
+        ]);
+
+        $location = InventoryLocation::findOrFail($validated['inventory_location_id']);
+        $sourceId = (int) $validated['source_inventory_item_id'];
+        $sourceQty = (float) $validated['source_quantity'];
+
+        $recovered = $this->mergeRecoveryLines($validated['recovered'] ?? []);
+        $wasted = $this->mergeRecoveryLines($validated['wasted'] ?? []);
+
+        if ($recovered->isEmpty() && $wasted->isEmpty()) {
+            return response()->json([
+                'message' => 'Add at least one recovered or wasted line (quantities going back to stock or to wastage).',
+            ], 422);
+        }
+
+        foreach ($recovered->pluck('inventory_item_id') as $rid) {
+            if ($rid === $sourceId) {
+                return response()->json([
+                    'message' => 'Recovered lines cannot use the same inventory item as the source.',
+                ], 422);
+            }
+        }
+        foreach ($wasted->pluck('inventory_item_id') as $wid) {
+            if ($wid === $sourceId) {
+                return response()->json([
+                    'message' => 'Wasted lines cannot use the same inventory item as the source.',
+                ], 422);
+            }
+        }
+
+        $recoveredIds = $recovered->pluck('inventory_item_id')->all();
+        $wastedIds = $wasted->pluck('inventory_item_id')->all();
+        if (count(array_intersect($recoveredIds, $wastedIds)) > 0) {
+            return response()->json([
+                'message' => 'The same inventory item cannot appear in both recovered and wasted lines.',
+            ], 422);
+        }
+
+        $locId = (int) $location->id;
+        $available = (float) (DB::table('inventory_item_locations')
+            ->where('inventory_item_id', $sourceId)
+            ->where('inventory_location_id', $locId)
+            ->value('quantity') ?? 0);
+
+        if ($available + 1e-6 < $sourceQty) {
+            return response()->json([
+                'message' => 'Insufficient stock at this location for the source item.',
+                'required' => $sourceQty,
+                'available' => $available,
+            ], 422);
+        }
+
+        foreach ($wasted as $row) {
+            $wasteItemId = (int) $row['inventory_item_id'];
+            $wasteQty = (float) $row['quantity'];
+            $wasteAvail = (float) (DB::table('inventory_item_locations')
+                ->where('inventory_item_id', $wasteItemId)
+                ->where('inventory_location_id', $locId)
+                ->value('quantity') ?? 0);
+            if ($wasteAvail + 1e-6 < $wasteQty) {
+                return response()->json([
+                    'message' => 'Insufficient stock at this location for a wasted line.',
+                    'inventory_item_id' => $wasteItemId,
+                    'required' => $wasteQty,
+                    'available' => $wasteAvail,
+                ], 422);
+            }
+        }
+
+        $refId = (string) Str::uuid();
+        $refType = 'recovery_breakdown';
+        $userNote = trim((string) ($validated['notes'] ?? ''));
+        $noteSuffix = $userNote !== '' ? "{$userNote} | Ref {$refId}" : "Ref {$refId}";
+
+        $affectedIds = [];
+
+        try {
+            DB::transaction(function () use ($sourceId, $sourceQty, $locId, $location, $recovered, $wasted, $refId, $refType, $noteSuffix, &$affectedIds) {
+                $this->recoveryDecrementLocation($sourceId, $locId, $sourceQty, $location->department_id, $refId, $refType, 'Recovery: source consumed', $noteSuffix);
+                $affectedIds[] = $sourceId;
+
+                foreach ($wasted as $row) {
+                    $id = (int) $row['inventory_item_id'];
+                    $qty = (float) $row['quantity'];
+                    $this->recoveryDecrementLocation($id, $locId, $qty, $location->department_id, $refId, $refType, 'Wastage', $noteSuffix);
+                    $affectedIds[] = $id;
+                }
+
+                foreach ($recovered as $row) {
+                    $id = (int) $row['inventory_item_id'];
+                    $qty = (float) $row['quantity'];
+                    $this->recoveryIncrementLocation($id, $locId, $qty, $location->department_id, $refId, $refType, 'Recovery: returned to stock', $noteSuffix);
+                    $affectedIds[] = $id;
+                }
+            });
+
+            foreach (array_unique($affectedIds) as $itemId) {
+                InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+            }
+        } catch (\Exception $e) {
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+
+        return response()->json([
+            'message' => 'Recovery / breakdown recorded.',
+            'reference_id' => $refId,
+            'reference_type' => $refType,
+        ], 201);
+    }
+
+    /**
+     * @param  array<int, array{inventory_item_id?: mixed, quantity?: mixed}>  $rows
+     * @return \Illuminate\Support\Collection<int, array{inventory_item_id: int, quantity: float}>
+     */
+    private function mergeRecoveryLines(array $rows)
+    {
+        $map = [];
+        foreach ($rows as $row) {
+            $id = (int) ($row['inventory_item_id'] ?? 0);
+            $q = (float) ($row['quantity'] ?? 0);
+            if ($id < 1 || $q <= 0) {
+                continue;
+            }
+            $map[$id] = ($map[$id] ?? 0) + $q;
+        }
+
+        return collect($map)->map(fn (float $qty, int $id) => [
+            'inventory_item_id' => $id,
+            'quantity' => round($qty, 4),
+        ])->values();
+    }
+
+    private function recoveryDecrementLocation(
+        int $inventoryItemId,
+        int $locationId,
+        float $qtyAbs,
+        ?int $departmentId,
+        string $refId,
+        string $refType,
+        string $reason,
+        string $notes
+    ): void {
+        $item = InventoryItem::findOrFail($inventoryItemId);
+        $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
+        $lineCost = round($qtyAbs * $unitCost, 2);
+
+        DB::table('inventory_item_locations')->updateOrInsert(
+            ['inventory_item_id' => $inventoryItemId, 'inventory_location_id' => $locationId],
+            ['updated_at' => now(), 'created_at' => now()]
+        );
+
+        DB::table('inventory_item_locations')
+            ->where('inventory_item_id', $inventoryItemId)
+            ->where('inventory_location_id', $locationId)
+            ->decrement('quantity', $qtyAbs);
+
+        InventoryTransaction::create([
+            'inventory_item_id' => $inventoryItemId,
+            'inventory_location_id' => $locationId,
+            'department_id' => $departmentId,
+            'type' => 'out',
+            'quantity' => $qtyAbs,
+            'unit_cost' => round($unitCost, 4),
+            'total_cost' => $lineCost,
+            'reason' => $reason,
+            'notes' => $notes,
+            'user_id' => auth()->id(),
+            'reference_id' => $refId,
+            'reference_type' => $refType,
+        ]);
+    }
+
+    private function recoveryIncrementLocation(
+        int $inventoryItemId,
+        int $locationId,
+        float $qtyAbs,
+        ?int $departmentId,
+        string $refId,
+        string $refType,
+        string $reason,
+        string $notes
+    ): void {
+        $item = InventoryItem::findOrFail($inventoryItemId);
+        $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
+        $lineCost = round($qtyAbs * $unitCost, 2);
+
+        DB::table('inventory_item_locations')->updateOrInsert(
+            ['inventory_item_id' => $inventoryItemId, 'inventory_location_id' => $locationId],
+            ['updated_at' => now(), 'created_at' => now()]
+        );
+
+        DB::table('inventory_item_locations')
+            ->where('inventory_item_id', $inventoryItemId)
+            ->where('inventory_location_id', $locationId)
+            ->increment('quantity', $qtyAbs);
+
+        InventoryTransaction::create([
+            'inventory_item_id' => $inventoryItemId,
+            'inventory_location_id' => $locationId,
+            'department_id' => $departmentId,
+            'type' => 'in',
+            'quantity' => $qtyAbs,
+            'unit_cost' => round($unitCost, 4),
+            'total_cost' => $lineCost,
+            'reason' => $reason,
+            'notes' => $notes,
+            'user_id' => auth()->id(),
+            'reference_id' => $refId,
+            'reference_type' => $refType,
+        ]);
     }
 }

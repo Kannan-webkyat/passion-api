@@ -2,15 +2,15 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\InventoryCategory;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
-use App\Models\InventoryCategory;
+use App\Models\InventoryTransaction;
+use App\Models\PosOrderItem;
+use App\Models\PurchaseOrder;
+use App\Models\Vendor;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use App\Models\InventoryTransaction;
-use App\Models\PurchaseOrder;
-use App\Models\PosOrderItem;
-use App\Models\Vendor;
 
 class InventoryReportController extends Controller
 {
@@ -62,7 +62,7 @@ class InventoryReportController extends Controller
         if ($search) {
             $query->where(function ($q) use ($search) {
                 $q->where('inventory_items.name', 'like', "%{$search}%")
-                  ->orWhere('inventory_items.sku', 'like', "%{$search}%");
+                    ->orWhere('inventory_items.sku', 'like', "%{$search}%");
             });
         }
 
@@ -77,15 +77,15 @@ class InventoryReportController extends Controller
 
         $report = $items->map(function ($item) use ($stockData, $locations, $locationId) {
             $itemStocks = $stockData->get($item->id) ?? collect();
-            
+
             $locationBreakdown = [];
             $totalQty = 0;
 
             foreach ($locations as $loc) {
                 $qty = (float) ($itemStocks->where('inventory_location_id', $loc->id)->first()?->quantity ?? 0);
                 $locationBreakdown[$loc->id] = $qty;
-                
-                if (!$locationId || $locationId == $loc->id) {
+
+                if (! $locationId || $locationId == $loc->id) {
                     $totalQty += $qty;
                 }
             }
@@ -104,12 +104,12 @@ class InventoryReportController extends Controller
                 'total_qty' => round($totalQty, 3),
                 'valuation' => round($valuationValue, 2),
                 'is_low' => $totalQty <= ($item->reorder_level ?? 0),
-                'location_stock' => $locationBreakdown
+                'location_stock' => $locationBreakdown,
             ];
         });
 
         if ($locationId && $locationId !== 'all') {
-            $report = $report->filter(fn($r) => $r['location_stock'][$locationId] != 0)->values();
+            $report = $report->filter(fn ($r) => $r['location_stock'][$locationId] != 0)->values();
         }
 
         return response()->json([
@@ -120,7 +120,7 @@ class InventoryReportController extends Controller
                 'low_stock_count' => $report->where('is_low', true)->count(),
             ],
             'locations' => $locations,
-            'categories' => InventoryCategory::all()
+            'categories' => InventoryCategory::all(),
         ]);
     }
 
@@ -138,10 +138,18 @@ class InventoryReportController extends Controller
         $query = InventoryTransaction::with(['item.issueUom', 'location', 'user'])
             ->orderBy('created_at', 'desc');
 
-        if ($itemId) $query->where('inventory_item_id', $itemId);
-        if ($locationId) $query->where('inventory_location_id', $locationId);
-        if ($startDate) $query->whereDate('created_at', '>=', $startDate);
-        if ($endDate) $query->whereDate('created_at', '<=', $endDate);
+        if ($itemId) {
+            $query->where('inventory_item_id', $itemId);
+        }
+        if ($locationId) {
+            $query->where('inventory_location_id', $locationId);
+        }
+        if ($startDate) {
+            $query->whereDate('created_at', '>=', $startDate);
+        }
+        if ($endDate) {
+            $query->whereDate('created_at', '<=', $endDate);
+        }
 
         $transactions = $query->paginate(50);
 
@@ -161,36 +169,38 @@ class InventoryReportController extends Controller
         $locationId = $request->query('location_id');
 
         $salesItems = PosOrderItem::with([
-                'menuItem.recipe.ingredients.inventoryItem', 
-                'variant',
-                'combo.menuItems.recipe.ingredients.inventoryItem',
-                'combo.menuItems.variant',
-                'order.restaurant'
-            ])
+            'menuItem.recipe.ingredients.inventoryItem',
+            'variant',
+            'combo.menuItems.recipe.ingredients.inventoryItem',
+            'combo.menuItems.variant',
+            'order.restaurant',
+        ])
             ->where('inventory_deducted', true)
-            ->whereBetween('created_at', [$startDate . ' 00:00:00', $endDate . ' 23:59:59']);
+            ->whereBetween('created_at', [$startDate.' 00:00:00', $endDate.' 23:59:59']);
 
         if ($locationId) {
-            $salesItems->whereHas('order.restaurant', function($r) use ($locationId) {
+            $salesItems->whereHas('order.restaurant', function ($r) use ($locationId) {
                 $r->where('kitchen_location_id', $locationId)
-                  ->orWhere('bar_location_id', $locationId);
+                    ->orWhere('bar_location_id', $locationId);
             });
         }
 
         $salesItems = $salesItems->get();
 
-        $theoretical = []; 
-        
-        $processItem = function($orderItem, $parentQty = null, $restaurant = null) use (&$theoretical, $locationId) {
+        $theoretical = [];
+
+        $processItem = function ($orderItem, $parentQty = null, $restaurant = null) use (&$theoretical, $locationId) {
             $menuItem = $orderItem->menuItem;
-            if (!$menuItem) return;
+            if (! $menuItem) {
+                return;
+            }
 
             $qty = $parentQty ?? $orderItem->quantity;
             $recipe = $menuItem->recipe;
-            
+
             // Determine likely deduction location for this item
-            $itemLocationId = ($menuItem->is_direct_sale && $restaurant && $restaurant->bar_location_id) 
-                ? $restaurant->bar_location_id 
+            $itemLocationId = ($menuItem->is_direct_sale && $restaurant && $restaurant->bar_location_id)
+                ? $restaurant->bar_location_id
                 : ($restaurant ? $restaurant->kitchen_location_id : null);
 
             // If we are filtering by a specific location, only count if it matches
@@ -198,22 +208,21 @@ class InventoryReportController extends Controller
                 return;
             }
 
-            if ($recipe && $recipe->is_active && !($recipe->requires_production ?? true)) {
-                $yield = max(1, (float)($recipe->yield_quantity ?? 1));
+            if ($recipe && $recipe->is_active && ! ($recipe->requires_production ?? true)) {
+                $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                 // Apply variant portion-size scaling (matches POS deduction logic)
                 $scale = 1.0;
-                if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
+                if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
                     $scale = $ml;
                 }
                 $multiplier = ($qty * $scale) / $yield;
                 foreach ($recipe->ingredients as $ing) {
                     $theoretical[$ing->inventory_item_id] = ($theoretical[$ing->inventory_item_id] ?? 0) + ($ing->raw_quantity * $multiplier);
                 }
-            } 
-            elseif ($menuItem->inventory_item_id) {
-                $deductQty = (float)$qty;
-                if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                    $deductQty = $ml * (float)$qty;
+            } elseif ($menuItem->inventory_item_id) {
+                $deductQty = (float) $qty;
+                if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                    $deductQty = $ml * (float) $qty;
                 }
                 $theoretical[$menuItem->inventory_item_id] = ($theoretical[$menuItem->inventory_item_id] ?? 0) + $deductQty;
             }
@@ -223,11 +232,11 @@ class InventoryReportController extends Controller
             $restaurant = $sale->order?->restaurant;
             if ($sale->combo_id && $sale->combo) {
                 foreach ($sale->combo->menuItems as $cmi) {
-                    $dummy = (object)[
+                    $dummy = (object) [
                         'menuItem' => $cmi,
                         'quantity' => $sale->quantity,
                         'menu_item_variant_id' => null,
-                        'variant' => null
+                        'variant' => null,
                     ];
                     $processItem($dummy, $sale->quantity, $restaurant);
                 }
@@ -276,9 +285,9 @@ class InventoryReportController extends Controller
         $itemIds = collect($theoretical)->keys()->merge(collect($actuals)->keys())->unique();
         $items = InventoryItem::with(['issueUom', 'category'])->whereIn('id', $itemIds)->get();
 
-        $report = $items->map(function($item) use ($theoretical, $actuals) {
+        $report = $items->map(function ($item) use ($theoretical, $actuals) {
             $theo = (float) ($theoretical[$item->id] ?? 0);
-            $act  = (float) ($actuals[$item->id] ?? 0);
+            $act = (float) ($actuals[$item->id] ?? 0);
             $variance = $act - $theo;
             $variancePct = $theo > 1e-6 ? ($variance / $theo) * 100 : ($act > 1e-6 ? 100 : 0);
             $unitCost = (float) ($item->cost_price ?? 0) / (float) ($item->conversion_factor ?: 1);
@@ -294,23 +303,24 @@ class InventoryReportController extends Controller
                 'variance' => round($variance, 3),
                 'variance_percentage' => round($variancePct, 1),
                 'cost_price' => round($unitCost, 2),
-                'variance_value' => round($variance * $unitCost, 2)
+                'variance_value' => round($variance * $unitCost, 2),
             ];
-        })->sortByDesc(fn($r) => abs($r['variance_value']))->values();
+        })->sortByDesc(fn ($r) => abs($r['variance_value']))->values();
 
         return response()->json([
             'data' => $report,
             'summary' => [
-                'total_theoretical_cost' => round($report->sum(fn($r) => $r['theoretical_usage'] * $r['cost_price']), 2),
-                'total_actual_cost' => round($report->sum(fn($r) => $r['actual_usage'] * $r['cost_price']), 2),
+                'total_theoretical_cost' => round($report->sum(fn ($r) => $r['theoretical_usage'] * $r['cost_price']), 2),
+                'total_actual_cost' => round($report->sum(fn ($r) => $r['actual_usage'] * $r['cost_price']), 2),
                 'total_variance_value' => round($report->sum('variance_value'), 2),
-                'high_variance_count' => $report->filter(fn($r) => abs($r['variance_percentage'] ?? 0) > 10)->count(),
-            ]
+                'high_variance_count' => $report->filter(fn ($r) => abs($r['variance_percentage'] ?? 0) > 10)->count(),
+            ],
         ]);
     }
 
     /**
-     * Wastage & Adjustments Report — reasons must match {@see InventoryController::adjustStock}.
+     * Wastage & Adjustments Report — reasons match {@see InventoryController::adjustStock}
+     * and recovery lines from {@see InventoryController::recoveryBreakdown}.
      */
     public function adjustments(Request $request)
     {
@@ -323,6 +333,8 @@ class InventoryReportController extends Controller
         $adjustmentReasons = [
             'Wastage', 'Expired', 'Breakage', 'Theft', 'Staff meal',
             'Manual Adjustment', 'Correction', 'Components Stored', 'Assembled from Storage',
+            'Recovery: source consumed',
+            'Recovery: returned to stock',
         ];
 
         $query = InventoryTransaction::with(['item.issueUom', 'user', 'location'])
@@ -367,6 +379,8 @@ class InventoryReportController extends Controller
                 'location_name' => $t->location?->name ?? 'N/A',
                 'user_name' => $t->user?->name ?? 'System',
                 'created_at' => $t->created_at->toIso8601String(),
+                'reference_id' => $t->reference_id,
+                'reference_type' => $t->reference_type,
             ];
         });
 
@@ -386,6 +400,101 @@ class InventoryReportController extends Controller
         return response()->json([
             'data' => $data->values(),
             'summary' => $summary,
+        ]);
+    }
+
+    /**
+     * Recovery / breakdown report.
+     * Group recovery transactions by reference_id for clean audit.
+     * GET /inventory/reports/recovery?from=&to=&search=
+     */
+    public function recovery(Request $request)
+    {
+        $this->checkPermission('inventory-report-adjustments');
+
+        $startDate = $request->query('from') ?? $request->query('start_date');
+        $endDate = $request->query('to') ?? $request->query('end_date');
+        $search = trim((string) $request->query('search', ''));
+
+        $query = InventoryTransaction::with(['item.issueUom', 'user', 'location'])
+            ->where('reference_type', 'recovery_breakdown')
+            ->whereNotNull('reference_id')
+            ->orderBy('created_at', 'desc');
+
+        if ($startDate) {
+            $query->whereDate('created_at', '>=', $startDate);
+        }
+        if ($endDate) {
+            $query->whereDate('created_at', '<=', $endDate);
+        }
+        if ($search !== '') {
+            $term = '%'.addcslashes($search, '%_\\').'%';
+            $query->where(function ($q) use ($term) {
+                $q->whereHas('item', function ($iq) use ($term) {
+                    $iq->where('name', 'like', $term)
+                        ->orWhere('sku', 'like', $term);
+                })->orWhereHas('user', function ($uq) use ($term) {
+                    $uq->where('name', 'like', $term);
+                })->orWhereHas('location', function ($lq) use ($term) {
+                    $lq->where('name', 'like', $term);
+                })->orWhere('notes', 'like', $term);
+            });
+        }
+
+        $rows = $query->get();
+        $groups = $rows->groupBy('reference_id');
+
+        $data = $groups->map(function ($txs, $refId) {
+            $first = $txs->sortBy('created_at')->first();
+            $createdAt = $first?->created_at?->toIso8601String();
+            $locationName = $first?->location?->name ?? 'N/A';
+            $userName = $first?->user?->name ?? 'System';
+
+            $source = $txs->firstWhere('reason', 'Recovery: source consumed');
+            $sourceRow = $source ? [
+                'inventory_item_id' => $source->inventory_item_id,
+                'item_name' => $source->item?->name ?? 'Unknown',
+                'sku' => $source->item?->sku ?? '-',
+                'qty' => (float) $source->quantity,
+                'uom' => $source->item?->issueUom?->short_name ?? '-',
+            ] : null;
+
+            $recovered = $txs->where('reason', 'Recovery: returned to stock')->map(fn ($t) => [
+                'inventory_item_id' => $t->inventory_item_id,
+                'item_name' => $t->item?->name ?? 'Unknown',
+                'sku' => $t->item?->sku ?? '-',
+                'qty' => (float) $t->quantity,
+                'uom' => $t->item?->issueUom?->short_name ?? '-',
+            ])->values();
+
+            $wasted = $txs->where('reason', 'Wastage')->map(fn ($t) => [
+                'inventory_item_id' => $t->inventory_item_id,
+                'item_name' => $t->item?->name ?? 'Unknown',
+                'sku' => $t->item?->sku ?? '-',
+                'qty' => (float) $t->quantity,
+                'uom' => $t->item?->issueUom?->short_name ?? '-',
+            ])->values();
+
+            $notes = $txs->pluck('notes')->filter()->unique()->values();
+
+            return [
+                'reference_id' => $refId,
+                'created_at' => $createdAt,
+                'location_name' => $locationName,
+                'user_name' => $userName,
+                'source' => $sourceRow,
+                'recovered' => $recovered,
+                'wasted' => $wasted,
+                'notes' => $notes,
+            ];
+        })->values();
+
+        return response()->json([
+            'data' => $data,
+            'summary' => [
+                'groups' => $data->count(),
+                'rows' => $rows->count(),
+            ],
         ]);
     }
 
@@ -724,6 +833,213 @@ class InventoryReportController extends Controller
     }
 
     /**
+     * Excise (Bar) Report
+     *
+     * Excel-style output:
+     * - Opening: bottles + loose litres
+     * - Receipts: bottles + loose litres
+     * - Sales: bottles + pegs (1 peg = 60ml by default)
+     * - Closing: bottles + loose litres
+     *
+     * Assumptions:
+     * - Spirits are tracked in ml (issue UOM = ml, conversion_factor = bottle ml)
+     * - Beer is tracked in pcs (issue UOM = Pcs, conversion_factor = 1)
+     * - POS generates inventory_transactions out rows with reason 'POS Order'
+     */
+    public function exciseBar(Request $request)
+    {
+        $this->checkPermission('inventory-report-summary');
+
+        $date = $request->query('date') ?? $request->query('business_date');
+        if (! $date) {
+            return response()->json(['message' => 'date is required (YYYY-MM-DD).'], 422);
+        }
+
+        $locationId = $request->query('location_id');
+        if (! $locationId || $locationId === 'auto') {
+            $locationId = InventoryLocation::query()->where('type', 'bar_store')->orderBy('id')->value('id');
+        }
+        if (! $locationId) {
+            return response()->json(['message' => 'No bar store location found.'], 422);
+        }
+
+        $pegMl = (float) ($request->query('peg_ml') ?? 60);
+        $pegMl = $pegMl > 0 ? $pegMl : 60;
+
+        $start = \Carbon\Carbon::parse($date)->startOfDay();
+        $end = \Carbon\Carbon::parse($date)->endOfDay();
+
+        // Items present in this bar store (even zero, we still allow report)
+        $qtyNowByItemId = DB::table('inventory_item_locations')
+            ->where('inventory_location_id', $locationId)
+            ->selectRaw('inventory_item_id, COALESCE(quantity, 0) as qty')
+            ->pluck('qty', 'inventory_item_id');
+
+        $itemIds = $qtyNowByItemId->keys();
+        if ($itemIds->isEmpty()) {
+            return response()->json([
+                'data' => [],
+                'meta' => [
+                    'date' => $start->toDateString(),
+                    'location_id' => (int) $locationId,
+                    'peg_ml' => $pegMl,
+                ],
+                'summary' => [
+                    'rows' => 0,
+                ],
+            ]);
+        }
+
+        $items = InventoryItem::with(['issueUom', 'category'])
+            ->whereIn('id', $itemIds)
+            ->orderBy('name')
+            ->get();
+
+        // Aggregate transactions for the day and after the day (to reverse from current stock).
+        $txAggDay = InventoryTransaction::query()
+            ->whereIn('inventory_item_id', $itemIds)
+            ->where('inventory_location_id', $locationId)
+            ->whereBetween('created_at', [$start, $end])
+            ->selectRaw("inventory_item_id,
+                SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END) as in_qty,
+                SUM(CASE WHEN type = 'out' THEN quantity ELSE 0 END) as out_qty,
+                SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty
+            ")
+            ->groupBy('inventory_item_id')
+            ->get()
+            ->keyBy('inventory_item_id');
+
+        $txAggAfter = InventoryTransaction::query()
+            ->whereIn('inventory_item_id', $itemIds)
+            ->where('inventory_location_id', $locationId)
+            ->where('created_at', '>', $end)
+            ->selectRaw("inventory_item_id,
+                SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END) as in_qty,
+                SUM(CASE WHEN type = 'out' THEN quantity ELSE 0 END) as out_qty
+            ")
+            ->groupBy('inventory_item_id')
+            ->get()
+            ->keyBy('inventory_item_id');
+
+        $splitBottleLoose = function (float $qty, float $bottleMl): array {
+            if ($bottleMl <= 0.0001) {
+                return ['bottles' => 0.0, 'loose_litres' => 0.0];
+            }
+            $bottles = floor($qty / $bottleMl);
+            $looseMl = max(0.0, $qty - ($bottles * $bottleMl));
+            return [
+                'bottles' => $bottles,
+                'loose_litres' => round($looseMl / 1000, 3),
+            ];
+        };
+
+        $splitSalesBottlePeg = function (float $qtyMl, float $bottleMl, float $pegMl) : array {
+            if ($bottleMl <= 0.0001 || $pegMl <= 0.0001) {
+                return ['bottles' => 0.0, 'pegs' => 0.0];
+            }
+            $bottles = floor($qtyMl / $bottleMl);
+            $remMl = max(0.0, $qtyMl - ($bottles * $bottleMl));
+            $pegs = $remMl / $pegMl;
+            return [
+                'bottles' => $bottles,
+                'pegs' => round($pegs, 2),
+            ];
+        };
+
+        $rows = $items->map(function (InventoryItem $item) use (
+            $qtyNowByItemId,
+            $txAggDay,
+            $txAggAfter,
+            $splitBottleLoose,
+            $splitSalesBottlePeg,
+            $pegMl
+        ) {
+            $uom = strtolower((string) ($item->issueUom?->short_name ?? ''));
+            $bottleMl = (float) ($item->conversion_factor ?: 0);
+
+            $nowQty = (float) ($qtyNowByItemId[$item->id] ?? 0);
+
+            $day = $txAggDay->get($item->id);
+            $dayIn = (float) ($day?->in_qty ?? 0);
+            $dayOut = (float) ($day?->out_qty ?? 0);
+            $posOut = (float) ($day?->pos_out_qty ?? 0);
+            $netDay = $dayIn - $dayOut;
+
+            $after = $txAggAfter->get($item->id);
+            $afterNet = (float) ($after?->in_qty ?? 0) - (float) ($after?->out_qty ?? 0);
+
+            // current = opening + netDay + afterNet
+            $openingQty = $nowQty - $netDay - $afterNet;
+            $closingQty = $openingQty + $netDay;
+
+            // Spirits-like (ml tracked)
+            if ($uom === 'ml' && $bottleMl > 0) {
+                $opening = $splitBottleLoose($openingQty, $bottleMl);
+                $receipts = $splitBottleLoose($dayIn, $bottleMl);
+                $sales = $splitSalesBottlePeg($posOut, $bottleMl, $pegMl);
+                $closing = $splitBottleLoose($closingQty, $bottleMl);
+
+                return [
+                    'item_id' => $item->id,
+                    'item_name' => $item->name,
+                    'category' => $item->category?->name ?? '—',
+                    'uom' => $item->issueUom?->short_name ?? '—',
+                    'bottle_ml' => (int) round($bottleMl),
+                    'opening_bottles' => (float) $opening['bottles'],
+                    'opening_loose_litres' => (float) $opening['loose_litres'],
+                    'receipts_bottles' => (float) $receipts['bottles'],
+                    'receipts_loose_litres' => (float) $receipts['loose_litres'],
+                    'sales_bottles' => (float) $sales['bottles'],
+                    'sales_pegs' => (float) $sales['pegs'],
+                    'closing_bottles' => (float) $closing['bottles'],
+                    'closing_loose_litres' => (float) $closing['loose_litres'],
+                    'debug' => [
+                        'opening_qty_ml' => round($openingQty, 3),
+                        'receipts_in_ml' => round($dayIn, 3),
+                        'pos_out_ml' => round($posOut, 3),
+                        'closing_qty_ml' => round($closingQty, 3),
+                    ],
+                ];
+            }
+
+            // Beer / pcs-like
+            return [
+                'item_id' => $item->id,
+                'item_name' => $item->name,
+                'category' => $item->category?->name ?? '—',
+                'uom' => $item->issueUom?->short_name ?? '—',
+                'bottle_ml' => null,
+                'opening_bottles' => round($openingQty, 2),
+                'opening_loose_litres' => null,
+                'receipts_bottles' => round($dayIn, 2),
+                'receipts_loose_litres' => null,
+                'sales_bottles' => round($posOut, 2),
+                'sales_pegs' => null,
+                'closing_bottles' => round($closingQty, 2),
+                'closing_loose_litres' => null,
+                'debug' => [
+                    'opening_qty' => round($openingQty, 3),
+                    'receipts_in' => round($dayIn, 3),
+                    'pos_out' => round($posOut, 3),
+                    'closing_qty' => round($closingQty, 3),
+                ],
+            ];
+        })->values();
+
+        return response()->json([
+            'data' => $rows,
+            'meta' => [
+                'date' => $start->toDateString(),
+                'location_id' => (int) $locationId,
+                'peg_ml' => $pegMl,
+            ],
+            'summary' => [
+                'rows' => $rows->count(),
+            ],
+        ]);
+    }
+
+    /**
      * Dashboard Summary for Reports Page
      */
     public function dashboardSummary(Request $request)
@@ -731,17 +1047,17 @@ class InventoryReportController extends Controller
         $this->checkPermission('inventory-report-summary');
         $statusResp = $this->stockStatus($request)->getData();
         $adjustResp = $this->adjustments($request)->getData();
-        
+
         // Fetch recent pending POs
         $pendingPOs = PurchaseOrder::whereIn('status', ['Ordered', 'Pending'])->count();
-        
+
         return response()->json([
             'valuation' => $statusResp->summary->total_valuation,
             'low_stock' => $statusResp->summary->low_stock_count,
             'total_items' => $statusResp->summary->total_items,
             'recent_loss' => $adjustResp->summary->total_loss_value,
             'pending_pos' => $pendingPOs,
-            'critical_items' => collect($statusResp->data)->where('is_low', true)->take(5)->values()
+            'critical_items' => collect($statusResp->data)->where('is_low', true)->take(5)->values(),
         ]);
     }
 }
