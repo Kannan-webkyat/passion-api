@@ -27,6 +27,7 @@ use App\Http\Controllers\{
     RestaurantMasterController,
     RoleController,
     RoomController,
+    RoomParController,
     RoomStatusBlockController,
     RoomTypeController,
     SettingController,
@@ -51,7 +52,15 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Rooms
     Route::apiResource('rooms', RoomController::class);
+    Route::post('rooms/sync-inventory-locations', [RoomController::class, 'syncInventoryLocations']);
     Route::apiResource('room-status-blocks', RoomStatusBlockController::class);
+
+    // Room Par configuration
+    Route::get('room-par/templates', [RoomParController::class, 'index']);
+    Route::post('room-par/templates', [RoomParController::class, 'store']);
+    Route::get('room-par/templates/{template}', [RoomParController::class, 'show']);
+    Route::put('room-par/templates/{template}', [RoomParController::class, 'update']);
+    Route::post('room-par/fill', [RoomParController::class, 'fill']);
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);
@@ -61,7 +70,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Bookings & Room Chart
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/job', [HousekeepingController::class, 'upsertJob']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/finish', [HousekeepingController::class, 'finish']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/mark-inspected', [HousekeepingController::class, 'markInspected']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
 
     Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);

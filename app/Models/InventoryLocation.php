@@ -9,7 +9,7 @@ class InventoryLocation extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['name', 'type', 'is_active', 'department_id'];
+    protected $fillable = ['name', 'type', 'kind', 'is_active', 'department_id', 'room_id'];
 
     public function department()
     {
@@ -21,5 +21,10 @@ class InventoryLocation extends Model
         return $this->belongsToMany(InventoryItem::class, 'inventory_item_locations')
             ->withPivot('quantity', 'reorder_level')
             ->withTimestamps();
+    }
+
+    public function room()
+    {
+        return $this->belongsTo(Room::class, 'room_id');
     }
 }

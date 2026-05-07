@@ -14,6 +14,7 @@ class DatabaseSeeder extends Seeder
     {
         $this->call([
             InventoryTaxSeeder::class,
+            InventoryUomSeeder::class,
             RolePermissionSeeder::class,
             DepartmentSeeder::class,
             LocationSeeder::class,
@@ -22,6 +23,9 @@ class DatabaseSeeder extends Seeder
             FreshBiryaniTeaCoffeeSeeder::class,
             BarSeeder::class,
             RoomTypeRoomSeeder::class,
+            HotelInventoryCatalogSeeder::class,
+            HotelInventoryOpeningStockSeeder::class,
+            HotelMinibarMenuItemsSeeder::class,
             RbacTestUsersSeeder::class,
             // BookingSeeder::class,
         ]);
