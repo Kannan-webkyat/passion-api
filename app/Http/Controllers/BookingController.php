@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\HousekeepingStateUpdated;
 use App\Support\BookingInvoiceRoomStay;
 use App\Support\ReservationInvoiceViewData;
 use App\Support\SeasonalRoomPricing;
 use App\Models\Booking;
+use App\Models\BookingExtraCharge;
 use App\Models\BookingGroup;
 use App\Models\BookingSegment;
 use App\Models\PosOrder;
@@ -13,6 +15,7 @@ use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
+use App\Support\CheckoutInspectionPenaltyAmount;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -358,9 +361,17 @@ class BookingController extends Controller
         $rangeEndAt = $end->copy()->addDay()->startOfDay();
 
         $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons', 'statusBlocks' => function ($q) use ($start, $end) {
-            $q->where('is_active', true)
-                ->where('start_date', '<', $end->toDateString())
-                ->where('end_date', '>', $start->toDateString());
+            // Active HK workflow blocks + closed checkout-inspection records (inactive but with snapshot)
+            // so Room Chart / drawer still show "inspected" and inspection details after apply/clear.
+            $q->where('start_date', '<', $end->toDateString())
+                ->where('end_date', '>', $start->toDateString())
+                ->where(function ($w) {
+                    $w->where('is_active', true)
+                        ->orWhere(function ($w2) {
+                            $w2->where('status', 'inspected')
+                                ->whereNotNull('inspection_snapshot');
+                        });
+                });
         }, 'segments' => function ($q) use ($rangeStartAt, $rangeEndAt) {
             $q->where('check_in_at', '<', $rangeEndAt)
                 ->where('check_out_at', '>', $rangeStartAt)
@@ -439,6 +450,66 @@ class BookingController extends Controller
         }
 
         return response()->json($counts);
+    }
+
+    /**
+     * Reception: request a pre-checkout inspection (moves room to pending_inspection).
+     * This is intentionally independent from booking checkout; billing remains open until checkout is confirmed.
+     */
+    public function requestInspection(Request $request, Booking $booking)
+    {
+        $this->checkPermission('reservation');
+
+        if ($booking->status !== 'checked_in') {
+            return response()->json([
+                'message' => 'Inspection can only be requested for a checked-in booking.',
+            ], 422);
+        }
+
+        $roomId = (int) $booking->room_id;
+        if ($roomId <= 0) {
+            return response()->json(['message' => 'Booking has no room assigned.'], 422);
+        }
+
+        // Span the whole remaining stay on the room chart (same overlap rule as `cellInfo`):
+        // active when `dayStart >= start_date && dayStart < end_date`.
+        $checkInAt = $booking->check_in_at
+            ? Carbon::parse($booking->check_in_at)
+            : Carbon::parse($booking->check_in)->startOfDay();
+        $checkOutAt = $booking->check_out_at
+            ? Carbon::parse($booking->check_out_at)
+            : Carbon::parse($booking->check_out)->startOfDay();
+
+        $startDate = $checkInAt->copy()->startOfDay()->toDateString();
+        $endExclusive = $this->dateEndExclusiveFromDateTime($checkOutAt);
+
+        // Ensure this room shows as pending inspection (override chart visuals).
+        // Deactivate any overlapping housekeeping blocks so there is a single, deterministic status block.
+        RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', ['dirty', 'cleaning', 'inspected', 'pending_inspection'], 'and', false)
+            ->where('start_date', '<', $endExclusive)
+            ->where('end_date', '>', $startDate)
+            ->update(['is_active' => false]);
+
+        $block = RoomStatusBlock::create([
+            'room_id' => $roomId,
+            'status' => 'pending_inspection',
+            'start_date' => $startDate,
+            'end_date' => $endExclusive,
+            'note' => 'Reception: requested checkout inspection',
+            'is_active' => true,
+            'created_by' => Auth::id(),
+        ]);
+
+        Room::where('id', '=', $roomId, 'and')->update(['status' => 'pending_inspection']);
+
+        HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'request_inspection');
+
+        return response()->json([
+            'message' => 'Inspection requested.',
+            'block' => $block->fresh()->load('room.roomType'),
+        ]);
     }
 
     public function store(Request $request)
@@ -1067,13 +1138,35 @@ class BookingController extends Controller
                     ]);
                 }
 
+                $checkoutNotifyRoomIds = [];
                 foreach ($segmentsForHk as $segment) {
                     $rid = (int) $segment->room_id;
+                    $checkoutNotifyRoomIds[] = $rid;
                     $checkoutDay = Carbon::parse(
                         $segment->check_out_at ?? $segment->check_out ?? $booking->check_out_at ?? $booking->check_out
                     )->startOfDay();
                     $co = $checkoutDay->toDateString();
                     $coNext = $checkoutDay->copy()->addDay()->toDateString();
+
+                    // Close housekeeping handoff on departure: an inspected/pending_inspection block may span
+                    // the whole stay — trimming checkout day still leaves prior nights green on the chart with
+                    // no guest segment. Deactivate handoff blocks for this room so past stay columns clear;
+                    // then the dirty block marks departure day for housekeeping.
+                    RoomStatusBlock::query()
+                        ->where('room_id', '=', $rid, 'and')
+                        ->where('is_active', '=', true, 'and')
+                        ->whereIn('status', ['inspected', 'pending_inspection'], 'and', false)
+                        ->update(['is_active' => false]);
+
+                    // Close any dirty/cleaning block on the checkout night so the new departure dirty task
+                    // is not suppressed by an older workflow row (otherwise Dirty Rooms stays empty).
+                    RoomStatusBlock::query()
+                        ->where('room_id', '=', $rid, 'and')
+                        ->where('is_active', '=', true, 'and')
+                        ->whereIn('status', ['cleaning', 'dirty'], 'and', false)
+                        ->where('start_date', '<', $coNext)
+                        ->where('end_date', '>', $co)
+                        ->update(['is_active' => false]);
 
                     $hasBlock = RoomStatusBlock::where('room_id', '=', $rid, 'and')
                         ->where('is_active', true)
@@ -1093,6 +1186,7 @@ class BookingController extends Controller
                         ]);
                     }
                 }
+                HousekeepingStateUpdated::dispatchIfEnabled($checkoutNotifyRoomIds, 'booking_checkout');
             }
         }
 
@@ -1802,6 +1896,159 @@ class BookingController extends Controller
             ],
             'items' => $items,
         ]);
+    }
+
+    /**
+     * Checkout inspection charges posted to the booking (minibar consumption + asset penalties).
+     */
+    public function inspectionCharges(Booking $booking)
+    {
+        $this->checkPermission('view-rooms');
+
+        $penalties = $this->checkoutInspectionPenaltiesMap();
+
+        $lines = BookingExtraCharge::query()
+            ->where('booking_id', $booking->id)
+            ->where('source', 'inspection')
+            ->orderBy('id')
+            ->get(['id', 'kind', 'label', 'qty', 'unit_amount', 'total_amount', 'meta']);
+
+        if ($lines->isEmpty()) {
+            $lines = collect($this->inspectionSnapshotFallbackLines($booking, $penalties));
+        }
+
+        $linesOut = $lines->map(function ($line) use ($penalties) {
+            return $this->enrichInspectionChargeLineForDisplay($line, $penalties);
+        })->values()->all();
+
+        return response()->json([
+            'booking_id' => (int) $booking->id,
+            'lines' => $linesOut,
+        ]);
+    }
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    private function checkoutInspectionPenaltiesMap(): array
+    {
+        $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
+        $penaltiesJson = json_decode($penaltiesRaw, true);
+
+        return is_array($penaltiesJson) ? $penaltiesJson : [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $penalties
+     * @return array<string, mixed>
+     */
+    private function enrichInspectionChargeLineForDisplay(mixed $line, array $penalties): array
+    {
+        $row = is_array($line) ? $line : $line->toArray();
+        $kind = (string) ($row['kind'] ?? '');
+        $qty = max(1.0, (float) ($row['qty'] ?? 1));
+        $storedUnit = round((float) ($row['unit_amount'] ?? 0), 2);
+        $storedTotal = round((float) ($row['total_amount'] ?? 0), 2);
+
+        $resolvedUnit = $storedUnit;
+        $resolvedTotal = $storedTotal;
+
+        if ($kind === 'asset_penalty') {
+            $meta = $row['meta'] ?? [];
+            $meta = is_array($meta) ? $meta : [];
+            $penKey = trim((string) ($meta['penalty_key'] ?? ''));
+            if ($resolvedUnit < 0.0001 && $penKey !== '') {
+                [$resolvedUnit] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
+                $resolvedTotal = round($resolvedUnit * $qty, 2);
+            }
+        } elseif ($kind === 'minibar') {
+            $resolvedUnit = $storedUnit;
+            $resolvedTotal = $storedTotal > 0.0001 ? $storedTotal : round($storedUnit * $qty, 2);
+        }
+
+        $row['resolved_unit_amount'] = $resolvedUnit;
+        $row['resolved_total_amount'] = $resolvedTotal;
+
+        return $row;
+    }
+
+    /**
+     * When DB has no inspection charge rows, expose missing/damaged assets from the active HK
+     * block snapshot (e.g. legacy applies that skipped zero-amount penalties).
+     *
+     * @param  array<string, array<string, mixed>>  $penalties
+     * @return array<int, array<string, mixed>>
+     */
+    private function inspectionSnapshotFallbackLines(Booking $booking, array $penalties = []): array
+    {
+        $roomIds = array_values(array_unique(array_filter(array_merge(
+            [(int) $booking->room_id],
+            $booking->segments()->pluck('room_id')->map(fn($id) => (int) $id)->all()
+        ), static fn(int $id): bool => $id > 0)));
+
+        if ($roomIds === []) {
+            return [];
+        }
+
+        $block = RoomStatusBlock::query()
+            ->whereIn('room_id', $roomIds)
+            ->where('is_active', true)
+            ->whereIn('status', ['inspected', 'pending_inspection'])
+            ->whereNotNull('inspection_snapshot')
+            ->orderByDesc('id')
+            ->first();
+
+        if (! $block || ! is_array($block->inspection_snapshot)) {
+            return [];
+        }
+
+        $snap = $block->inspection_snapshot;
+        if (! empty($snap['cleared'])) {
+            return [];
+        }
+
+        $assets = $snap['assets'] ?? [];
+        if (! is_array($assets) || $assets === []) {
+            return [];
+        }
+
+        $out = [];
+        $nid = -1;
+        foreach ($assets as $a) {
+            if (! is_array($a)) {
+                continue;
+            }
+            $status = strtolower((string) ($a['status'] ?? ''));
+            if (! in_array($status, ['missing', 'damaged'], true)) {
+                continue;
+            }
+            $key = (string) ($a['key'] ?? '');
+            $label = trim((string) ($a['label'] ?? '')) ?: ($key !== '' ? $key : 'Asset');
+            $penKey = isset($a['penalty_key']) ? trim((string) $a['penalty_key']) : '';
+            $lineQty = isset($a['qty']) ? max(1, (int) $a['qty']) : 1;
+            [$unit, $mapLabel] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
+            if ($mapLabel !== null && $mapLabel !== '') {
+                $label = $mapLabel;
+            }
+            $total = round($unit * $lineQty, 2);
+
+            $out[] = $this->enrichInspectionChargeLineForDisplay([
+                'id' => $nid--,
+                'kind' => 'asset_penalty',
+                'label' => $label,
+                'qty' => $lineQty,
+                'unit_amount' => $unit,
+                'total_amount' => $total,
+                'meta' => [
+                    'asset_key' => $key,
+                    'asset_status' => $status,
+                    'penalty_key' => $penKey !== '' ? $penKey : null,
+                    'from_inspection_snapshot' => true,
+                ],
+            ], $penalties);
+        }
+
+        return $out;
     }
 
     /**

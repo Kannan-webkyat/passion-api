@@ -2,8 +2,14 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\BookingChargesUpdated;
+use App\Events\DailyRoomCleaningDeskNotify;
+use App\Events\HousekeepingStateUpdated;
 use App\Models\Booking;
+use App\Models\BookingExtraCharge;
 use App\Models\BookingSegment;
+use App\Models\DailyRoomCleaning;
+use App\Models\DailyRoomCleaningConsumption;
 use App\Models\HousekeepingJob;
 use App\Models\HousekeepingJobLine;
 use App\Models\InventoryItem;
@@ -17,8 +23,12 @@ use App\Models\RestaurantMaster;
 use App\Models\RoomParTemplate;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
+use App\Models\User;
+use App\Models\Setting;
+use App\Support\CheckoutInspectionPenaltyAmount;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -35,36 +45,12 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * List active housekeeping status blocks (dirty / in cleaning).
-     * By default returns all active blocks so rooms stay visible even when the dirty window is tied to
-     * a future checkout day on the chart. Pass overlap_only=1 to restrict to blocks overlapping `date`.
+     * Shared filters for housekeeping index lists (floor, room type, optional calendar overlap).
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<\App\Models\RoomStatusBlock>  $query
      */
-    public function index(Request $request)
+    private function applyHousekeepingListFilters($query, array $validated, string $d, string $dNext, bool $overlapOnly): void
     {
-        $this->checkPermission('view-rooms');
-        $validated = $request->validate([
-            'date' => 'nullable|date',
-            'floor' => 'nullable|string|max:50',
-            'room_type_id' => 'nullable|exists:room_types,id',
-            'hk_status' => 'nullable|in:dirty,cleaning,inspected,all',
-        ]);
-
-        $d = isset($validated['date'])
-            ? Carbon::parse($validated['date'])->toDateString()
-            : Carbon::today()->toDateString();
-        $dNext = Carbon::parse($d)->addDay()->toDateString();
-        $hkStatus = $validated['hk_status'] ?? 'all';
-
-        $statuses = $hkStatus === 'all' ? ['dirty', 'cleaning', 'inspected'] : [$hkStatus];
-
-        // List all active HK blocks — checkout may be scheduled on a future calendar day while the room
-        // is already dirty today; strict date overlap would hide those from housekeeping.
-        $query = RoomStatusBlock::query()
-            ->with(['room.roomType'])
-            ->where('is_active', '=', true, 'and')
-            ->whereIn('status', $statuses);
-
-        $overlapOnly = $request->boolean('overlap_only');
         if ($overlapOnly) {
             $query->where('start_date', '<', $dNext)
                 ->where('end_date', '>', $d);
@@ -78,6 +64,131 @@ class HousekeepingController extends Controller
                 $q->where('room_type_id', '=', $validated['room_type_id'], 'and');
             }
         });
+    }
+
+    /**
+     * Adds inspector_name from snapshot.inspector_user_id for checkout inspection history/detail lists.
+     *
+     * @param  \Illuminate\Support\Collection<int, \App\Models\RoomStatusBlock>  $blocks
+     * @return \Illuminate\Support\Collection<int, \App\Models\RoomStatusBlock>
+     */
+    private function withCheckoutInspectionInspectorNames($blocks)
+    {
+        $ids = [];
+        foreach ($blocks as $b) {
+            $snap = $b->inspection_snapshot;
+            if (is_array($snap) && ! empty($snap['inspector_user_id'])) {
+                $ids[] = (int) $snap['inspector_user_id'];
+            }
+        }
+        $ids = array_values(array_unique(array_filter($ids)));
+        if ($ids === []) {
+            return $blocks;
+        }
+        $names = User::query()
+            ->whereIn('id', $ids, 'and', false)
+            ->pluck('name', 'id');
+
+        return $blocks->map(function (RoomStatusBlock $b) use ($names) {
+            $snap = $b->inspection_snapshot;
+            $uid = is_array($snap) ? (int) ($snap['inspector_user_id'] ?? 0) : 0;
+            $b->setAttribute('inspector_name', $uid > 0 && $names->has($uid) ? (string) $names[$uid] : null);
+
+            return $b;
+        });
+    }
+
+    /**
+     * After checkout inspection (apply or clear), close the handoff: room is available; block is closed.
+     * (No separate "mark available" step for this workflow.)
+     */
+    private function releaseRoomAfterCheckoutInspection(RoomStatusBlock $inspectedBlock): void
+    {
+        if (! $inspectedBlock->is_active || $inspectedBlock->status !== 'inspected') {
+            return;
+        }
+        if ($inspectedBlock->inspection_snapshot === null) {
+            return;
+        }
+
+        $inspectedBlock->update(['is_active' => false]);
+        Room::where('id', '=', $inspectedBlock->room_id, 'and')->update(['status' => 'available']);
+
+        $job = HousekeepingJob::where('room_status_block_id', '=', $inspectedBlock->id)->first();
+        if ($job) {
+            $job->status = 'completed';
+            $job->save();
+        }
+    }
+
+    /**
+     * List active housekeeping status blocks (dirty / in cleaning).
+     * By default returns all active blocks so rooms stay visible even when the dirty window is tied to
+     * a future checkout day on the chart. Pass overlap_only=1 to restrict to blocks overlapping `date`.
+     *
+     * Checkout inspection board: pass checkout_scope=pending|inspected|history (pending = default main list).
+     */
+    public function index(Request $request)
+    {
+        $this->checkPermission('view-rooms');
+        $validated = $request->validate([
+            'date' => 'nullable|date',
+            'floor' => 'nullable|string|max:50',
+            'room_type_id' => 'nullable|exists:room_types,id',
+            'hk_status' => 'nullable|in:dirty,cleaning,inspected,pending_inspection,all',
+            'checkout_scope' => 'nullable|in:pending,inspected,history',
+        ]);
+
+        $d = isset($validated['date'])
+            ? Carbon::parse($validated['date'])->toDateString()
+            : Carbon::today()->toDateString();
+        $dNext = Carbon::parse($d)->addDay()->toDateString();
+        $overlapOnly = $request->boolean('overlap_only');
+
+        if (! empty($validated['checkout_scope'])) {
+            $scope = $validated['checkout_scope'];
+            $query = RoomStatusBlock::query()->with(['room.roomType']);
+
+            if ($scope === 'pending') {
+                $query->where('is_active', '=', true, 'and')
+                    ->where('status', '=', 'pending_inspection');
+            } elseif ($scope === 'inspected') {
+                $query->where('is_active', '=', true, 'and')
+                    ->where('status', '=', 'inspected')
+                    ->whereNotNull('inspection_snapshot');
+            } else {
+                // history: completed checkout inspections (closed blocks with saved snapshot)
+                $query->where('is_active', '=', false, 'and')
+                    ->where('status', '=', 'inspected')
+                    ->whereNotNull('inspection_snapshot');
+            }
+
+            $this->applyHousekeepingListFilters($query, $validated, $d, $dNext, $overlapOnly);
+
+            $blocks = $scope === 'history'
+                ? $query->orderByDesc('id')->limit(200)->get()
+                : $query->orderBy('room_id')->orderBy('id')->get();
+
+            $blocks = $this->withCheckoutInspectionInspectorNames($blocks);
+
+            return response()->json([
+                'date' => $d,
+                'blocks' => $blocks,
+            ]);
+        }
+
+        $hkStatus = $validated['hk_status'] ?? 'all';
+
+        $statuses = $hkStatus === 'all' ? ['dirty', 'cleaning', 'inspected', 'pending_inspection'] : [$hkStatus];
+
+        // List all active HK blocks — checkout may be scheduled on a future calendar day while the room
+        // is already dirty today; strict date overlap would hide those from housekeeping.
+        $query = RoomStatusBlock::query()
+            ->with(['room.roomType'])
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', $statuses);
+
+        $this->applyHousekeepingListFilters($query, $validated, $d, $dNext, $overlapOnly);
 
         $blocks = $query
             ->orderBy('room_id')
@@ -91,8 +202,92 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * Compact counts for housekeeping sub-navigation tabs (matches default workboard filters).
+     */
+    public function navCounts()
+    {
+        $this->checkPermission('view-rooms');
+
+        $dirty = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'dirty')
+            ->count();
+
+        $cleaning = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'cleaning')
+            ->count();
+
+        $inspected = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'inspected')
+            ->count();
+
+        // Checkout Inspection tab: count rooms awaiting inspection only (main list default).
+        $checkoutInspection = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'pending_inspection')
+            ->count();
+
+        // Daily room cleaning nav badge: pending service only (matches daily board default filter).
+        $dailyCleaning = $this->dailyCleaningPendingCountForNav(Carbon::today());
+
+        return response()->json([
+            'dirty' => $dirty,
+            'checkout_inspection' => $checkoutInspection,
+            'cleaning' => $cleaning,
+            'daily_cleaning' => $dailyCleaning,
+            'inspected' => $inspected,
+            'laundry' => null,
+        ]);
+    }
+
+    /**
+     * @return array<int, array{key: string, label: string}>
+     */
+    private function housekeepingChecklistTemplate(): array
+    {
+        return [
+            ['key' => 'change_sheets', 'label' => 'Change sheets'],
+            ['key' => 'clean_bathroom', 'label' => 'Clean bathroom'],
+            ['key' => 'vacuum_floor', 'label' => 'Vacuum / mop floor'],
+            ['key' => 'dust_surfaces', 'label' => 'Dust surfaces'],
+            ['key' => 'trash_removed', 'label' => 'Remove trash'],
+        ];
+    }
+
+    /**
+     * @return array<int, string>
+     */
+    private function allowedHousekeepingChecklistKeys(): array
+    {
+        return array_column($this->housekeepingChecklistTemplate(), 'key');
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $raw
+     * @return array<string, bool>
+     */
+    private function sanitizeHousekeepingChecklistDone(?array $raw): array
+    {
+        if ($raw === null) {
+            return [];
+        }
+        $allowed = array_flip($this->allowedHousekeepingChecklistKeys());
+        $out = [];
+        foreach ($raw as $k => $v) {
+            if (! is_string($k) || ! isset($allowed[$k])) {
+                continue;
+            }
+            $out[$k] = (bool) $v;
+        }
+
+        return $out;
+    }
+
+    /**
      * Housekeeping catalog for the sidebar:
-     * - amenities: inventory items under Guest Amenities
+     * - amenities: Guest Amenities categories (unless for_daily_cleaning=1: PAR kind=amenity + room qty &gt; 0)
      * - minibar: direct-sale inventory items that have a linked menu_item_id (so we can room-charge via POS)
      * - checklist/assets templates: static for now
      */
@@ -102,7 +297,12 @@ class HousekeepingController extends Controller
 
         $validated = request()->validate([
             'room_id' => 'nullable|integer|exists:rooms,id',
+            'for_checkout_inspection' => 'nullable|boolean',
+            'for_daily_cleaning' => 'nullable|boolean',
         ]);
+
+        $roomIdEarly = isset($validated['room_id']) ? (int) $validated['room_id'] : null;
+        $roomContextEarly = $roomIdEarly ? $this->roomContextPayload($roomIdEarly) : null;
 
         $amenityCats = \App\Models\InventoryCategory::query()
             ->where('name', '=', 'Guest Amenities (Consumables)', 'and')
@@ -115,10 +315,63 @@ class HousekeepingController extends Controller
             ->pluck('id')
             ->toArray();
 
-        $amenities = InventoryItem::query()
-            ->whereIn('category_id', $amenityCats, 'and', false)
+        // Include roots named like "Guest Amenities*" and their direct children (covers "(Consumables)" vs plain names).
+        $guestRootIds = \App\Models\InventoryCategory::query()
+            ->where('name', 'like', 'Guest Amenities%', 'and')
+            ->pluck('id')
+            ->map(fn($id) => (int) $id)
+            ->all();
+        $guestChildIds = $guestRootIds === [] ? [] : \App\Models\InventoryCategory::query()
+            ->whereIn('parent_id', $guestRootIds, 'and', false)
+            ->pluck('id')
+            ->map(fn($id) => (int) $id)
+            ->all();
+
+        $amenityCatIds = collect($amenityCats)
+            ->merge($guestRootIds)
+            ->merge($guestChildIds)
+            ->map(fn($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        $amenities = $amenityCatIds === []
+            ? collect()
+            : InventoryItem::query()
+            ->whereIn('category_id', $amenityCatIds, 'and', false)
             ->orderBy('name')
             ->get(['id', 'name', 'sku', 'category_id']);
+
+        // Occupied-room daily cleaning: only consumable amenities (PAR kind=amenity) with qty > 0 in room.
+        if (request()->boolean('for_daily_cleaning') && $roomContextEarly) {
+            $onHandMap = $roomContextEarly['on_hand_by_item_id'] ?? [];
+            $amenityParIds = [];
+            foreach ($roomContextEarly['par_lines'] ?? [] as $ln) {
+                if (($ln['kind'] ?? '') === 'amenity') {
+                    $amenityParIds[(int) ($ln['inventory_item_id'] ?? 0)] = true;
+                }
+            }
+            $positiveIds = [];
+            foreach ($onHandMap as $itemId => $qty) {
+                $id = (int) $itemId;
+                if ($id <= 0) {
+                    continue;
+                }
+                if ((float) $qty <= 0.0001) {
+                    continue;
+                }
+                if (! isset($amenityParIds[$id])) {
+                    continue;
+                }
+                $positiveIds[$id] = true;
+            }
+            $amenities = $positiveIds === []
+                ? collect()
+                : InventoryItem::query()
+                ->whereIn('id', array_keys($positiveIds), 'and', false)
+                ->orderBy('name')
+                ->get(['id', 'name', 'sku', 'category_id']);
+        }
 
         // Minibar items: direct-sale inventory items with a linked menu item for POS posting
         $minibar = InventoryItem::query()
@@ -161,20 +414,216 @@ class HousekeepingController extends Controller
             ['key' => 'ironing_board', 'label' => 'Ironing board'],
         ];
 
-        $checklist = [
-            ['key' => 'change_sheets', 'label' => 'Change sheets'],
-            ['key' => 'clean_bathroom', 'label' => 'Clean bathroom'],
-            ['key' => 'vacuum_floor', 'label' => 'Vacuum / mop floor'],
-            ['key' => 'dust_surfaces', 'label' => 'Dust surfaces'],
-            ['key' => 'trash_removed', 'label' => 'Remove trash'],
-        ];
+        $checklist = $this->housekeepingChecklistTemplate();
+
+        $roomId = $roomIdEarly;
+        $roomContext = $roomContextEarly ?? $this->roomContextPayload($roomId);
+        $checkoutInspectionAssets = $this->checkoutInspectionAssetsFromContext($roomContext);
+
+        $forCheckout = ! empty($validated['for_checkout_inspection']);
+        $minibarOut = $minibarPayload;
+        if ($forCheckout && $roomContext) {
+            $onHand = $roomContext['on_hand_by_item_id'] ?? [];
+            $minibarParIds = [];
+            foreach ($roomContext['par_lines'] ?? [] as $ln) {
+                if (($ln['kind'] ?? '') === 'minibar') {
+                    $minibarParIds[(int) ($ln['inventory_item_id'] ?? 0)] = true;
+                }
+            }
+            $minibarOut = $minibarPayload->filter(function ($row) use ($onHand, $minibarParIds, $roomContext) {
+                $id = (int) ($row['inventory_item_id'] ?? 0);
+                $qty = (float) ($onHand[$id] ?? 0);
+                if ($qty <= 0.0001) {
+                    return false;
+                }
+                if (isset($minibarParIds[$id])) {
+                    return true;
+                }
+                foreach ($roomContext['on_hand_items'] ?? [] as $oh) {
+                    if ((int) ($oh['inventory_item_id'] ?? 0) === $id && ! empty($oh['is_direct_sale'])) {
+                        return true;
+                    }
+                }
+
+                return false;
+            })->values();
+        }
 
         return response()->json([
             'amenities' => $amenities,
-            'minibar' => $minibarPayload,
+            'minibar' => $minibarOut,
             'assets' => $assets,
+            'checkout_inspection_assets' => $checkoutInspectionAssets,
             'checklist' => $checklist,
-            'room_context' => $this->roomContextPayload(isset($validated['room_id']) ? (int) $validated['room_id'] : null),
+            'room_context' => $roomContext,
+        ]);
+    }
+
+    /**
+     * PAR-backed movable assets for checkout inspection (inv_{id} keys).
+     * When empty, clients fall back to legacy static `assets` list.
+     */
+    private function checkoutInspectionAssetsFromContext(?array $roomContext): array
+    {
+        if (! $roomContext || empty($roomContext['par_lines'])) {
+            return [];
+        }
+        $onHand = $roomContext['on_hand_by_item_id'] ?? [];
+        $out = [];
+        foreach ($roomContext['par_lines'] as $ln) {
+            if (($ln['kind'] ?? '') !== 'asset') {
+                continue;
+            }
+            $iid = (int) ($ln['inventory_item_id'] ?? 0);
+            if ($iid <= 0) {
+                continue;
+            }
+            $out[] = [
+                'key' => 'inv_' . $iid,
+                'inventory_item_id' => $iid,
+                'label' => (string) ($ln['item_name'] ?? 'Asset'),
+                'sku' => (string) ($ln['sku'] ?? ''),
+                'par_qty' => (float) ($ln['par_qty'] ?? 0),
+                'on_hand' => (float) ($onHand[$iid] ?? 0),
+            ];
+        }
+
+        return $out;
+    }
+
+    /** Legacy static asset keys when room PAR has no asset lines. */
+    private function defaultInspectionAssetKeys(): array
+    {
+        return [
+            'coffee_maker',
+            'electric_kettle',
+            'hair_dryer',
+            'television',
+            'mini_fridge',
+            'safe_deposit_box',
+            'iron',
+            'ironing_board',
+        ];
+    }
+
+    /** Allowed `assets[].key` values for checkout inspection apply (PAR inv_* + legacy slugs). */
+    private function allowedInspectionAssetKeysForRoom(int $roomId): array
+    {
+        $ctx = $this->roomContextPayload($roomId);
+        $fromPar = [];
+        foreach ($this->checkoutInspectionAssetsFromContext($ctx) as $row) {
+            $fromPar[] = (string) ($row['key'] ?? '');
+        }
+        if ($fromPar !== []) {
+            return $fromPar;
+        }
+
+        return $this->defaultInspectionAssetKeys();
+    }
+
+    /**
+     * Compute minibar (inventory cost) + asset penalty totals for inspection preview (no DB writes).
+     *
+     * @param  array<string, mixed>  $validated
+     * @param  array<int, float>  $onHandByItem
+     * @param  array<string, mixed>  $penalties
+     * @return array<string, mixed>
+     */
+    private function buildCheckoutInspectionChargePreview(array $validated, array $onHandByItem, array $penalties): array
+    {
+        $minibarLines = [];
+        $minibarTotal = 0.0;
+        foreach (($validated['minibar'] ?? []) as $ln) {
+            $itemId = (int) ($ln['inventory_item_id'] ?? 0);
+            $qty = (float) ($ln['qty'] ?? 0);
+            if ($qty <= 0 || $itemId <= 0) {
+                continue;
+            }
+            /** @var InventoryItem|null $item */
+            $item = InventoryItem::query()->find($itemId, ['id', 'name', 'sku', 'cost_price', 'conversion_factor']);
+            if (! $item) {
+                continue;
+            }
+            $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
+            $unitCost = (float) ($item->cost_price ?? 0) / $conv;
+            $lineTotal = round($unitCost * $qty, 2);
+            $minibarLines[] = [
+                'inventory_item_id' => $itemId,
+                'name' => (string) ($item->name ?? ''),
+                'sku' => (string) ($item->sku ?? ''),
+                'qty' => $qty,
+                'unit_amount' => round($unitCost, 2),
+                'line_total' => $lineTotal,
+            ];
+            $minibarTotal += $lineTotal;
+        }
+
+        $assetLines = [];
+        $assetTotal = 0.0;
+        foreach (($validated['assets'] ?? []) as $a) {
+            $key = (string) ($a['key'] ?? '');
+            $label = (string) ($a['label'] ?? '');
+            $penKey = isset($a['penalty_key']) ? trim((string) $a['penalty_key']) : '';
+            $lineQty = isset($a['qty']) ? max(1, (int) $a['qty']) : 1;
+            [$amount, $mapLabel] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
+            if ($mapLabel !== null && $mapLabel !== '') {
+                $label = $mapLabel;
+            }
+
+            $amount = round(max(0.0, $amount), 2);
+            $lineTotal = round($amount * $lineQty, 2);
+            $assetLines[] = [
+                'key' => $key,
+                'label' => $label,
+                'qty' => $lineQty,
+                'penalty_key' => $penKey !== '' ? $penKey : null,
+                'unit_amount' => $amount,
+                'line_total' => $lineTotal,
+            ];
+            if ($lineTotal > 0.0001) {
+                $assetTotal += $lineTotal;
+            }
+        }
+
+        return [
+            'minibar_lines' => $minibarLines,
+            'minibar_total' => round($minibarTotal, 2),
+            'asset_lines' => $assetLines,
+            'asset_total' => round($assetTotal, 2),
+            'grand_total' => round($minibarTotal + $assetTotal, 2),
+        ];
+    }
+
+    /**
+     * Guest stay + inspector + penalty map for checkout inspection UI.
+     */
+    public function checkoutInspectionContext(Room $room)
+    {
+        $this->checkPermission('view-rooms');
+
+        $booking = $this->activeBookingForRoom((int) $room->id);
+        $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
+        $penaltiesJson = json_decode($penaltiesRaw, true);
+        $penalties = is_array($penaltiesJson) ? $penaltiesJson : [];
+
+        $user = Auth::user();
+
+        return response()->json([
+            'room_id' => (int) $room->id,
+            'room_number' => (string) $room->room_number,
+            'booking' => $booking ? [
+                'id' => (int) $booking->id,
+                'guest_name' => (string) ($booking->guest_name ?? trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''))),
+                'check_in' => $booking->check_in,
+                'check_out' => $booking->check_out,
+                'check_in_at' => $booking->check_in_at,
+                'check_out_at' => $booking->check_out_at,
+            ] : null,
+            'inspector' => [
+                'user_id' => $user ? (int) $user->id : null,
+                'name' => $user ? (string) $user->name : null,
+            ],
+            'penalties' => $penalties,
         ]);
     }
 
@@ -267,6 +716,8 @@ class HousekeepingController extends Controller
         $roomStatusBlock->update(['status' => 'cleaning']);
         Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'cleaning']);
 
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'start_cleaning');
+
         return response()->json($roomStatusBlock->load('room.roomType'));
     }
 
@@ -343,26 +794,32 @@ class HousekeepingController extends Controller
 
             foreach (($validated['amenities'] ?? []) as $it) {
                 $qty = (float) ($it['qty'] ?? 0);
-                if ($qty <= 0) continue;
+                $hasFound = array_key_exists('found_qty', $it);
+                if ($qty <= 0.0001 && ! $hasFound) {
+                    continue;
+                }
                 HousekeepingJobLine::create([
                     'housekeeping_job_id' => $job->id,
                     'kind' => 'amenity',
                     'inventory_item_id' => (int) $it['inventory_item_id'],
                     'qty' => $qty,
-                    'meta' => isset($it['found_qty']) ? ['found_qty' => (float) $it['found_qty']] : null,
+                    'meta' => $hasFound ? ['found_qty' => (float) $it['found_qty']] : null,
                 ]);
             }
 
             foreach (($validated['minibar'] ?? []) as $it) {
                 $qty = (float) ($it['qty'] ?? 0);
-                if ($qty <= 0) continue;
+                $hasFound = array_key_exists('found_qty', $it);
+                if ($qty <= 0.0001 && ! $hasFound) {
+                    continue;
+                }
                 HousekeepingJobLine::create([
                     'housekeeping_job_id' => $job->id,
                     'kind' => 'minibar',
                     'inventory_item_id' => (int) $it['inventory_item_id'],
                     'menu_item_id' => $it['menu_item_id'] ? (int) $it['menu_item_id'] : null,
                     'qty' => $qty,
-                    'meta' => isset($it['found_qty']) ? ['found_qty' => (float) $it['found_qty']] : null,
+                    'meta' => $hasFound ? ['found_qty' => (float) $it['found_qty']] : null,
                 ]);
             }
 
@@ -593,17 +1050,23 @@ class HousekeepingController extends Controller
                 Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'maintenance']);
                 $job->issues_summary = substr($note, 0, 500);
             } else {
-                $roomStatusBlock->update(['status' => 'inspected']);
-                Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'inspected']);
-                $job->status = 'inspected';
+                // Close HK workflow and release room — no separate "mark available" step from housekeeping.
+                $roomStatusBlock->update([
+                    'status' => 'inspected',
+                    'is_active' => false,
+                ]);
+                Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
+                $job->status = 'completed';
             }
 
             $job->save();
 
             DB::commit();
 
+            HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
+
             return response()->json([
-                'message' => 'Cleaning finished.',
+                'message' => $assetProblem ? 'Cleaning finished.' : 'Cleaning complete. Room is available.',
                 'block' => $roomStatusBlock->fresh()->load('room.roomType'),
                 'job' => $job->fresh()->load('lines'),
             ]);
@@ -635,6 +1098,8 @@ class HousekeepingController extends Controller
             $job->status = 'completed';
             $job->save();
         }
+
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'mark_inspected');
 
         return response()->json([
             'message' => 'Room inspected and available.',
@@ -789,9 +1254,1025 @@ class HousekeepingController extends Controller
         $roomStatusBlock->update(['is_active' => false]);
         Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
 
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'mark_cleaned');
+
         return response()->json([
             'message' => 'Room marked as cleaned.',
             'block' => $roomStatusBlock->fresh()->load('room.roomType'),
+        ]);
+    }
+
+    /**
+     * Checkout inspection: clear room with no extra charges (pending_inspection -> inspected snapshot).
+     * Room is then released to available — inspection workflow is closed (no separate "mark available").
+     */
+    public function checkoutInspectionClear(Request $request, RoomStatusBlock $roomStatusBlock)
+    {
+        $this->checkPermission('manage-rooms');
+
+        if (! $roomStatusBlock->is_active) {
+            return response()->json(['message' => 'This status block is no longer active.'], 422);
+        }
+        if ($roomStatusBlock->status !== 'pending_inspection') {
+            return response()->json(['message' => 'Room is not pending inspection.'], 422);
+        }
+
+        $userId = Auth::id();
+        $startDate = (string) $roomStatusBlock->start_date;
+        $endDate = (string) $roomStatusBlock->end_date;
+
+        DB::beginTransaction();
+        try {
+            $roomStatusBlock->update([
+                'is_active' => false,
+                'note' => substr(trim((string) ($roomStatusBlock->note ?: '')) ?: 'Inspection cleared', 0, 255),
+            ]);
+
+            $snapshot = [
+                'remarks' => null,
+                'minibar' => [],
+                'assets' => [],
+                'cleared' => true,
+                'submitted_at' => now()->toIso8601String(),
+                'inspected_at' => now()->toIso8601String(),
+                'inspector_user_id' => $userId,
+                'booking_id' => null,
+            ];
+
+            $newBlock = RoomStatusBlock::create([
+                'room_id' => $roomStatusBlock->room_id,
+                'status' => 'inspected',
+                'start_date' => $startDate,
+                'end_date' => $endDate,
+                'note' => 'Checkout inspection cleared (no extra charges)',
+                'inspection_snapshot' => $snapshot,
+                'is_active' => true,
+                'created_by' => $userId,
+            ]);
+
+            Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'inspected']);
+
+            DB::commit();
+
+            $this->releaseRoomAfterCheckoutInspection($newBlock->fresh());
+
+            HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'checkout_inspection_clear');
+
+            return response()->json([
+                'message' => 'Inspection completed. Room is available.',
+                'block' => $newBlock->fresh()->load('room.roomType'),
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Validate-only checkout inspection payload and return server-side charge preview.
+     */
+    public function checkoutInspectionValidate(Request $request, RoomStatusBlock $roomStatusBlock)
+    {
+        $this->checkPermission('manage-rooms');
+
+        if (! $roomStatusBlock->is_active) {
+            return response()->json(['message' => 'This status block is no longer active.'], 422);
+        }
+        if ($roomStatusBlock->status !== 'pending_inspection') {
+            return response()->json(['message' => 'Room is not pending inspection.'], 422);
+        }
+
+        $validated = $request->validate([
+            'remarks' => 'nullable|string|max:5000',
+            'minibar' => 'nullable|array',
+            'minibar.*.inventory_item_id' => 'required_with:minibar|exists:inventory_items,id',
+            'minibar.*.qty' => 'required_with:minibar|numeric|min:0',
+            'assets' => 'nullable|array',
+            'assets.*.key' => 'required_with:assets|string|max:100',
+            'assets.*.label' => 'required_with:assets|string|max:255',
+            'assets.*.status' => 'required_with:assets|string|in:missing,damaged',
+            'assets.*.penalty_key' => 'nullable|string|max:100',
+            'assets.*.notes' => 'nullable|string|max:2000',
+            'assets.*.qty' => 'nullable|integer|min:1|max:999',
+            'assets.*.inventory_item_id' => 'nullable|integer|exists:inventory_items,id',
+            'room_condition' => 'nullable|array',
+            'linen_check' => 'nullable|array',
+            'maintenance_flags' => 'nullable|array',
+            'photo_urls' => 'nullable|array|max:20',
+            'photo_urls.*' => 'nullable|string|max:2048',
+        ]);
+
+        $roomId = (int) $roomStatusBlock->room_id;
+        $booking = $this->activeBookingForRoom($roomId);
+        if (! $booking) {
+            return response()->json(['message' => 'No active booking found for this room.'], 422);
+        }
+
+        $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
+        $penaltiesJson = json_decode($penaltiesRaw, true);
+        $penalties = is_array($penaltiesJson) ? $penaltiesJson : [];
+
+        $roomLoc = InventoryLocation::where('room_id', '=', $roomId, 'and')->first();
+        if (! $roomLoc) {
+            return response()->json(['message' => 'No inventory location mapped to this room.'], 422);
+        }
+
+        $onHandByItem = [];
+        $locRows = DB::table('inventory_item_locations')
+            ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+            ->pluck('quantity', 'inventory_item_id');
+        foreach ($locRows as $itemId => $qty) {
+            $onHandByItem[(int) $itemId] = (float) $qty;
+        }
+
+        $allowedAssetKeys = $this->allowedInspectionAssetKeysForRoom($roomId);
+        foreach (($validated['assets'] ?? []) as $a) {
+            $k = (string) ($a['key'] ?? '');
+            if ($k === '' || ! in_array($k, $allowedAssetKeys, true)) {
+                return response()->json(['message' => 'Invalid or disallowed asset key: ' . $k], 422);
+            }
+        }
+
+        foreach (($validated['minibar'] ?? []) as $ln) {
+            $itemId = (int) ($ln['inventory_item_id'] ?? 0);
+            $qty = (float) ($ln['qty'] ?? 0);
+            if ($qty <= 0) {
+                continue;
+            }
+            $onHand = (float) ($onHandByItem[$itemId] ?? 0);
+            if ($qty > $onHand + 0.0001) {
+                return response()->json([
+                    'message' => 'Minibar quantity exceeds on-hand stock for item #' . $itemId . ' (max ' . round($onHand, 4) . ').',
+                ], 422);
+            }
+        }
+
+        $preview = $this->buildCheckoutInspectionChargePreview($validated, $onHandByItem, $penalties);
+
+        return response()->json([
+            'ok' => true,
+            'booking_id' => (int) $booking->id,
+            'preview' => $preview,
+        ]);
+    }
+
+    /**
+     * Checkout inspection: apply incidental charges and deduct minibar consumption.
+     * - Deduct minibar qty from room inventory location
+     * - Append booking_extra_charges lines
+     * - Increment bookings.extra_charges so reception totals update
+     * - Transition room to inspected (HK snapshot stored on the new block for reopening the sidebar)
+     */
+    public function checkoutInspectionApply(Request $request, RoomStatusBlock $roomStatusBlock)
+    {
+        $this->checkPermission('manage-rooms');
+
+        if (! $roomStatusBlock->is_active) {
+            return response()->json(['message' => 'This status block is no longer active.'], 422);
+        }
+        if ($roomStatusBlock->status !== 'pending_inspection') {
+            return response()->json(['message' => 'Room is not pending inspection.'], 422);
+        }
+
+        $validated = $request->validate([
+            'remarks' => 'nullable|string|max:5000',
+            'minibar' => 'nullable|array',
+            'minibar.*.inventory_item_id' => 'required_with:minibar|exists:inventory_items,id',
+            'minibar.*.qty' => 'required_with:minibar|numeric|min:0',
+            'assets' => 'nullable|array',
+            'assets.*.key' => 'required_with:assets|string|max:100',
+            'assets.*.label' => 'required_with:assets|string|max:255',
+            'assets.*.status' => 'required_with:assets|string|in:missing,damaged',
+            'assets.*.penalty_key' => 'nullable|string|max:100',
+            'assets.*.notes' => 'nullable|string|max:2000',
+            'assets.*.qty' => 'nullable|integer|min:1|max:999',
+            'assets.*.inventory_item_id' => 'nullable|integer|exists:inventory_items,id',
+            'room_condition' => 'nullable|array',
+            'linen_check' => 'nullable|array',
+            'maintenance_flags' => 'nullable|array',
+            'photo_urls' => 'nullable|array|max:20',
+            'photo_urls.*' => 'nullable|string|max:2048',
+        ]);
+
+        $userId = Auth::id();
+        $startDate = (string) $roomStatusBlock->start_date;
+        $endDate = (string) $roomStatusBlock->end_date;
+
+        $roomId = (int) $roomStatusBlock->room_id;
+        $booking = $this->activeBookingForRoom($roomId);
+        if (! $booking) {
+            return response()->json(['message' => 'No active booking found for this room.'], 422);
+        }
+
+        $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
+        $penaltiesJson = json_decode($penaltiesRaw, true);
+        $penalties = is_array($penaltiesJson) ? $penaltiesJson : [];
+
+        $roomLoc = InventoryLocation::where('room_id', '=', $roomId, 'and')->first();
+        if (! $roomLoc) {
+            return response()->json(['message' => 'No inventory location mapped to this room.'], 422);
+        }
+
+        $onHandByItem = [];
+        $locRows = DB::table('inventory_item_locations')
+            ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+            ->pluck('quantity', 'inventory_item_id');
+        foreach ($locRows as $itemId => $qty) {
+            $onHandByItem[(int) $itemId] = (float) $qty;
+        }
+
+        $allowedAssetKeys = $this->allowedInspectionAssetKeysForRoom($roomId);
+        foreach (($validated['assets'] ?? []) as $a) {
+            $k = (string) ($a['key'] ?? '');
+            if ($k === '' || ! in_array($k, $allowedAssetKeys, true)) {
+                return response()->json(['message' => 'Invalid or disallowed asset key: ' . $k], 422);
+            }
+        }
+
+        $bookingExtraChargesHasDescription = Schema::hasColumn('booking_extra_charges', 'description');
+
+        DB::beginTransaction();
+        try {
+            $chargeTotal = 0.0;
+
+            // Minibar: deduct from room location and charge at inventory unit cost (cost_price / conversion_factor).
+            foreach (($validated['minibar'] ?? []) as $ln) {
+                $itemId = (int) $ln['inventory_item_id'];
+                $qty = (float) ($ln['qty'] ?? 0);
+                if ($qty <= 0) continue;
+
+                $onHand = (float) ($onHandByItem[$itemId] ?? 0);
+                if ($qty > $onHand + 0.0001) {
+                    DB::rollBack();
+                    return response()->json([
+                        'message' => 'Minibar quantity exceeds on-hand stock for item #' . $itemId . ' (max ' . round($onHand, 4) . ').',
+                    ], 422);
+                }
+
+                /** @var InventoryItem|null $item */
+                $item = InventoryItem::lockForUpdate()->find($itemId);
+                if (! $item) continue;
+
+                $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
+                $unitCost = (float) ($item->cost_price ?? 0) / $conv;
+                $lineTotal = round($unitCost * $qty, 2);
+
+                // Deduct stock from room location
+                DB::table('inventory_item_locations')->updateOrInsert(
+                    ['inventory_item_id' => $itemId, 'inventory_location_id' => $roomLoc->id],
+                    ['updated_at' => now(), 'created_at' => now()]
+                );
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', '=', $itemId, 'and')
+                    ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+                    ->decrement('quantity', $qty);
+
+                InventoryTransaction::create([
+                    'inventory_item_id' => $itemId,
+                    'inventory_location_id' => $roomLoc->id,
+                    'type' => 'out',
+                    'quantity' => $qty,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => $lineTotal,
+                    'reason' => 'Checkout inspection consumption',
+                    'notes' => 'Minibar/snacks consumed during checkout inspection',
+                    'user_id' => $userId,
+                    'reference_id' => (string) Str::uuid(),
+                    'reference_type' => 'checkout_inspection',
+                ]);
+                InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+
+                $minibarLabel = (string) ($item->name ?? 'Minibar item');
+                $minibarRow = [
+                    'booking_id' => $booking->id,
+                    'source' => 'inspection',
+                    'kind' => 'minibar',
+                    'label' => $minibarLabel,
+                    'qty' => $qty,
+                    'unit_amount' => round($unitCost, 2),
+                    'total_amount' => $lineTotal,
+                    'meta' => [
+                        'inventory_item_id' => $itemId,
+                        'sku' => (string) ($item->sku ?? ''),
+                    ],
+                ];
+                if ($bookingExtraChargesHasDescription) {
+                    $minibarRow['description'] = Str::limit(
+                        sprintf('Checkout inspection — minibar consumption: %s × %s', $minibarLabel, (string) $qty),
+                        500,
+                    );
+                }
+                BookingExtraCharge::create($minibarRow);
+
+                $chargeTotal += $lineTotal;
+            }
+
+            // Assets: charge based on penalties mapping
+            foreach (($validated['assets'] ?? []) as $a) {
+                $key = (string) $a['key'];
+                $label = (string) $a['label'];
+                $status = (string) $a['status'];
+                $penKey = isset($a['penalty_key']) ? trim((string) $a['penalty_key']) : '';
+                $lineNotes = isset($a['notes']) ? trim((string) $a['notes']) : '';
+                $lineQty = isset($a['qty']) ? max(1, (int) $a['qty']) : 1;
+                $invItemId = isset($a['inventory_item_id']) ? (int) $a['inventory_item_id'] : null;
+                if (str_starts_with($key, 'inv_')) {
+                    $fromKey = (int) substr($key, 4);
+                    if ($fromKey > 0) {
+                        $invItemId = $invItemId ?: $fromKey;
+                    }
+                }
+
+                [$amount, $mapLabel] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
+                if ($mapLabel !== null && $mapLabel !== '') {
+                    $label = $mapLabel;
+                }
+
+                $amount = round(max(0.0, $amount), 2);
+                $unitAmount = $amount;
+                $lineTotal = round($unitAmount * $lineQty, 2);
+
+                // Always record missing/damaged assets so reception can list them even when no penalty
+                // is configured (empty penalty key or unknown key in checkout_inspection_penalties).
+                $assetDesc = sprintf(
+                    'Checkout inspection — asset %s: %s',
+                    $status === 'missing' || $status === 'damaged' ? $status : 'issue',
+                    $label,
+                );
+                if ($penKey !== '') {
+                    $assetDesc .= sprintf(' (penalty key: %s)', $penKey);
+                }
+                if ($lineNotes !== '') {
+                    $assetDesc .= ' — ' . Str::limit($lineNotes, 240);
+                }
+                $assetRow = [
+                    'booking_id' => $booking->id,
+                    'source' => 'inspection',
+                    'kind' => 'asset_penalty',
+                    'label' => $label,
+                    'qty' => $lineQty,
+                    'unit_amount' => $unitAmount,
+                    'total_amount' => $lineTotal,
+                    'meta' => [
+                        'asset_key' => $key,
+                        'asset_status' => $status,
+                        'penalty_key' => $penKey !== '' ? $penKey : null,
+                        'notes' => $lineNotes !== '' ? $lineNotes : null,
+                        'inventory_item_id' => $invItemId ?: null,
+                    ],
+                ];
+                if ($bookingExtraChargesHasDescription) {
+                    $assetRow['description'] = Str::limit($assetDesc, 500);
+                }
+                BookingExtraCharge::create($assetRow);
+
+                if ($lineTotal > 0.0001) {
+                    $chargeTotal += $lineTotal;
+                }
+            }
+
+            // Update booking extra charges total (reception UI uses this).
+            if ($chargeTotal > 0.0001) {
+                $booking->extra_charges = (float) ($booking->extra_charges ?? 0) + round($chargeTotal, 2);
+            }
+            if (array_key_exists('remarks', $validated) && trim((string) $validated['remarks']) !== '') {
+                $booking->notes = trim((string) ($booking->notes ?? '')) . "\n" .
+                    '[Inspection: ' . trim((string) $validated['remarks']) . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+            }
+            $booking->save();
+
+            $snapshot = [
+                'remarks' => array_key_exists('remarks', $validated) ? trim((string) $validated['remarks']) : null,
+                'minibar' => [],
+                'assets' => $validated['assets'] ?? [],
+                'cleared' => false,
+                'submitted_at' => now()->toIso8601String(),
+                'booking_id' => (int) $booking->id,
+                'inspector_user_id' => $userId,
+                'inspected_at' => now()->toIso8601String(),
+                'room_condition' => $validated['room_condition'] ?? null,
+                'linen_check' => $validated['linen_check'] ?? null,
+                'maintenance_flags' => $validated['maintenance_flags'] ?? null,
+                'photo_urls' => $validated['photo_urls'] ?? null,
+            ];
+            foreach (($validated['minibar'] ?? []) as $ln) {
+                $itemId = (int) ($ln['inventory_item_id'] ?? 0);
+                $qty = (float) ($ln['qty'] ?? 0);
+                if ($qty <= 0 || $itemId <= 0) {
+                    continue;
+                }
+                $item = InventoryItem::find($itemId, ['id', 'name', 'sku']);
+                $snapshot['minibar'][] = [
+                    'inventory_item_id' => $itemId,
+                    'qty' => $qty,
+                    'name' => $item ? (string) $item->name : '',
+                    'sku' => $item ? (string) ($item->sku ?? '') : '',
+                ];
+            }
+
+            // Hand off to inspected (guest may still be in-house; room chart keeps segment via cellInfo).
+            $roomStatusBlock->update(['is_active' => false]);
+            $newBlock = RoomStatusBlock::create([
+                'room_id' => $roomId,
+                'status' => 'inspected',
+                'start_date' => $startDate,
+                'end_date' => $endDate,
+                'note' => 'Checkout inspection complete (charges applied)',
+                'inspection_snapshot' => $snapshot,
+                'is_active' => true,
+                'created_by' => $userId,
+            ]);
+            Room::where('id', '=', $roomId, 'and')->update(['status' => 'inspected']);
+
+            DB::commit();
+
+            $this->releaseRoomAfterCheckoutInspection($newBlock->fresh());
+
+            if (config('broadcasting.default') !== 'null') {
+                $bookingIdBc = (int) $booking->id;
+                $extraBc = (float) ($booking->extra_charges ?? 0);
+                $addedBc = round($chargeTotal, 2);
+                App::terminating(function () use ($bookingIdBc, $extraBc, $addedBc) {
+                    try {
+                        event(new BookingChargesUpdated(
+                            $bookingIdBc,
+                            $extraBc,
+                            $addedBc,
+                            'Inspection Complete - Additional Charges Applied'
+                        ));
+                    } catch (\Throwable $e) {
+                        report($e);
+                    }
+                });
+            }
+
+            HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'checkout_inspection_apply');
+
+            return response()->json([
+                'message' => 'Inspection completed. Charges applied and room released.',
+                'booking_id' => (int) $booking->id,
+                'extra_charges' => (float) ($booking->extra_charges ?? 0),
+                'added_amount' => round($chargeTotal, 2),
+                'block' => $newBlock->fresh()->load('room.roomType'),
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Occupied rooms (checked-in) overlapping a calendar service date — one row per room.
+     *
+     * @return \Illuminate\Support\Collection<int, BookingSegment>
+     */
+    private function dailyCleaningOccupiedSegments(Carbon $serviceDay): \Illuminate\Support\Collection
+    {
+        $dayStart = $serviceDay->copy()->startOfDay();
+        $dayEnd = $serviceDay->copy()->addDay()->startOfDay();
+
+        return BookingSegment::query()
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+            ->where('check_in_at', '<', $dayEnd)
+            ->where('check_out_at', '>', $dayStart)
+            ->whereHas('booking', function ($q) {
+                $q->where('status', '=', 'checked_in');
+            })
+            ->with(['booking', 'room.roomType'])
+            ->orderBy('room_id')
+            ->get()
+            ->unique('room_id')
+            ->values();
+    }
+
+    /**
+     * Occupied rooms today whose daily cleaning status is still pending (housekeeping nav badge).
+     */
+    private function dailyCleaningPendingCountForNav(Carbon $serviceDay): int
+    {
+        $d = $serviceDay->toDateString();
+        $segments = $this->dailyCleaningOccupiedSegments($serviceDay);
+        $roomIds = $segments->pluck('room_id')->map(fn($id) => (int) $id)->all();
+        if ($roomIds === []) {
+            return 0;
+        }
+
+        $cleanings = DailyRoomCleaning::query()
+            ->where('service_date', '=', $d)
+            ->whereIn('room_id', $roomIds, 'and', false)
+            ->get(['room_id', 'status'])
+            ->keyBy('room_id');
+
+        $n = 0;
+        foreach ($segments as $seg) {
+            $rid = (int) $seg->room_id;
+            $effective = (string) ($cleanings->get($rid)?->status ?? 'pending_cleaning');
+            if ($effective === 'pending_cleaning') {
+                $n++;
+            }
+        }
+
+        return $n;
+    }
+
+    /**
+     * Daily occupied-room cleaning board: checked-in guests + today's cleaning row + consumptions.
+     */
+    public function dailyCleaningIndex(Request $request)
+    {
+        $this->checkPermission('view-rooms');
+
+        $validated = $request->validate([
+            'date' => 'nullable|date',
+            'floor' => 'nullable|string|max:50',
+            'room_type_id' => 'nullable|exists:room_types,id',
+            'assigned_to' => 'nullable|exists:users,id',
+            'assigned_null' => 'nullable|boolean',
+            'status' => 'nullable|in:pending_cleaning,in_progress,cleaned,all',
+        ]);
+
+        $d = isset($validated['date'])
+            ? Carbon::parse($validated['date'])->toDateString()
+            : Carbon::today()->toDateString();
+
+        $segments = $this->dailyCleaningOccupiedSegments(Carbon::parse($d));
+
+        $segments = $segments->filter(function (BookingSegment $seg) use ($validated) {
+            $room = $seg->room;
+            if (! $room) {
+                return false;
+            }
+            if (! empty($validated['floor']) && (string) ($room->floor ?? '') !== (string) $validated['floor']) {
+                return false;
+            }
+            if (! empty($validated['room_type_id']) && (int) $room->room_type_id !== (int) $validated['room_type_id']) {
+                return false;
+            }
+
+            return true;
+        })->values();
+
+        $roomIds = $segments->pluck('room_id')->map(fn($id) => (int) $id)->all();
+
+        $cleanings = DailyRoomCleaning::query()
+            ->where('service_date', '=', $d)
+            ->whereIn('room_id', $roomIds, 'and', false)
+            ->with([
+                'consumptions.inventoryItem:id,name,sku',
+                'assignedUser:id,name',
+                'startedByUser:id,name',
+                'completedByUser:id,name',
+            ])
+            ->get()
+            ->keyBy('room_id');
+
+        $statusFilter = $validated['status'] ?? 'pending_cleaning';
+
+        $rows = [];
+        foreach ($segments as $seg) {
+            $room = $seg->room;
+            $booking = $seg->booking;
+            $cleaning = $cleanings->get((int) $seg->room_id);
+
+            if ($statusFilter !== 'all' && ($cleaning?->status ?? 'pending_cleaning') !== $statusFilter) {
+                continue;
+            }
+            if (! empty($validated['assigned_to'])) {
+                $aid = (int) $validated['assigned_to'];
+                if ((int) ($cleaning?->assigned_to ?? 0) !== $aid) {
+                    continue;
+                }
+            } elseif ($request->boolean('assigned_null')) {
+                if ($cleaning && $cleaning->assigned_to !== null) {
+                    continue;
+                }
+            }
+
+            $rows[] = [
+                'segment_id' => (int) $seg->id,
+                'room_id' => (int) $seg->room_id,
+                'booking_id' => $booking ? (int) $booking->id : null,
+                'guest_name' => $booking ? (string) ($booking->guest_name ?? '') : '',
+                'room' => $room,
+                'cleaning' => $cleaning,
+                'effective_status' => $cleaning?->status ?? 'pending_cleaning',
+            ];
+        }
+
+        return response()->json([
+            'service_date' => $d,
+            'rows' => $rows,
+        ]);
+    }
+
+    /**
+     * Update cleaning status, assignment, and notes for a room on a service date.
+     */
+    public function dailyCleaningUpdateStatus(Request $request)
+    {
+        $this->checkPermission('manage-rooms');
+
+        $validated = $request->validate([
+            'room_id' => 'required|exists:rooms,id',
+            'service_date' => 'required|date',
+            'status' => 'required|in:pending_cleaning,in_progress,cleaned',
+            'assigned_to' => 'nullable|exists:users,id',
+            'remarks' => 'nullable|string|max:5000',
+            'maintenance_note' => 'nullable|string|max:5000',
+            'notify_front_desk' => 'nullable|boolean',
+            'checklist_done' => 'nullable|array',
+        ]);
+
+        $userId = Auth::id();
+        $d = Carbon::parse($validated['service_date'])->toDateString();
+        $roomId = (int) $validated['room_id'];
+
+        $segments = $this->dailyCleaningOccupiedSegments(Carbon::parse($d));
+        $seg = $segments->firstWhere('room_id', '=', $roomId);
+        if (! $seg) {
+            return response()->json(['message' => 'Room is not occupied (checked-in) on this date.'], 422);
+        }
+
+        $bookingId = $seg->booking ? (int) $seg->booking->id : null;
+        $room = Room::find($roomId, ['id', 'room_number']);
+
+        DB::beginTransaction();
+        try {
+            /** @var DailyRoomCleaning $cleaning */
+            $cleaning = DailyRoomCleaning::firstOrCreate(
+                [
+                    'room_id' => $roomId,
+                    'service_date' => $d,
+                ],
+                [
+                    'booking_id' => $bookingId,
+                    'status' => 'pending_cleaning',
+                ]
+            );
+
+            if ($bookingId && (int) ($cleaning->booking_id ?? 0) !== $bookingId) {
+                $cleaning->booking_id = $bookingId;
+            }
+
+            $newStatus = (string) $validated['status'];
+            $cleaning->status = $newStatus;
+
+            if (array_key_exists('assigned_to', $validated)) {
+                $cleaning->assigned_to = $validated['assigned_to'];
+            }
+            if (array_key_exists('remarks', $validated)) {
+                $cleaning->remarks = $validated['remarks'];
+            }
+            if (array_key_exists('maintenance_note', $validated)) {
+                $cleaning->maintenance_note = $validated['maintenance_note'];
+            }
+            if (array_key_exists('checklist_done', $validated)) {
+                $cleaning->checklist_done = $this->sanitizeHousekeepingChecklistDone($validated['checklist_done'] ?? null);
+            }
+
+            if ($newStatus === 'pending_cleaning') {
+                $cleaning->started_at = null;
+                $cleaning->started_by = null;
+                $cleaning->completed_at = null;
+                $cleaning->completed_by = null;
+            } elseif ($newStatus === 'in_progress') {
+                if (! $cleaning->started_at) {
+                    $cleaning->started_at = now();
+                    $cleaning->started_by = $userId;
+                }
+                $cleaning->completed_at = null;
+                $cleaning->completed_by = null;
+            } elseif ($newStatus === 'cleaned') {
+                if (! $cleaning->started_at) {
+                    $cleaning->started_at = now();
+                    $cleaning->started_by = $userId;
+                }
+                if (! $cleaning->completed_at) {
+                    $cleaning->completed_at = now();
+                    $cleaning->completed_by = $userId;
+                }
+            }
+
+            $cleaning->save();
+            DB::commit();
+
+            HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'daily_cleaning_status');
+
+            $notify = $request->boolean('notify_front_desk') && $newStatus === 'cleaned';
+            if ($notify && ! $cleaning->front_desk_notified_at && config('broadcasting.default') !== 'null') {
+                $guest = $seg->booking ? (string) ($seg->booking->guest_name ?? '') : '';
+                $msg = 'Daily cleaning completed for room #' . (string) ($room?->room_number ?? $roomId);
+                $rn = (string) ($room?->room_number ?? '');
+                $guestBroadcast = $guest !== '' ? $guest : null;
+                App::terminating(function () use ($roomId, $rn, $bookingId, $d, $msg, $guestBroadcast) {
+                    try {
+                        event(new DailyRoomCleaningDeskNotify(
+                            $roomId,
+                            $rn,
+                            $bookingId,
+                            $guestBroadcast,
+                            $d,
+                            $msg,
+                        ));
+                    } catch (\Throwable $e) {
+                        report($e);
+                    }
+                });
+                $cleaning->front_desk_notified_at = now();
+                $cleaning->save();
+            }
+
+            return response()->json([
+                'cleaning' => $cleaning->fresh()->load([
+                    'consumptions.inventoryItem:id,name,sku',
+                    'assignedUser:id,name',
+                    'startedByUser:id,name',
+                    'completedByUser:id,name',
+                    'room:id,room_number,floor,room_type_id',
+                ]),
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Record complimentary / in-room consumables used during daily cleaning (deducts room store).
+     */
+    public function dailyCleaningRecordConsumption(Request $request)
+    {
+        $this->checkPermission('manage-rooms');
+
+        $validated = $request->validate([
+            'room_id' => 'required|exists:rooms,id',
+            'service_date' => 'required|date',
+            'lines' => 'required|array|min:1',
+            'lines.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'lines.*.qty' => 'required|numeric|min:0.001|max:99999',
+            'lines.*.notes' => 'nullable|string|max:500',
+            'checklist_done' => 'nullable|array',
+        ]);
+
+        $userId = Auth::id();
+        $d = Carbon::parse($validated['service_date'])->toDateString();
+        $roomId = (int) $validated['room_id'];
+
+        $segments = $this->dailyCleaningOccupiedSegments(Carbon::parse($d));
+        $seg = $segments->firstWhere('room_id', '=', $roomId);
+        if (! $seg) {
+            return response()->json(['message' => 'Room is not occupied (checked-in) on this date.'], 422);
+        }
+
+        $bookingId = $seg->booking ? (int) $seg->booking->id : null;
+
+        $roomLoc = InventoryLocation::where('room_id', '=', $roomId, 'and')->first();
+        if (! $roomLoc) {
+            return response()->json(['message' => 'No inventory location is mapped to this room.'], 422);
+        }
+
+        DB::beginTransaction();
+        try {
+            /** @var DailyRoomCleaning $cleaning */
+            $cleaning = DailyRoomCleaning::firstOrCreate(
+                [
+                    'room_id' => $roomId,
+                    'service_date' => $d,
+                ],
+                [
+                    'booking_id' => $bookingId,
+                    'status' => 'pending_cleaning',
+                ]
+            );
+            if ($bookingId && (int) ($cleaning->booking_id ?? 0) !== $bookingId) {
+                $cleaning->booking_id = $bookingId;
+                $cleaning->save();
+            }
+
+            $onHand = [];
+            $locRows = DB::table('inventory_item_locations')
+                ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+                ->pluck('quantity', 'inventory_item_id');
+            foreach ($locRows as $itemId => $qty) {
+                $onHand[(int) $itemId] = (float) $qty;
+            }
+
+            $createdLines = [];
+            foreach ($validated['lines'] as $ln) {
+                $itemId = (int) $ln['inventory_item_id'];
+                $qty = (float) $ln['qty'];
+                $available = (float) ($onHand[$itemId] ?? 0);
+                if ($qty > $available + 0.0001) {
+                    DB::rollBack();
+
+                    return response()->json([
+                        'message' => 'Quantity exceeds on-hand stock in the room for item #' . $itemId . ' (max ' . round($available, 4) . ').',
+                    ], 422);
+                }
+
+                DB::table('inventory_item_locations')->updateOrInsert(
+                    ['inventory_item_id' => $itemId, 'inventory_location_id' => $roomLoc->id],
+                    ['updated_at' => now(), 'created_at' => now()]
+                );
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', '=', $itemId, 'and')
+                    ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+                    ->decrement('quantity', $qty);
+
+                /** @var InventoryItem|null $item */
+                $item = InventoryItem::lockForUpdate()->find($itemId);
+                $conv = max(1.0, (float) ($item?->conversion_factor ?: 1));
+                $unitCost = (float) ($item?->cost_price ?? 0) / $conv;
+
+                InventoryTransaction::create([
+                    'inventory_item_id' => $itemId,
+                    'inventory_location_id' => $roomLoc->id,
+                    'type' => 'out',
+                    'quantity' => $qty,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($qty * $unitCost, 2),
+                    'reason' => 'Daily room cleaning consumption',
+                    'notes' => 'Occupied-room service — daily cleaning #' . $cleaning->id,
+                    'user_id' => $userId,
+                    'reference_id' => (string) $cleaning->id,
+                    'reference_type' => 'daily_room_cleaning',
+                ]);
+                InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+
+                $onHand[$itemId] = $available - $qty;
+
+                $row = DailyRoomCleaningConsumption::create([
+                    'daily_room_cleaning_id' => $cleaning->id,
+                    'inventory_item_id' => $itemId,
+                    'qty' => $qty,
+                    'notes' => $ln['notes'] ?? null,
+                    'recorded_by' => $userId,
+                ]);
+                $createdLines[] = $row->load('inventoryItem:id,name,sku');
+            }
+
+            if (array_key_exists('checklist_done', $validated)) {
+                $cleaning->checklist_done = $this->sanitizeHousekeepingChecklistDone($validated['checklist_done'] ?? null);
+                $cleaning->save();
+            }
+
+            DB::commit();
+
+            HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'daily_cleaning_consumption');
+
+            return response()->json([
+                'cleaning' => $cleaning->fresh()->load([
+                    'consumptions.inventoryItem:id,name,sku',
+                    'assignedUser:id,name',
+                ]),
+                'lines' => $createdLines,
+            ]);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    /**
+     * Recent daily cleaning records for a room (audit / history).
+     */
+    public function dailyCleaningHistory(Request $request)
+    {
+        $this->checkPermission('view-rooms');
+
+        $validated = $request->validate([
+            'room_id' => 'required|exists:rooms,id',
+            'limit' => 'nullable|integer|min:1|max:90',
+        ]);
+
+        $limit = (int) ($validated['limit'] ?? 30);
+        $roomId = (int) $validated['room_id'];
+
+        $items = DailyRoomCleaning::query()
+            ->where('room_id', '=', $roomId, 'and')
+            ->with([
+                'consumptions.inventoryItem:id,name,sku',
+                'assignedUser:id,name',
+                'startedByUser:id,name',
+                'completedByUser:id,name',
+            ])
+            ->orderByDesc('service_date')
+            ->orderByDesc('id')
+            ->limit($limit)
+            ->get();
+
+        return response()->json(['history' => $items]);
+    }
+
+    /**
+     * Unified housekeeping timeline for a room (daily occupied service + turnover jobs).
+     */
+    public function roomCleaningHistory(Request $request, Room $room)
+    {
+        $this->checkPermission('view-rooms');
+
+        $limit = min(120, max(1, (int) $request->query('limit', 60)));
+
+        $dailyLabel = [
+            'pending_cleaning' => 'Pending cleaning',
+            'in_progress' => 'In progress',
+            'cleaned' => 'Cleaned',
+        ];
+
+        $dailyRows = DailyRoomCleaning::query()
+            ->where('room_id', '=', $room->id, 'and')
+            ->with([
+                'assignedUser:id,name',
+                'startedByUser:id,name',
+                'completedByUser:id,name',
+            ])
+            ->orderByDesc('service_date')
+            ->orderByDesc('id')
+            ->limit($limit)
+            ->get();
+
+        $dailyEntries = $dailyRows->map(function (DailyRoomCleaning $r) use ($dailyLabel) {
+            $occ = $r->completed_at ?? $r->started_at ?? Carbon::parse($r->service_date)->endOfDay();
+            $staff = $r->completedByUser?->name
+                ?? $r->startedByUser?->name
+                ?? $r->assignedUser?->name;
+
+            $remarks = trim(implode("\n\n", array_filter([
+                $r->remarks ? (string) $r->remarks : null,
+                $r->maintenance_note ? 'Maintenance: ' . (string) $r->maintenance_note : null,
+            ])));
+
+            return [
+                'source' => 'daily_service',
+                'source_label' => 'Daily service (occupied)',
+                'occurred_at' => $occ instanceof Carbon ? $occ->toIso8601String() : $occ,
+                'service_date' => $r->service_date instanceof Carbon ? $r->service_date->toDateString() : (string) $r->service_date,
+                'cleaning_status' => $dailyLabel[$r->status] ?? $r->status,
+                'staff_name' => $staff,
+                'remarks' => $remarks !== '' ? $remarks : null,
+                'inspection_status' => null,
+            ];
+        })->all();
+
+        $jobs = HousekeepingJob::query()
+            ->where('room_id', '=', $room->id, 'and')
+            ->with([
+                'block:id,status,is_active,start_date,end_date',
+                'startedByUser:id,name',
+                'finishedByUser:id,name',
+            ])
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->limit($limit)
+            ->get();
+
+        $jobEntries = $jobs->map(function (HousekeepingJob $job) {
+            $occ = $job->updated_at ?? $job->created_at;
+            $staff = $job->finishedByUser?->name ?? $job->startedByUser?->name;
+            $block = $job->block;
+            $jobStatusLabel = match ($job->status) {
+                'completed' => 'Completed',
+                'inspected' => 'Awaiting supervisor release',
+                'in_progress' => 'Cleaning in progress',
+                default => (string) $job->status,
+            };
+
+            $inspection = match ($job->status) {
+                'completed' => 'Supervisor released (room available)',
+                'inspected' => $block && $block->is_active && $block->status === 'inspected'
+                    ? 'Pending supervisor sign-off'
+                    : ($block ? 'Turnover inspection stage' : null),
+                default => null,
+            };
+
+            $remarks = trim(implode("\n\n", array_filter([
+                $job->remarks ? (string) $job->remarks : null,
+                $job->issues_summary ? 'Issues: ' . (string) $job->issues_summary : null,
+            ])));
+
+            return [
+                'source' => 'turnover',
+                'source_label' => 'Turnover / checkout clean',
+                'occurred_at' => $occ instanceof Carbon ? $occ->toIso8601String() : (string) $occ,
+                'service_date' => $occ instanceof Carbon ? $occ->toDateString() : Carbon::parse($job->created_at)->toDateString(),
+                'cleaning_status' => $jobStatusLabel,
+                'staff_name' => $staff,
+                'remarks' => $remarks !== '' ? $remarks : null,
+                'inspection_status' => $inspection,
+            ];
+        })->all();
+
+        $merged = array_merge($dailyEntries, $jobEntries);
+        usort($merged, function ($a, $b) {
+            return strcmp((string) ($b['occurred_at'] ?? ''), (string) ($a['occurred_at'] ?? ''));
+        });
+        $merged = array_slice($merged, 0, $limit);
+
+        return response()->json([
+            'room_id' => (int) $room->id,
+            'entries' => array_values($merged),
         ]);
     }
 }

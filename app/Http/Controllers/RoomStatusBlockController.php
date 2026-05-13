@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\HousekeepingStateUpdated;
 use App\Models\BookingSegment;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
@@ -33,9 +34,9 @@ class RoomStatusBlockController extends Controller
         $end = isset($validated['end']) ? Carbon::parse($validated['end'])->toDateString() : null;
 
         return RoomStatusBlock::with('room')
-            ->when(array_key_exists('is_active', $validated), fn ($q) => $q->where('is_active', (bool) $validated['is_active']))
-            ->when($validated['room_id'] ?? null, fn ($q, $roomId) => $q->where('room_id', $roomId))
-            ->when($validated['status'] ?? null, fn ($q, $status) => $q->where('status', $status))
+            ->when(array_key_exists('is_active', $validated), fn($q) => $q->where('is_active', (bool) $validated['is_active']))
+            ->when($validated['room_id'] ?? null, fn($q, $roomId) => $q->where('room_id', $roomId))
+            ->when($validated['status'] ?? null, fn($q, $status) => $q->where('status', $status))
             ->when($start && $end, function ($q) use ($start, $end) {
                 // overlap: start_date < end AND end_date > start
                 $q->where('start_date', '<', $end)->where('end_date', '>', $start);
@@ -99,6 +100,8 @@ class RoomStatusBlockController extends Controller
         // Sync Room status column
         Room::where('id', $block->room_id)->update(['status' => $block->status]);
 
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $block->room_id], 'room_status_block_store');
+
         return response()->json($block->load('room'), 201);
     }
 
@@ -119,6 +122,8 @@ class RoomStatusBlockController extends Controller
             Room::where('id', $roomStatusBlock->room_id)->update(['status' => 'available']);
         }
 
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'room_status_block_update');
+
         return response()->json($roomStatusBlock->load('room'));
     }
 
@@ -130,6 +135,8 @@ class RoomStatusBlockController extends Controller
 
         // Restore room to available
         Room::where('id', $roomId)->update(['status' => 'available']);
+
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomId], 'room_status_block_destroy');
 
         return response()->json(null, 204);
     }

@@ -12,6 +12,7 @@ class RoomStatusBlock extends Model
         'start_date',
         'end_date',
         'note',
+        'inspection_snapshot',
         'is_active',
         'created_by',
     ];
@@ -20,6 +21,7 @@ class RoomStatusBlock extends Model
         'is_active' => 'boolean',
         'start_date' => 'date:Y-m-d',
         'end_date' => 'date:Y-m-d',
+        'inspection_snapshot' => 'array',
     ];
 
     public function room()

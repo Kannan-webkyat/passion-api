@@ -70,16 +70,27 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Bookings & Room Chart
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
+    Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
     Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
+    Route::get('housekeeping/rooms/{room}/checkout-inspection-context', [HousekeepingController::class, 'checkoutInspectionContext']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/job', [HousekeepingController::class, 'upsertJob']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/finish', [HousekeepingController::class, 'finish']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/clear', [HousekeepingController::class, 'checkoutInspectionClear']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/validate', [HousekeepingController::class, 'checkoutInspectionValidate']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/apply', [HousekeepingController::class, 'checkoutInspectionApply']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-inspected', [HousekeepingController::class, 'markInspected']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
+    Route::get('housekeeping/daily-cleaning', [HousekeepingController::class, 'dailyCleaningIndex']);
+    Route::post('housekeeping/daily-cleaning/status', [HousekeepingController::class, 'dailyCleaningUpdateStatus']);
+    Route::post('housekeeping/daily-cleaning/consumption', [HousekeepingController::class, 'dailyCleaningRecordConsumption']);
+    Route::get('housekeeping/daily-cleaning/history', [HousekeepingController::class, 'dailyCleaningHistory']);
 
     Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);
     Route::get('bookings/chart', [BookingController::class, 'chart']);
     Route::get('bookings/summary', [BookingController::class, 'summary']);
+    Route::post('bookings/{booking}/request-inspection', [BookingController::class, 'requestInspection']);
     Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
     Route::post('bookings/{booking}/late-checkout', [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
@@ -87,6 +98,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('bookings/{booking}/voucher', [BookingController::class, 'reservationVoucher']);
     Route::get('bookings/{booking}/billing', [BookingController::class, 'reservationBilling']);
     Route::get('bookings/{booking}/folio-postings', [BookingController::class, 'folioPostings']);
+    Route::get('bookings/{booking}/inspection-charges', [BookingController::class, 'inspectionCharges']);
     Route::get('bookings/{booking}/folio-orders/{order}', [BookingController::class, 'folioOrderDetail'])->whereNumber('order');
     Route::post('bookings/{booking}/split-stay', [BookingController::class, 'splitStay']);
     Route::get('bookings/available-rooms', [BookingController::class, 'getAvailableRooms']);

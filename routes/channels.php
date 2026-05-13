@@ -12,22 +12,47 @@ Broadcast::channel('pos.restaurant.{restaurantId}', function ($user, $restaurant
     $rid = (int) $restaurantId;
 
     if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
-        return RestaurantMaster::where('id', $rid)->where('is_active', true)->exists();
+        return RestaurantMaster::where('id', '=', $rid, 'and')->where('is_active', '=', true, 'and')->exists();
     }
 
-    $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn ($id) => (int) $id)->all();
+    $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn($id) => (int) $id)->all();
     if (count($assigned) > 0) {
         return in_array($rid, $assigned, true);
     }
 
-    $deptIds = $user->departments()->pluck('departments.id')->map(fn ($id) => (int) $id)->all();
+    $deptIds = $user->departments()->pluck('departments.id')->map(fn($id) => (int) $id)->all();
     if (count($deptIds) > 0) {
-        return RestaurantMaster::where('id', $rid)
-            ->where('is_active', true)
+        return RestaurantMaster::where('id', '=', $rid, 'and')
+            ->where('is_active', '=', true, 'and')
             ->where(function ($q) use ($deptIds) {
                 $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
             })
             ->exists();
+    }
+
+    return false;
+});
+
+/** Housekeeping daily cleaning → front desk toast (occupied room service complete). */
+Broadcast::channel('reception.housekeeping', function ($user) {
+    if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+        return true;
+    }
+    if (method_exists($user, 'can') && ($user->can('view-rooms') || $user->can('reservation'))) {
+        return true;
+    }
+
+    return false;
+});
+
+/** Reception live billing updates for a booking (checkout inspection charges). */
+Broadcast::channel('reception.booking.{bookingId}', function ($user, $bookingId) {
+    // Same security intent as reception screens: allow staff who can view rooms / reservations.
+    if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+        return true;
+    }
+    if (method_exists($user, 'can') && ($user->can('view-rooms') || $user->can('reservation'))) {
+        return true;
     }
 
     return false;
