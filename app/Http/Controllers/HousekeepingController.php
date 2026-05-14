@@ -15,16 +15,17 @@ use App\Models\HousekeepingJobLine;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
+use App\Models\LaundryRequest;
 use App\Models\MenuItem;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
 use App\Models\PosPayment;
 use App\Models\RestaurantMaster;
-use App\Models\RoomParTemplate;
 use App\Models\Room;
+use App\Models\RoomParTemplate;
 use App\Models\RoomStatusBlock;
-use App\Models\User;
 use App\Models\Setting;
+use App\Models\User;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -232,13 +233,31 @@ class HousekeepingController extends Controller
         // Daily room cleaning nav badge: pending service only (matches daily board default filter).
         $dailyCleaning = $this->dailyCleaningPendingCountForNav(Carbon::today());
 
+        $laundryPendingPickup = (int) LaundryRequest::query()
+            ->where('status', '=', LaundryRequest::STATUS_PENDING_PICKUP)
+            ->count();
+
+        $laundryReady = (int) LaundryRequest::query()
+            ->where('status', '=', LaundryRequest::STATUS_READY)
+            ->count();
+
+        $laundryAwaitingPost = (int) LaundryRequest::query()
+            ->where('status', '=', LaundryRequest::STATUS_DELIVERED)
+            ->whereNull('posted_at')
+            ->count();
+
+        $laundryActionable = $laundryPendingPickup + $laundryReady + $laundryAwaitingPost;
+
         return response()->json([
             'dirty' => $dirty,
             'checkout_inspection' => $checkoutInspection,
             'cleaning' => $cleaning,
             'daily_cleaning' => $dailyCleaning,
             'inspected' => $inspected,
-            'laundry' => null,
+            'laundry' => $laundryActionable,
+            'laundry_pending_pickup' => $laundryPendingPickup,
+            'laundry_ready' => $laundryReady,
+            'laundry_awaiting_post' => $laundryAwaitingPost,
         ]);
     }
 
@@ -319,18 +338,18 @@ class HousekeepingController extends Controller
         $guestRootIds = \App\Models\InventoryCategory::query()
             ->where('name', 'like', 'Guest Amenities%', 'and')
             ->pluck('id')
-            ->map(fn($id) => (int) $id)
+            ->map(fn ($id) => (int) $id)
             ->all();
         $guestChildIds = $guestRootIds === [] ? [] : \App\Models\InventoryCategory::query()
             ->whereIn('parent_id', $guestRootIds, 'and', false)
             ->pluck('id')
-            ->map(fn($id) => (int) $id)
+            ->map(fn ($id) => (int) $id)
             ->all();
 
         $amenityCatIds = collect($amenityCats)
             ->merge($guestRootIds)
             ->merge($guestChildIds)
-            ->map(fn($id) => (int) $id)
+            ->map(fn ($id) => (int) $id)
             ->unique()
             ->values()
             ->all();
@@ -338,9 +357,9 @@ class HousekeepingController extends Controller
         $amenities = $amenityCatIds === []
             ? collect()
             : InventoryItem::query()
-            ->whereIn('category_id', $amenityCatIds, 'and', false)
-            ->orderBy('name')
-            ->get(['id', 'name', 'sku', 'category_id']);
+                ->whereIn('category_id', $amenityCatIds, 'and', false)
+                ->orderBy('name')
+                ->get(['id', 'name', 'sku', 'category_id']);
 
         // Occupied-room daily cleaning: only consumable amenities (PAR kind=amenity) with qty > 0 in room.
         if (request()->boolean('for_daily_cleaning') && $roomContextEarly) {
@@ -368,9 +387,9 @@ class HousekeepingController extends Controller
             $amenities = $positiveIds === []
                 ? collect()
                 : InventoryItem::query()
-                ->whereIn('id', array_keys($positiveIds), 'and', false)
-                ->orderBy('name')
-                ->get(['id', 'name', 'sku', 'category_id']);
+                    ->whereIn('id', array_keys($positiveIds), 'and', false)
+                    ->orderBy('name')
+                    ->get(['id', 'name', 'sku', 'category_id']);
         }
 
         // Minibar items: direct-sale inventory items with a linked menu item for POS posting
@@ -388,10 +407,11 @@ class HousekeepingController extends Controller
             ->whereNotNull('inventory_item_id', 'and')
             ->get($menuCols);
 
-        $menuMap = $menuByInventory->keyBy(fn($m) => (int) $m->inventory_item_id);
+        $menuMap = $menuByInventory->keyBy(fn ($m) => (int) $m->inventory_item_id);
 
         $minibarPayload = $minibar->map(function ($i) use ($menuMap) {
             $m = $menuMap[(int) $i->id] ?? null;
+
             return [
                 'inventory_item_id' => (int) $i->id,
                 'sku' => (string) $i->sku,
@@ -479,7 +499,7 @@ class HousekeepingController extends Controller
                 continue;
             }
             $out[] = [
-                'key' => 'inv_' . $iid,
+                'key' => 'inv_'.$iid,
                 'inventory_item_id' => $iid,
                 'label' => (string) ($ln['item_name'] ?? 'Asset'),
                 'sku' => (string) ($ln['sku'] ?? ''),
@@ -613,7 +633,7 @@ class HousekeepingController extends Controller
             'room_number' => (string) $room->room_number,
             'booking' => $booking ? [
                 'id' => (int) $booking->id,
-                'guest_name' => (string) ($booking->guest_name ?? trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''))),
+                'guest_name' => (string) ($booking->guest_name ?? trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''))),
                 'check_in' => $booking->check_in,
                 'check_out' => $booking->check_out,
                 'check_in_at' => $booking->check_in_at,
@@ -629,10 +649,14 @@ class HousekeepingController extends Controller
 
     private function roomContextPayload(?int $roomId): ?array
     {
-        if (! $roomId) return null;
+        if (! $roomId) {
+            return null;
+        }
 
         $room = Room::with('roomType')->find($roomId, ['id', 'room_number', 'room_type_id']);
-        if (! $room) return null;
+        if (! $room) {
+            return null;
+        }
 
         $roomLoc = InventoryLocation::where('room_id', '=', $room->id, 'and')->first();
 
@@ -667,7 +691,9 @@ class HousekeepingController extends Controller
 
             $positiveIds = [];
             foreach ($onHand as $iid => $q) {
-                if ((float) $q > 0) $positiveIds[] = (int) $iid;
+                if ((float) $q > 0) {
+                    $positiveIds[] = (int) $iid;
+                }
             }
             if (! empty($positiveIds)) {
                 $items = InventoryItem::query()
@@ -842,6 +868,7 @@ class HousekeepingController extends Controller
             return response()->json($job->fresh()->load('lines'));
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -902,7 +929,7 @@ class HousekeepingController extends Controller
                     $st = (string) (($ln->meta['status'] ?? '') ?: '');
                     if (in_array($st, ['needs_repair', 'missing'], true)) {
                         $assetProblem = true;
-                        $assetNotes[] = ($ln->meta['label'] ?? $ln->meta['key'] ?? 'Asset') . ': ' . $st;
+                        $assetNotes[] = ($ln->meta['label'] ?? $ln->meta['key'] ?? 'Asset').': '.$st;
                     }
                 }
             }
@@ -928,7 +955,9 @@ class HousekeepingController extends Controller
 
             $lines = $job->lines->whereIn('kind', ['amenity', 'minibar'])->values();
             foreach ($lines as $ln) {
-                if (! $ln->inventory_item_id) continue;
+                if (! $ln->inventory_item_id) {
+                    continue;
+                }
                 $itemId = (int) $ln->inventory_item_id;
 
                 $par = (float) ($parMap[$itemId] ?? 0);
@@ -1037,7 +1066,7 @@ class HousekeepingController extends Controller
 
             // If any asset is missing/broken, put room on maintenance until cleared.
             if ($assetProblem) {
-                $note = 'HK asset issue: ' . implode('; ', array_slice($assetNotes, 0, 3));
+                $note = 'HK asset issue: '.implode('; ', array_slice($assetNotes, 0, 3));
                 RoomStatusBlock::create([
                     'room_id' => $roomStatusBlock->room_id,
                     'status' => 'maintenance',
@@ -1072,6 +1101,7 @@ class HousekeepingController extends Controller
             ]);
         } catch (\Exception $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -1122,7 +1152,9 @@ class HousekeepingController extends Controller
             ->first();
 
         $b = $seg?->booking;
-        if ($b && $b->status === 'checked_in') return $b;
+        if ($b && $b->status === 'checked_in') {
+            return $b;
+        }
 
         // Fallback: booking.room_id for legacy
         return Booking::query()
@@ -1159,15 +1191,33 @@ class HousekeepingController extends Controller
             'closed_at' => now(),
             'notes' => 'Minibar posting (housekeeping)',
         ];
-        if ($hasPosOrders('order_type')) $orderData['order_type'] = 'room_service';
-        if ($hasPosOrders('table_id')) $orderData['table_id'] = null;
-        if ($hasPosOrders('business_date')) $orderData['business_date'] = Carbon::today()->toDateString();
-        if ($hasPosOrders('waiter_id')) $orderData['waiter_id'] = null;
-        if ($hasPosOrders('opened_by')) $orderData['opened_by'] = $userId;
-        if ($hasPosOrders('room_id')) $orderData['room_id'] = $booking->room_id;
-        if ($hasPosOrders('booking_id')) $orderData['booking_id'] = $booking->id;
-        if ($hasPosOrders('customer_name')) $orderData['customer_name'] = $booking->guest_name ?? trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''));
-        if ($hasPosOrders('customer_phone')) $orderData['customer_phone'] = $booking->phone ?? null;
+        if ($hasPosOrders('order_type')) {
+            $orderData['order_type'] = 'room_service';
+        }
+        if ($hasPosOrders('table_id')) {
+            $orderData['table_id'] = null;
+        }
+        if ($hasPosOrders('business_date')) {
+            $orderData['business_date'] = Carbon::today()->toDateString();
+        }
+        if ($hasPosOrders('waiter_id')) {
+            $orderData['waiter_id'] = null;
+        }
+        if ($hasPosOrders('opened_by')) {
+            $orderData['opened_by'] = $userId;
+        }
+        if ($hasPosOrders('room_id')) {
+            $orderData['room_id'] = $booking->room_id;
+        }
+        if ($hasPosOrders('booking_id')) {
+            $orderData['booking_id'] = $booking->id;
+        }
+        if ($hasPosOrders('customer_name')) {
+            $orderData['customer_name'] = $booking->guest_name ?? trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''));
+        }
+        if ($hasPosOrders('customer_phone')) {
+            $orderData['customer_phone'] = $booking->phone ?? null;
+        }
 
         $order = PosOrder::create($orderData);
 
@@ -1177,13 +1227,19 @@ class HousekeepingController extends Controller
 
         foreach ($minibarLines as $ln) {
             $qty = (float) ($ln->qty ?? 0);
-            if ($qty <= 0) continue;
+            if ($qty <= 0) {
+                continue;
+            }
 
             $menuItemId = (int) ($ln->menu_item_id ?? 0);
-            if ($menuItemId <= 0) continue;
+            if ($menuItemId <= 0) {
+                continue;
+            }
 
             $menu = MenuItem::find($menuItemId, ['id', 'name', 'price', 'tax_rate']);
-            if (! $menu) continue;
+            if (! $menu) {
+                continue;
+            }
 
             $unit = (float) ($menu->price ?? 0);
             $rate = (float) ($menu->tax_rate ?? 0);
@@ -1201,9 +1257,15 @@ class HousekeepingController extends Controller
                 'kot_sent' => false,
                 'notes' => 'Minibar (HK)',
             ];
-            if ($hasPosOrderItems('price_tax_inclusive')) $oi['price_tax_inclusive'] = false;
-            if ($hasPosOrderItems('status')) $oi['status'] = 'active';
-            if ($hasPosOrderItems('inventory_deducted')) $oi['inventory_deducted'] = true;
+            if ($hasPosOrderItems('price_tax_inclusive')) {
+                $oi['price_tax_inclusive'] = false;
+            }
+            if ($hasPosOrderItems('status')) {
+                $oi['status'] = 'active';
+            }
+            if ($hasPosOrderItems('inventory_deducted')) {
+                $oi['inventory_deducted'] = true;
+            }
 
             PosOrderItem::create($oi);
 
@@ -1225,7 +1287,9 @@ class HousekeepingController extends Controller
             'paid_at' => now(),
             'received_by' => $userId,
         ];
-        if ($hasPosPayments('business_date')) $pay['business_date'] = Carbon::today();
+        if ($hasPosPayments('business_date')) {
+            $pay['business_date'] = Carbon::today();
+        }
         PosPayment::create($pay);
 
         // Keep booking.extra_charges aligned (UI uses this as “posted to room” total).
@@ -1324,6 +1388,7 @@ class HousekeepingController extends Controller
             ]);
         } catch (\Throwable $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -1389,7 +1454,7 @@ class HousekeepingController extends Controller
         foreach (($validated['assets'] ?? []) as $a) {
             $k = (string) ($a['key'] ?? '');
             if ($k === '' || ! in_array($k, $allowedAssetKeys, true)) {
-                return response()->json(['message' => 'Invalid or disallowed asset key: ' . $k], 422);
+                return response()->json(['message' => 'Invalid or disallowed asset key: '.$k], 422);
             }
         }
 
@@ -1402,7 +1467,7 @@ class HousekeepingController extends Controller
             $onHand = (float) ($onHandByItem[$itemId] ?? 0);
             if ($qty > $onHand + 0.0001) {
                 return response()->json([
-                    'message' => 'Minibar quantity exceeds on-hand stock for item #' . $itemId . ' (max ' . round($onHand, 4) . ').',
+                    'message' => 'Minibar quantity exceeds on-hand stock for item #'.$itemId.' (max '.round($onHand, 4).').',
                 ], 422);
             }
         }
@@ -1485,7 +1550,7 @@ class HousekeepingController extends Controller
         foreach (($validated['assets'] ?? []) as $a) {
             $k = (string) ($a['key'] ?? '');
             if ($k === '' || ! in_array($k, $allowedAssetKeys, true)) {
-                return response()->json(['message' => 'Invalid or disallowed asset key: ' . $k], 422);
+                return response()->json(['message' => 'Invalid or disallowed asset key: '.$k], 422);
             }
         }
 
@@ -1499,19 +1564,24 @@ class HousekeepingController extends Controller
             foreach (($validated['minibar'] ?? []) as $ln) {
                 $itemId = (int) $ln['inventory_item_id'];
                 $qty = (float) ($ln['qty'] ?? 0);
-                if ($qty <= 0) continue;
+                if ($qty <= 0) {
+                    continue;
+                }
 
                 $onHand = (float) ($onHandByItem[$itemId] ?? 0);
                 if ($qty > $onHand + 0.0001) {
                     DB::rollBack();
+
                     return response()->json([
-                        'message' => 'Minibar quantity exceeds on-hand stock for item #' . $itemId . ' (max ' . round($onHand, 4) . ').',
+                        'message' => 'Minibar quantity exceeds on-hand stock for item #'.$itemId.' (max '.round($onHand, 4).').',
                     ], 422);
                 }
 
                 /** @var InventoryItem|null $item */
                 $item = InventoryItem::lockForUpdate()->find($itemId);
-                if (! $item) continue;
+                if (! $item) {
+                    continue;
+                }
 
                 $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
                 $unitCost = (float) ($item->cost_price ?? 0) / $conv;
@@ -1603,7 +1673,7 @@ class HousekeepingController extends Controller
                     $assetDesc .= sprintf(' (penalty key: %s)', $penKey);
                 }
                 if ($lineNotes !== '') {
-                    $assetDesc .= ' — ' . Str::limit($lineNotes, 240);
+                    $assetDesc .= ' — '.Str::limit($lineNotes, 240);
                 }
                 $assetRow = [
                     'booking_id' => $booking->id,
@@ -1636,8 +1706,8 @@ class HousekeepingController extends Controller
                 $booking->extra_charges = (float) ($booking->extra_charges ?? 0) + round($chargeTotal, 2);
             }
             if (array_key_exists('remarks', $validated) && trim((string) $validated['remarks']) !== '') {
-                $booking->notes = trim((string) ($booking->notes ?? '')) . "\n" .
-                    '[Inspection: ' . trim((string) $validated['remarks']) . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+                $booking->notes = trim((string) ($booking->notes ?? ''))."\n".
+                    '[Inspection: '.trim((string) $validated['remarks']).' on '.now()->format('Y-m-d H:i:s').']';
             }
             $booking->save();
 
@@ -1717,6 +1787,7 @@ class HousekeepingController extends Controller
             ]);
         } catch (\Throwable $e) {
             DB::rollBack();
+
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -1752,7 +1823,7 @@ class HousekeepingController extends Controller
     {
         $d = $serviceDay->toDateString();
         $segments = $this->dailyCleaningOccupiedSegments($serviceDay);
-        $roomIds = $segments->pluck('room_id')->map(fn($id) => (int) $id)->all();
+        $roomIds = $segments->pluck('room_id')->map(fn ($id) => (int) $id)->all();
         if ($roomIds === []) {
             return 0;
         }
@@ -1812,7 +1883,7 @@ class HousekeepingController extends Controller
             return true;
         })->values();
 
-        $roomIds = $segments->pluck('room_id')->map(fn($id) => (int) $id)->all();
+        $roomIds = $segments->pluck('room_id')->map(fn ($id) => (int) $id)->all();
 
         $cleanings = DailyRoomCleaning::query()
             ->where('service_date', '=', $d)
@@ -1961,7 +2032,7 @@ class HousekeepingController extends Controller
             $notify = $request->boolean('notify_front_desk') && $newStatus === 'cleaned';
             if ($notify && ! $cleaning->front_desk_notified_at && config('broadcasting.default') !== 'null') {
                 $guest = $seg->booking ? (string) ($seg->booking->guest_name ?? '') : '';
-                $msg = 'Daily cleaning completed for room #' . (string) ($room?->room_number ?? $roomId);
+                $msg = 'Daily cleaning completed for room #'.(string) ($room?->room_number ?? $roomId);
                 $rn = (string) ($room?->room_number ?? '');
                 $guestBroadcast = $guest !== '' ? $guest : null;
                 App::terminating(function () use ($roomId, $rn, $bookingId, $d, $msg, $guestBroadcast) {
@@ -2067,7 +2138,7 @@ class HousekeepingController extends Controller
                     DB::rollBack();
 
                     return response()->json([
-                        'message' => 'Quantity exceeds on-hand stock in the room for item #' . $itemId . ' (max ' . round($available, 4) . ').',
+                        'message' => 'Quantity exceeds on-hand stock in the room for item #'.$itemId.' (max '.round($available, 4).').',
                     ], 422);
                 }
 
@@ -2093,7 +2164,7 @@ class HousekeepingController extends Controller
                     'unit_cost' => round($unitCost, 4),
                     'total_cost' => round($qty * $unitCost, 2),
                     'reason' => 'Daily room cleaning consumption',
-                    'notes' => 'Occupied-room service — daily cleaning #' . $cleaning->id,
+                    'notes' => 'Occupied-room service — daily cleaning #'.$cleaning->id,
                     'user_id' => $userId,
                     'reference_id' => (string) $cleaning->id,
                     'reference_type' => 'daily_room_cleaning',
@@ -2201,7 +2272,7 @@ class HousekeepingController extends Controller
 
             $remarks = trim(implode("\n\n", array_filter([
                 $r->remarks ? (string) $r->remarks : null,
-                $r->maintenance_note ? 'Maintenance: ' . (string) $r->maintenance_note : null,
+                $r->maintenance_note ? 'Maintenance: '.(string) $r->maintenance_note : null,
             ])));
 
             return [
@@ -2249,7 +2320,7 @@ class HousekeepingController extends Controller
 
             $remarks = trim(implode("\n\n", array_filter([
                 $job->remarks ? (string) $job->remarks : null,
-                $job->issues_summary ? 'Issues: ' . (string) $job->issues_summary : null,
+                $job->issues_summary ? 'Issues: '.(string) $job->issues_summary : null,
             ])));
 
             return [

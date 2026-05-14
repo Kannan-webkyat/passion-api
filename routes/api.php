@@ -1,44 +1,43 @@
 <?php
 
-use App\Http\Controllers\{
-    AuthController,
-    BookingController,
-    ComboController,
-    DayClosingController,
-    DepartmentController,
-    DietaryTypeController,
-    HousekeepingController,
-    InventoryCategoryController,
-    InventoryController,
-    InventoryLocationController,
-    InventoryReportController,
-    InventoryTaxController,
-    InventoryUomController,
-    MenuCategoryController,
-    MenuItemController,
-    MenuPricingController,
-    MenuSubCategoryController,
-    PaymentMethodController,
-    PosController,
-    ProcurementRequisitionController,
-    PurchaseOrderController,
-    QzSignController,
-    RecipeController,
-    RestaurantMasterController,
-    RoleController,
-    RoomController,
-    RoomParController,
-    RoomStatusBlockController,
-    RoomTypeController,
-    SettingController,
-    StockMovementController,
-    StoreRequestController,
-    TableCategoryController,
-    TableController,
-    TableReservationController,
-    UserController,
-    VendorController,
-};
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\BookingController;
+use App\Http\Controllers\ComboController;
+use App\Http\Controllers\DayClosingController;
+use App\Http\Controllers\DepartmentController;
+use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\HousekeepingController;
+use App\Http\Controllers\InventoryCategoryController;
+use App\Http\Controllers\InventoryController;
+use App\Http\Controllers\InventoryLocationController;
+use App\Http\Controllers\InventoryReportController;
+use App\Http\Controllers\InventoryTaxController;
+use App\Http\Controllers\InventoryUomController;
+use App\Http\Controllers\LaundryRequestController;
+use App\Http\Controllers\MenuCategoryController;
+use App\Http\Controllers\MenuItemController;
+use App\Http\Controllers\MenuPricingController;
+use App\Http\Controllers\MenuSubCategoryController;
+use App\Http\Controllers\PaymentMethodController;
+use App\Http\Controllers\PosController;
+use App\Http\Controllers\ProcurementRequisitionController;
+use App\Http\Controllers\PurchaseOrderController;
+use App\Http\Controllers\QzSignController;
+use App\Http\Controllers\RecipeController;
+use App\Http\Controllers\RestaurantMasterController;
+use App\Http\Controllers\RoleController;
+use App\Http\Controllers\RoomController;
+use App\Http\Controllers\RoomParController;
+use App\Http\Controllers\RoomStatusBlockController;
+use App\Http\Controllers\RoomTypeController;
+use App\Http\Controllers\SettingController;
+use App\Http\Controllers\StockMovementController;
+use App\Http\Controllers\StoreRequestController;
+use App\Http\Controllers\TableCategoryController;
+use App\Http\Controllers\TableController;
+use App\Http\Controllers\TableReservationController;
+use App\Http\Controllers\UserController;
+use App\Http\Controllers\VendorController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
@@ -86,6 +85,17 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('housekeeping/daily-cleaning/status', [HousekeepingController::class, 'dailyCleaningUpdateStatus']);
     Route::post('housekeeping/daily-cleaning/consumption', [HousekeepingController::class, 'dailyCleaningRecordConsumption']);
     Route::get('housekeeping/daily-cleaning/history', [HousekeepingController::class, 'dailyCleaningHistory']);
+
+    Route::get('housekeeping/laundry/prefill', [LaundryRequestController::class, 'prefill']);
+    Route::get('housekeeping/laundry/checked-in-rooms', [LaundryRequestController::class, 'checkedInRooms']);
+    Route::get('housekeeping/laundry', [LaundryRequestController::class, 'index']);
+    Route::post('housekeeping/laundry', [LaundryRequestController::class, 'store']);
+    Route::get('housekeeping/laundry/{laundryRequest}', [LaundryRequestController::class, 'show']);
+    Route::patch('housekeeping/laundry/{laundryRequest}', [LaundryRequestController::class, 'update']);
+    Route::post('housekeeping/laundry/{laundryRequest}/pickup', [LaundryRequestController::class, 'pickup']);
+    Route::post('housekeeping/laundry/{laundryRequest}/lines', [LaundryRequestController::class, 'syncLines']);
+    Route::post('housekeeping/laundry/{laundryRequest}/status', [LaundryRequestController::class, 'updateStatus']);
+    Route::post('housekeeping/laundry/{laundryRequest}/post-to-room', [LaundryRequestController::class, 'postToRoom']);
 
     Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);
     Route::get('bookings/chart', [BookingController::class, 'chart']);

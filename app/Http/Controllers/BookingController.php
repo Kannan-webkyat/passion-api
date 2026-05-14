@@ -3,9 +3,6 @@
 namespace App\Http\Controllers;
 
 use App\Events\HousekeepingStateUpdated;
-use App\Support\BookingInvoiceRoomStay;
-use App\Support\ReservationInvoiceViewData;
-use App\Support\SeasonalRoomPricing;
 use App\Models\Booking;
 use App\Models\BookingExtraCharge;
 use App\Models\BookingGroup;
@@ -15,7 +12,10 @@ use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
+use App\Support\BookingInvoiceRoomStay;
 use App\Support\CheckoutInspectionPenaltyAmount;
+use App\Support\ReservationInvoiceViewData;
+use App\Support\SeasonalRoomPricing;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -228,6 +228,7 @@ class BookingController extends Controller
         // If checkout is exactly at midnight, the date itself is already exclusive.
         // Otherwise, the occupancy includes that calendar date, so end-exclusive is next day.
         $isMidnight = $dt->format('H:i:s') === '00:00:00';
+
         return $isMidnight ? $dt->toDateString() : $dt->copy()->addDay()->toDateString();
     }
 
@@ -314,6 +315,7 @@ class BookingController extends Controller
     public function index(Request $request)
     {
         $this->checkPermission('view-rooms');
+
         return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
             ->when($request->booking_group_id, function ($q) use ($request) {
                 $q->where('booking_group_id', $request->booking_group_id);
@@ -325,7 +327,7 @@ class BookingController extends Controller
     public function guestSearch(Request $request)
     {
         $phone = $request->query('phone');
-        if (!$phone || strlen($phone) < 4) {
+        if (! $phone || strlen($phone) < 4) {
             return response()->json(['message' => 'Provide at least 4 digits to search.'], 422);
         }
 
@@ -334,7 +336,7 @@ class BookingController extends Controller
             ->orderByDesc('created_at')
             ->first();
 
-        if (!$booking instanceof Booking) {
+        if (! $booking instanceof Booking) {
             return response()->json(['message' => 'No guest found with this phone number.'], 404);
         }
 
@@ -887,6 +889,7 @@ class BookingController extends Controller
     public function show(Booking $booking)
     {
         $this->checkPermission('reservation');
+
         return $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
     }
 
@@ -1025,33 +1028,38 @@ class BookingController extends Controller
             }
         }
 
-        // Handle Identity Images (Update/Append)
+        // Handle Identity Images (Update/Append): incoming array is indexed by guest slot; null clears.
         if ($request->has('guest_identities')) {
-            $existingIdentities = $booking->guest_identities ?: [];
-            $incomingImages = $request->input('guest_identities') ?: [];
+            $incomingImages = $request->input('guest_identities');
+            if (! is_array($incomingImages)) {
+                $incomingImages = [];
+            }
             $newPaths = [];
-
             foreach ($incomingImages as $index => $imageData) {
-                if (! $imageData) {
+                $i = (int) $index;
+                if ($imageData === null || $imageData === '') {
+                    $newPaths[$i] = null;
+
                     continue;
                 }
 
-                if (str_starts_with($imageData, 'data:image')) {
+                if (str_starts_with((string) $imageData, 'data:image')) {
                     // New Base64 from Camera or Upload
-                    $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
-                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
-                    $fileName = 'guest_id_' . time() . '_' . $index . '.' . $format;
+                    $format = str_contains((string) $imageData, 'png') ? 'png' : 'jpg';
+                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', (string) $imageData));
+                    $fileName = 'guest_id_' . time() . '_' . $i . '.' . $format;
                     \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
-                    $newPaths[] = 'identities/' . $fileName;
-                } elseif ($request->hasFile("guest_identities.{$index}")) {
+                    $newPaths[$i] = 'identities/' . $fileName;
+                } elseif ($request->hasFile("guest_identities.{$i}")) {
                     // New Direct File Upload
-                    $newPaths[] = $request->file("guest_identities.{$index}")->store('identities', 'public');
+                    $newPaths[$i] = $request->file("guest_identities.{$i}")->store('identities', 'public');
                 } else {
-                    // Retain existing image path
-                    $newPaths[] = $imageData;
+                    // Retain existing image path (string storage key)
+                    $newPaths[$i] = $imageData;
                 }
             }
-            $validated['guest_identities'] = $newPaths;
+            ksort($newPaths);
+            $validated['guest_identities'] = array_values($newPaths);
         }
 
         // Keep legacy date columns aligned whenever datetime fields are sent.
@@ -1065,6 +1073,25 @@ class BookingController extends Controller
         $this->appendAuditNotesForBookingUpdate($booking, $validated, $request);
 
         $booking->update($validated);
+
+        // Room chart renders occupancy from `booking_segments` first (`segment.adults_count ?? booking.adults_count`).
+        // Keep segments aligned whenever guest mix or segment-level pricing fields change on the booking.
+        if (
+            $request->has('adults_count')
+            || $request->has('children_count')
+            || $request->has('infants_count')
+            || $request->has('extra_beds_count')
+            || $request->has('rate_plan_id')
+            || $request->has('total_price')
+        ) {
+            $booking->segments()->update([
+                'adults_count' => (int) ($booking->adults_count ?? 1),
+                'children_count' => (int) ($booking->children_count ?? 0),
+                'extra_beds_count' => (int) ($booking->extra_beds_count ?? 0),
+                'rate_plan_id' => $booking->rate_plan_id,
+                'total_price' => $booking->total_price,
+            ]);
+        }
 
         // Sync Stay Segments
         if (isset($validated['room_id']) || isset($validated['check_in']) || isset($validated['check_out']) || isset($validated['status'])) {
@@ -1232,7 +1259,7 @@ class BookingController extends Controller
         $rt = $booking->room?->roomType;
         $standardTime = Setting::get('standard_check_in_time', '14:00');
         $fee = 0;
-        $units = "";
+        $units = '';
 
         if ($rt && $time < $standardTime) {
             $policyTime = Carbon::createFromFormat('H:i', $standardTime);
@@ -1308,10 +1335,13 @@ class BookingController extends Controller
         $standardTimeRaw = (string) Setting::get('standard_check_out_time', '11:00');
         $normalizeClockTime = static function (?string $raw, string $fallback): string {
             $s = trim((string) $raw);
-            if ($s === '') return $fallback;
+            if ($s === '') {
+                return $fallback;
+            }
             // canonical HH:mm
             if (preg_match('/^\d{1,2}:\d{2}$/', $s)) {
                 [$h, $m] = array_pad(explode(':', $s, 3), 2, '00');
+
                 return str_pad((string) ((int) $h), 2, '0', STR_PAD_LEFT) . ':' . str_pad((string) ((int) $m), 2, '0', STR_PAD_LEFT);
             }
             // tolerate formats like "02:00 PM", "2:00PM", etc.
@@ -1325,9 +1355,13 @@ class BookingController extends Controller
         $when = now()->format('Y-m-d H:i:s');
 
         $computeLateFee = static function ($rt, string $standardTime, ?string $t): float {
-            if (! $rt || ! $t) return 0.0;
+            if (! $rt || ! $t) {
+                return 0.0;
+            }
             $t = trim((string) $t);
-            if ($t === '') return 0.0;
+            if ($t === '') {
+                return 0.0;
+            }
             // Ensure HH:mm for safe comparisons + parsing (tolerate legacy AM/PM)
             if (! preg_match('/^\d{2}:\d{2}$/', $t)) {
                 try {
@@ -1336,7 +1370,9 @@ class BookingController extends Controller
                     return 0.0;
                 }
             }
-            if ($t <= $standardTime) return 0.0;
+            if ($t <= $standardTime) {
+                return 0.0;
+            }
 
             $policyTime = Carbon::createFromFormat('H:i', $standardTime);
             $actualTime = Carbon::createFromFormat('H:i', $t);
@@ -1344,15 +1380,19 @@ class BookingController extends Controller
 
             $bufferMins = (int) ($rt->late_check_out_buffer_minutes ?? 0);
             $billableMins = max(0, $totalGapMins - $bufferMins);
-            if ($billableMins <= 0) return 0.0;
+            if ($billableMins <= 0) {
+                return 0.0;
+            }
 
             if ($rt->late_check_out_type === 'per_hour') {
                 $billableHours = ceil($billableMins / 60);
+
                 return $billableHours * (float) $rt->late_check_out_fee;
             }
             if ($rt->late_check_out_type === 'per_minute') {
                 return $billableMins * (float) $rt->late_check_out_fee;
             }
+
             return (float) $rt->late_check_out_fee;
         };
 
@@ -1372,7 +1412,9 @@ class BookingController extends Controller
             : "[Late CO: {$time}" . ($userName ? " by {$userName}" : '') . " on {$when}]";
 
         $nextExtra = (float) ($booking->extra_charges ?? 0) + $delta;
-        if ($nextExtra < 0) $nextExtra = 0;
+        if ($nextExtra < 0) {
+            $nextExtra = 0;
+        }
 
         $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
@@ -1843,9 +1885,7 @@ class BookingController extends Controller
             ->where('status', 'paid')
             ->with([
                 'restaurant:id,name',
-                'payments' => function ($q) {
-                    $q->where('method', 'room_charge');
-                },
+                'payments',
             ])
             ->orderByDesc('closed_at')
             ->get();
@@ -1886,6 +1926,26 @@ class BookingController extends Controller
             ];
         }
 
+        $ledgerRows = BookingExtraCharge::query()
+            ->where('booking_id', '=', $booking->id, 'and')
+            ->orderBy('id')
+            ->get(['id', 'source', 'kind', 'label', 'description', 'qty', 'unit_amount', 'total_amount', 'meta', 'created_at']);
+
+        $ledgerItems = $ledgerRows->map(function (BookingExtraCharge $line) {
+            return [
+                'id' => (int) $line->id,
+                'source' => (string) $line->source,
+                'kind' => (string) $line->kind,
+                'label' => (string) $line->label,
+                'description' => $line->description !== null ? (string) $line->description : null,
+                'qty' => round((float) ($line->qty ?? 1), 2),
+                'unit_amount' => round((float) ($line->unit_amount ?? 0), 2),
+                'amount' => round((float) ($line->total_amount ?? 0), 2),
+                'posted_at' => $line->created_at?->toIso8601String(),
+                'meta' => $line->meta,
+            ];
+        })->values()->all();
+
         return response()->json([
             'extra_charges_total' => (float) ($booking->extra_charges ?? 0),
             'folio_tax' => [
@@ -1895,6 +1955,7 @@ class BookingController extends Controller
                 'vat' => round($folioVat, 2),
             ],
             'items' => $items,
+            'ledger_items' => $ledgerItems,
         ]);
     }
 

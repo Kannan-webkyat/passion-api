@@ -69,6 +69,11 @@ class Booking extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function laundryRequests()
+    {
+        return $this->hasMany(LaundryRequest::class);
+    }
+
     // Accessor for full name
     public function getGuestNameAttribute()
     {
