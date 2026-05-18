@@ -20,9 +20,9 @@ final class ReservationInvoiceViewData
     {
         $booking->loadMissing(['room.roomType.tax', 'creator']);
 
-        $fmt = static fn (float $n): string => number_format(round($n, 2), 2, '.', '');
+        $fmt = static fn(float $n): string => number_format(round($n, 2), 2, '.', '');
 
-        $guestName = strtoupper(trim(($booking->first_name ?? '').' '.($booking->last_name ?? '')));
+        $guestName = strtoupper(trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? '')));
         $guestName = $guestName !== '' ? $guestName : 'GUEST';
 
         $checkInRaw = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
@@ -30,7 +30,7 @@ final class ReservationInvoiceViewData
 
         $roomNo = (string) ($booking->room?->room_number ?? '-');
         $roomType = (string) ($booking->room?->roomType?->name ?? '-');
-        $roomLabel = $roomType.' / '.$roomNo;
+        $roomLabel = $roomType . ' / ' . $roomNo;
 
         $ratePlan = $booking->rate_plan_id ? RatePlan::find($booking->rate_plan_id) : null;
         $meal = (string) ($ratePlan?->meal_plan_type ?? '');
@@ -52,7 +52,7 @@ final class ReservationInvoiceViewData
 
         $adults = (int) ($booking->adults_count ?? 1);
         $children = (int) ($booking->children_count ?? 0);
-        $personsLabel = $adults.' (A) / '.$children.' (C)';
+        $personsLabel = $adults . ' (A) / ' . $children . ' (C)';
 
         $nights = 1;
         if (($booking->booking_unit ?? 'day') !== 'hour_package') {
@@ -70,7 +70,11 @@ final class ReservationInvoiceViewData
         $checkoutDisc = max(0.0, min((float) ($booking->checkout_discount_amount ?? 0), $grossBill));
         $grand = max(0.0, $grossBill - $checkoutDisc);
         $paid = (float) ($booking->deposit_amount ?? 0);
-        $balance = $grand - $paid;
+        
+        /** Nearest whole rupee for settlement lines (round off shown in summary when needed). */
+        $grandRounded = (float) round($grand);
+        $roundOff = $grandRounded - $grand;
+        $balanceRounded = $grandRounded - $paid;
 
         $taxRate = (float) ($booking->room?->roomType?->tax?->rate ?? 0);
         $divisor = 1 + ($taxRate > 0 ? $taxRate / 100 : 0);
@@ -111,7 +115,7 @@ final class ReservationInvoiceViewData
         $folioOrders = PosOrder::query()
             ->where('booking_id', $booking->id)
             ->where('status', 'paid')
-            ->whereHas('payments', fn ($q) => $q->where('method', 'room_charge'))
+            ->whereHas('payments', fn($q) => $q->where('method', 'room_charge'))
             ->with(['restaurant', 'payments'])
             ->orderBy('id')
             ->get();
@@ -138,7 +142,7 @@ final class ReservationInvoiceViewData
             }
             $qty = 1;
             $rate = $rc;
-            $particular = 'Room posting ('.$outlet.' · REC-'.$order->id.')';
+            $particular = 'Room posting (' . $outlet . ' · REC-' . $order->id . ')';
 
             $lines[] = self::lineRow(
                 $sr++,
@@ -186,7 +190,7 @@ final class ReservationInvoiceViewData
 
         if ($checkoutDisc > 0.004) {
             $r = trim((string) ($booking->checkout_discount_reason ?? ''));
-            $part = 'Checkout discount'.($r !== '' ? ' — '.Str::limit($r, 80, '') : '');
+            $part = 'Checkout discount' . ($r !== '' ? ' — ' . Str::limit($r, 80, '') : '');
             $neg = number_format(-$checkoutDisc, 2, '.', '');
             $lines[] = [
                 'sr' => (string) $sr++,
@@ -237,15 +241,15 @@ final class ReservationInvoiceViewData
         $taxDetailRows = [];
         if ($scgst > 0.004) {
             $p = $sumLineTaxable > 0 ? round(($scgst / $sumLineTaxable) * 100, 2) : 0;
-            $taxDetailRows[] = ['label' => 'CGST @ '.$p.'%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($scgst)];
+            $taxDetailRows[] = ['label' => 'CGST @ ' . $p . '%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($scgst)];
         }
         if ($ssgst > 0.004) {
             $p = $sumLineTaxable > 0 ? round(($ssgst / $sumLineTaxable) * 100, 2) : 0;
-            $taxDetailRows[] = ['label' => 'SGST @ '.$p.'%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($ssgst)];
+            $taxDetailRows[] = ['label' => 'SGST @ ' . $p . '%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($ssgst)];
         }
         if ($sigst > 0.004) {
             $p = $sumLineTaxable > 0 ? round(($sigst / $sumLineTaxable) * 100, 2) : 0;
-            $taxDetailRows[] = ['label' => 'IGST @ '.$p.'%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($sigst)];
+            $taxDetailRows[] = ['label' => 'IGST @ ' . $p . '%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($sigst)];
         }
 
         $paymentRows = [];
@@ -256,13 +260,13 @@ final class ReservationInvoiceViewData
             $method = strtoupper((string) ($booking->payment_method ?? 'PAYMENT'));
             $paymentRows[] = [
                 'date' => $payDate,
-                'description' => $method.' — Advance / settlement · Ref #'.$booking->id,
+                'description' => $method . ' — Advance / settlement · Ref #' . $booking->id,
                 'amount' => $fmt($paid),
             ];
         }
         $paymentTotalFmt = $fmt($paid);
 
-        $amountInWords = ucfirst(MoneyToWords::inr(max(0, $grand)));
+        $amountInWords = ucfirst(MoneyToWords::inr(max(0.0, $grandRounded)));
 
         $defaults = Setting::getReceiptDefaults();
         $hotelName = Setting::get('invoice_company_name', 'Hotel');
@@ -281,7 +285,7 @@ final class ReservationInvoiceViewData
             $remark = '—';
         }
 
-        $invoiceNo = Setting::get('invoice_prefix', 'INV').'-'.str_pad((string) $booking->id, 6, '0', STR_PAD_LEFT);
+        $invoiceNo = Setting::get('invoice_prefix', 'INV') . '-' . str_pad((string) $booking->id, 6, '0', STR_PAD_LEFT);
         $folioNo = (string) $booking->id;
         $resNo = (string) $booking->id;
 
@@ -310,11 +314,14 @@ final class ReservationInvoiceViewData
             ['label' => 'Total Balance Transfer(Rs)', 'value' => $fmt(0)],
             ['label' => 'Subtotal / Total(Rs)', 'value' => $fmt($grossBill), 'bold' => true],
             ['label' => 'Flat Discount(Rs)', 'value' => $fmt($checkoutDisc)],
-            ['label' => 'Adjustment(Rs)', 'value' => $fmt(0)],
-            ['label' => 'Total Payable(Rs)', 'value' => $fmt($grand), 'bold' => true],
-            ['label' => 'Total Payment(Rs)', 'value' => $fmt($paid)],
-            ['label' => 'Balance(Rs)', 'value' => $fmt($balance), 'bold' => true],
         ];
+        if (abs($roundOff) >= 0.0005) {
+            $summaryLines[] = ['label' => 'Round Off(Rs)', 'value' => $fmt($roundOff)];
+        }
+        $summaryLines[] = ['label' => 'Adjustment(Rs)', 'value' => $fmt(0)];
+        $summaryLines[] = ['label' => 'Total Payable(Rs)', 'value' => $fmt($grandRounded), 'bold' => true];
+        $summaryLines[] = ['label' => 'Total Payment(Rs)', 'value' => $fmt($paid)];
+        $summaryLines[] = ['label' => 'Balance(Rs)', 'value' => $fmt($balanceRounded), 'bold' => true];
 
         $cashierName = Auth::user()?->name ?? '—';
         $receptionName = $booking->creator?->name ?? '—';
@@ -486,7 +493,7 @@ final class ReservationInvoiceViewData
         $lines = [];
         foreach ($rows as [$label, $value]) {
             if ($value !== '') {
-                $lines[] = $label.': '.$value;
+                $lines[] = $label . ': ' . $value;
             }
         }
         $composed = implode("\n", $lines);
@@ -520,15 +527,15 @@ final class ReservationInvoiceViewData
         float $igstAmt,
         string $cess
     ): array {
-        $fmtN = static fn (float $n): string => number_format(round($n, 2), 2, '.', '');
+        $fmtN = static fn(float $n): string => number_format(round($n, 2), 2, '.', '');
         $sgstCell = $sgstAmt > 0.004
-            ? number_format($sgstPct, 2).'% / '.$fmtN($sgstAmt)
+            ? number_format($sgstPct, 2) . '% / ' . $fmtN($sgstAmt)
             : '—';
         $cgstCell = $cgstAmt > 0.004
-            ? number_format($cgstPct, 2).'% / '.$fmtN($cgstAmt)
+            ? number_format($cgstPct, 2) . '% / ' . $fmtN($cgstAmt)
             : '—';
         $igstCell = $igstAmt > 0.004
-            ? number_format($igstPct, 2).'% / '.$fmtN($igstAmt)
+            ? number_format($igstPct, 2) . '% / ' . $fmtN($igstAmt)
             : '—';
 
         return [

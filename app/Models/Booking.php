@@ -11,6 +11,11 @@ class Booking extends Model
         return $this->hasMany(BookingSegment::class);
     }
 
+    public function roomTransfers()
+    {
+        return $this->hasMany(BookingRoomTransfer::class)->orderByDesc('transferred_at');
+    }
+
     protected $fillable = [
         'room_id',
         'first_name',

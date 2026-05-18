@@ -105,12 +105,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/late-checkout', [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
     Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);
+    Route::post('bookings/{booking}/preview-extend-hours', [BookingController::class, 'previewHourlyExtension']);
     Route::get('bookings/{booking}/voucher', [BookingController::class, 'reservationVoucher']);
     Route::get('bookings/{booking}/billing', [BookingController::class, 'reservationBilling']);
     Route::get('bookings/{booking}/folio-postings', [BookingController::class, 'folioPostings']);
     Route::get('bookings/{booking}/inspection-charges', [BookingController::class, 'inspectionCharges']);
     Route::get('bookings/{booking}/folio-orders/{order}', [BookingController::class, 'folioOrderDetail'])->whereNumber('order');
     Route::post('bookings/{booking}/split-stay', [BookingController::class, 'splitStay']);
+    Route::get('bookings/{booking}/room-transfers', [BookingController::class, 'listRoomTransfers']);
+    Route::post('bookings/{booking}/preview-room-transfer', [BookingController::class, 'previewRoomTransfer']);
+    Route::post('bookings/{booking}/room-transfer', [BookingController::class, 'roomTransfer']);
     Route::get('bookings/available-rooms', [BookingController::class, 'getAvailableRooms']);
     Route::post('booking-groups', [BookingController::class, 'storeGroup']);
     Route::apiResource('bookings', BookingController::class);

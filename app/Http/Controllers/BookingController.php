@@ -13,6 +13,7 @@ use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingRoomTransferService;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
 use App\Support\SeasonalRoomPricing;
@@ -377,7 +378,7 @@ class BookingController extends Controller
         }, 'segments' => function ($q) use ($rangeStartAt, $rangeEndAt) {
             $q->where('check_in_at', '<', $rangeEndAt)
                 ->where('check_out_at', '>', $rangeStartAt)
-                ->whereNotIn('status', ['cancelled'])
+                ->whereNotIn('status', ['cancelled', 'checked_out'])
                 ->with(['booking', 'ratePlan']);
         }])->get();
 
@@ -934,7 +935,20 @@ class BookingController extends Controller
             'booking_group_id' => 'nullable|exists:booking_groups,id',
             'checkout_discount_amount' => 'nullable|numeric|min:0',
             'checkout_discount_reason' => 'nullable|string|max:500',
+            'force_room_change' => 'nullable|boolean',
         ]);
+
+        if (
+            array_key_exists('room_id', $validated)
+            && in_array($booking->status, ['confirmed', 'checked_in'], true)
+            && (int) $validated['room_id'] !== (int) $booking->room_id
+            && ! $request->boolean('force_room_change')
+        ) {
+            return response()->json([
+                'message' => 'Use Room Transfer in the reservation panel to move this guest (reason and rate options are required).',
+            ], 422);
+        }
+        unset($validated['force_room_change']);
 
         if ($request->has('checkout_discount_amount') || $request->has('checkout_discount_reason')) {
             if ($booking->status !== 'checked_in') {
@@ -1653,6 +1667,79 @@ class BookingController extends Controller
     }
 
     /**
+     * Preview hourly extension totals (same pricing as {@see extendHourlyReservation}) without persisting.
+     */
+    public function previewHourlyExtension(Request $request, Booking $booking)
+    {
+        $validated = $request->validate([
+            'extend_minutes' => 'required|integer|min:1',
+            'rate_plan_id' => 'nullable|exists:rate_plans,id',
+        ]);
+
+        if (($booking->booking_unit ?? 'day') !== 'hour_package') {
+            return response()->json([
+                'message' => 'This preview is only for hourly package bookings.',
+            ], 422);
+        }
+
+        $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
+        $currentCheckOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
+        $newCheckOutAt = $currentCheckOutAt->copy()->addMinutes((int) $validated['extend_minutes']);
+
+        $lastSegment = $booking->segments()->orderBy('check_out_at', 'desc')->first();
+        $roomId = (int) ($lastSegment?->room_id ?? $booking->room_id ?? 0);
+        if ($roomId <= 0) {
+            return response()->json(['message' => 'No room assigned for this booking.'], 422);
+        }
+
+        $hasConflict = false;
+        $conflictMessage = null;
+        $conflictSegment = BookingSegment::with(['booking.room.roomType'])
+            ->where('room_id', $roomId)
+            ->where('booking_id', '!=', $booking->id)
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+            ->where('check_in_at', '<', $newCheckOutAt)
+            ->where('check_out_at', '>', $currentCheckOutAt)
+            ->orderBy('check_in_at', 'asc')
+            ->first();
+
+        if ($conflictSegment?->booking) {
+            $hasConflict = true;
+            $conflictMessage = 'Room conflict for the extended window — move the overlapping reservation or shorten this stay.';
+        }
+
+        $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail($roomId);
+        $planId = (int) ($validated['rate_plan_id'] ?? $booking->rate_plan_id ?? 0);
+        if ($planId <= 0) {
+            return response()->json(['message' => 'rate_plan_id is required for hourly extension preview.'], 422);
+        }
+
+        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
+        $calcCurrent = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $currentCheckOutAt, $extraBeds);
+        if (! $calcCurrent['ok']) {
+            return response()->json(['message' => $calcCurrent['message']], 422);
+        }
+
+        $calcNew = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $newCheckOutAt, $extraBeds);
+        if (! $calcNew['ok']) {
+            return response()->json(['message' => $calcNew['message']], 422);
+        }
+
+        $currentTotal = (float) $calcCurrent['total'];
+        $newTotal = (float) $calcNew['total'];
+        $delta = round($newTotal - $currentTotal, 2);
+
+        return response()->json([
+            'current_total' => $currentTotal,
+            'new_total' => $newTotal,
+            'delta' => $delta,
+            'new_check_out_at' => $newCheckOutAt->toIso8601String(),
+            'has_conflict' => $hasConflict,
+            'conflict_message' => $conflictMessage,
+        ]);
+    }
+
+    /**
      * Handle Split Stay: Add a new segment to an existing booking.
      */
     public function splitStay(Request $request, Booking $booking)
@@ -2239,5 +2326,58 @@ class BookingController extends Controller
             ->get();
 
         return response()->json($rooms);
+    }
+
+    public function listRoomTransfers(Booking $booking)
+    {
+        $this->checkPermission('reservation');
+
+        return response()->json([
+            'items' => BookingRoomTransferService::historyPayload($booking),
+            'reasons' => array_map(
+                fn(string $code) => ['code' => $code, 'label' => \App\Models\BookingRoomTransfer::reasonLabel($code)],
+                \App\Models\BookingRoomTransfer::REASONS
+            ),
+        ]);
+    }
+
+    public function previewRoomTransfer(Request $request, Booking $booking)
+    {
+        $this->checkPermission('reservation');
+        $request->validate([
+            'new_room_id' => 'required|exists:rooms,id',
+            'transfer_reason' => 'required|string|max:64',
+            'internal_notes' => 'nullable|string|max:2000',
+            'rate_mode' => 'required|in:keep_existing,apply_new_category',
+        ]);
+
+        $result = BookingRoomTransferService::preview($booking, $request->all());
+        if (! ($result['ok'] ?? false)) {
+            return response()->json(['message' => $result['message'] ?? 'Preview failed.'], 422);
+        }
+
+        return response()->json($result['preview']);
+    }
+
+    public function roomTransfer(Request $request, Booking $booking)
+    {
+        $this->checkPermission('reservation');
+        $request->validate([
+            'new_room_id' => 'required|exists:rooms,id',
+            'transfer_reason' => 'required|string|max:64',
+            'internal_notes' => 'nullable|string|max:2000',
+            'rate_mode' => 'required|in:keep_existing,apply_new_category',
+        ]);
+
+        $result = BookingRoomTransferService::execute($booking, $request->all());
+        if (! ($result['ok'] ?? false)) {
+            return response()->json(['message' => $result['message'] ?? 'Room transfer failed.'], 422);
+        }
+
+        return response()->json([
+            'booking' => $result['booking'],
+            'transfer' => $result['transfer'],
+            'transfers' => BookingRoomTransferService::historyPayload($result['booking']),
+        ]);
     }
 }
