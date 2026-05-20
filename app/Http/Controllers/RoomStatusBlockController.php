@@ -33,7 +33,7 @@ class RoomStatusBlockController extends Controller
         $start = isset($validated['start']) ? Carbon::parse($validated['start'])->toDateString() : null;
         $end = isset($validated['end']) ? Carbon::parse($validated['end'])->toDateString() : null;
 
-        return RoomStatusBlock::with('room')
+        return RoomStatusBlock::with(['room.roomType', 'creator:id,name'])
             ->when(array_key_exists('is_active', $validated), fn($q) => $q->where('is_active', (bool) $validated['is_active']))
             ->when($validated['room_id'] ?? null, fn($q, $roomId) => $q->where('room_id', $roomId))
             ->when($validated['status'] ?? null, fn($q, $status) => $q->where('status', $status))
@@ -62,15 +62,15 @@ class RoomStatusBlockController extends Controller
         // Overlap uses the same convention as stays: [start_date, end_date)
         $startAt = Carbon::parse($validated['start_date'])->startOfDay();
         $endAt = Carbon::parse($validated['end_date'])->startOfDay();
-        $hasReservation = BookingSegment::where('room_id', $validated['room_id'])
+        $hasReservation = BookingSegment::where('room_id', '=', $validated['room_id'], 'and')
             // Checked-out/completed segments should not block housekeeping transitions.
             ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
-            ->where('check_in_at', '<', $endAt)
-            ->where('check_out_at', '>', $startAt)
+            ->where('check_in_at', '<', $endAt, 'and')
+            ->where('check_out_at', '>', $startAt, 'and')
             ->exists();
 
         if ($hasReservation) {
-            $room = Room::find($validated['room_id']);
+            $room = Room::find($validated['room_id'], ['room_number']);
 
             return response()->json([
                 'message' => "Cannot mark Room #{$room?->room_number} as {$validated['status']} because it already has a reservation in this date range.",
@@ -78,10 +78,10 @@ class RoomStatusBlockController extends Controller
         }
 
         // Prevent overlapping blocks on same room (any status) when active
-        $overlap = RoomStatusBlock::where('room_id', $validated['room_id'])
-            ->where('is_active', true)
-            ->where('start_date', '<', $validated['end_date'])
-            ->where('end_date', '>', $validated['start_date'])
+        $overlap = RoomStatusBlock::where('room_id', '=', $validated['room_id'], 'and')
+            ->where('is_active', '=', true, 'and')
+            ->where('start_date', '<', $validated['end_date'], 'and')
+            ->where('end_date', '>', $validated['start_date'], 'and')
             ->exists();
 
         if ($overlap) {
@@ -98,7 +98,7 @@ class RoomStatusBlockController extends Controller
         ]);
 
         // Sync Room status column
-        Room::where('id', $block->room_id)->update(['status' => $block->status]);
+        Room::where('id', '=', $block->room_id, 'and')->update(['status' => $block->status]);
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $block->room_id], 'room_status_block_store');
 
@@ -117,9 +117,9 @@ class RoomStatusBlockController extends Controller
 
         // If inactive or status changed, sync room status
         if ($roomStatusBlock->is_active) {
-            Room::where('id', $roomStatusBlock->room_id)->update(['status' => $roomStatusBlock->status]);
+            Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => $roomStatusBlock->status]);
         } else {
-            Room::where('id', $roomStatusBlock->room_id)->update(['status' => 'available']);
+            Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
         }
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'room_status_block_update');
@@ -131,10 +131,10 @@ class RoomStatusBlockController extends Controller
     {
         $this->checkPermission('manage-rooms');
         $roomId = $roomStatusBlock->room_id;
-        $roomStatusBlock->delete();
+        RoomStatusBlock::destroy($roomStatusBlock->id);
 
         // Restore room to available
-        Room::where('id', $roomId)->update(['status' => 'available']);
+        Room::where('id', '=', $roomId, 'and')->update(['status' => 'available']);
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomId], 'room_status_block_destroy');
 
