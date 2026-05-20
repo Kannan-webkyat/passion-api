@@ -69,6 +69,11 @@ class Booking extends Model
         return $this->belongsTo(Room::class);
     }
 
+    public function ratePlan()
+    {
+        return $this->belongsTo(RatePlan::class);
+    }
+
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');

@@ -317,7 +317,7 @@ class BookingController extends Controller
     {
         $this->checkPermission('view-rooms');
 
-        return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
+        return Booking::with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup'])
             ->when($request->booking_group_id, function ($q) use ($request) {
                 $q->where('booking_group_id', $request->booking_group_id);
             })
@@ -891,7 +891,7 @@ class BookingController extends Controller
     {
         $this->checkPermission('reservation');
 
-        return $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
+        return $booking->load(['room.roomType.tax', 'ratePlan', 'creator', 'bookingGroup']);
     }
 
     public function update(Request $request, Booking $booking)
