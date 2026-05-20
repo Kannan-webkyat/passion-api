@@ -935,6 +935,8 @@ class BookingController extends Controller
             'booking_group_id' => 'nullable|exists:booking_groups,id',
             'checkout_discount_amount' => 'nullable|numeric|min:0',
             'checkout_discount_reason' => 'nullable|string|max:500',
+            /** room = settle/check out this booking only; group = pooled group balance (default). */
+            'checkout_scope' => 'nullable|in:room,group',
             'force_room_change' => 'nullable|boolean',
         ]);
 
@@ -949,6 +951,9 @@ class BookingController extends Controller
             ], 422);
         }
         unset($validated['force_room_change']);
+
+        $checkoutScope = $validated['checkout_scope'] ?? 'group';
+        unset($validated['checkout_scope']);
 
         if ($request->has('checkout_discount_amount') || $request->has('checkout_discount_reason')) {
             if ($booking->status !== 'checked_in') {
@@ -1002,16 +1007,22 @@ class BookingController extends Controller
             $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
             $isPaid = ($currentPaymentStatus === 'paid');
 
-            // Group-aware checkout rule:
-            // if this booking belongs to a group, allow checkout when the group is fully paid
-            // even if this single room booking still has pending/partial status.
+            // Group checkout: pooled payment (group scope) or per-room settlement (room scope).
             if (! $isPaid && ! empty($booking->booking_group_id)) {
-                $groupBookings = Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')
-                    ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
-                    ->get();
-                $groupGrand = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
-                $groupPaid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
-                $isPaid = $groupPaid + 0.009 >= $groupGrand;
+                if ($checkoutScope === 'room') {
+                    $paid = (float) ($booking->deposit_amount ?? 0);
+                    $grand = $this->effectiveBookingGrand($booking);
+                    $storedTotal = (float) ($booking->total_price ?? 0);
+                    $bill = max($grand, $storedTotal);
+                    $isPaid = $paid + 0.009 >= $bill;
+                } else {
+                    $groupBookings = Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')
+                        ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
+                        ->get();
+                    $groupGrand = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
+                    $groupPaid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
+                    $isPaid = $groupPaid + 0.009 >= $groupGrand;
+                }
             }
 
             // Single booking: allow checkout when advance/deposit covers the bill, even if
