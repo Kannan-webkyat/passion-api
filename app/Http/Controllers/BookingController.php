@@ -27,6 +27,17 @@ class BookingController extends Controller
 {
     use AuthorizesSpatiePermissions;
 
+    /** Room chart grid + summary tiles (no booking drawer / folio). */
+    private function allowReservationChartRead(): void
+    {
+        $this->authorizePermissions([
+            'reservation-view',
+            'view-rooms',
+            'manage-rooms',
+            'rooms-view',
+        ]);
+    }
+
     private function allowReservationRead(): void
     {
         $this->authorizePermissions(['reservation-view']);
@@ -35,6 +46,17 @@ class BookingController extends Controller
     private function allowReservationDetail(): void
     {
         $this->authorizePermissions(['reservation-view']);
+    }
+
+    /** Guest lookup while creating a booking (no view permission required). */
+    private function allowReservationGuestSearch(): void
+    {
+        $this->authorizePermissions([
+            'reservation-view',
+            'reservation-create',
+            'reservation-create-group',
+            'reservation-edit',
+        ]);
     }
 
     /** Single-room (non-group) POST /bookings. */
@@ -364,7 +386,7 @@ class BookingController extends Controller
 
     public function guestSearch(Request $request)
     {
-        $this->allowReservationRead();
+        $this->allowReservationGuestSearch();
 
         $phone = $request->query('phone');
         if (! $phone || strlen($phone) < 4) {
@@ -394,7 +416,7 @@ class BookingController extends Controller
 
     public function chart(Request $request)
     {
-        $this->allowReservationRead();
+        $this->allowReservationChartRead();
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -430,7 +452,7 @@ class BookingController extends Controller
 
     public function summary(Request $request)
     {
-        $this->allowReservationRead();
+        $this->allowReservationChartRead();
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
         $dayStartAt = $date->copy()->startOfDay();
@@ -2209,9 +2231,9 @@ class BookingController extends Controller
         }
 
         $block = RoomStatusBlock::query()
-            ->whereIn('room_id', $roomIds)
-            ->where('is_active', true)
-            ->whereIn('status', ['inspected', 'pending_inspection'])
+            ->whereIn('room_id', $roomIds, 'and', false)
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', ['inspected', 'pending_inspection'], 'and', false)
             ->whereNotNull('inspection_snapshot')
             ->orderByDesc('id')
             ->first();
