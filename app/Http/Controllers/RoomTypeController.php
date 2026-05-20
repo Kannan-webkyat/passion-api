@@ -2,23 +2,19 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Models\RoomType;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 
 class RoomTypeController extends Controller
 {
-    private function checkPermission(string $permission)
-    {
-        $user = Auth::user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
-    }
+    use AuthorizesSpatiePermissions;
 
     public function index(Request $request)
     {
+        $this->authorizePermissions(['room-types-view', 'view-rooms', 'manage-rooms', 'reservation']);
+
         $query = RoomType::with(['tax', 'ratePlans', 'seasons']);
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
@@ -46,7 +42,7 @@ class RoomTypeController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['room-types-create', 'manage-rooms']);
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
@@ -113,12 +109,14 @@ class RoomTypeController extends Controller
 
     public function show(RoomType $roomType)
     {
+        $this->authorizePermissions(['room-types-view', 'view-rooms', 'manage-rooms', 'reservation']);
+
         return $roomType->load(['tax', 'ratePlans', 'seasons']);
     }
 
     public function update(Request $request, RoomType $roomType)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['room-types-edit', 'manage-rooms']);
         $validated = $request->validate([
             'name' => 'string|max:255',
             'description' => 'nullable|string',
@@ -252,7 +250,7 @@ class RoomTypeController extends Controller
 
     public function destroy(RoomType $roomType)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['room-types-delete', 'manage-rooms']);
         try {
             $roomType->delete();
 

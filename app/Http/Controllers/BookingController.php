@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Events\HousekeepingStateUpdated;
 use App\Models\Booking;
 use App\Models\BookingExtraCharge;
@@ -24,12 +25,48 @@ use Illuminate\Support\Facades\Auth;
 
 class BookingController extends Controller
 {
-    private function checkPermission(string $permission)
+    use AuthorizesSpatiePermissions;
+
+    private function allowReservationRead(): void
     {
-        $user = Auth::user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
+        $this->authorizePermissions(['reservation-view']);
+    }
+
+    private function allowReservationDetail(): void
+    {
+        $this->authorizePermissions(['reservation-view']);
+    }
+
+    /** Single-room (non-group) POST /bookings. */
+    private function allowReservationCreateSingle(): void
+    {
+        $this->authorizePermissions(['reservation-create']);
+    }
+
+    /** Multi-room or group-name POST /bookings, or POST /booking-groups. */
+    private function allowReservationCreateGroup(): void
+    {
+        $this->authorizePermissions(['reservation-create-group']);
+    }
+
+    private function allowReservationEdit(): void
+    {
+        $this->authorizePermissions(['reservation-edit']);
+    }
+
+    private function allowReservationDelete(): void
+    {
+        $this->authorizePermissions(['reservation-delete']);
+    }
+
+    private function allowReservationBillingExport(): void
+    {
+        $this->authorizePermissions(['reservation-view', 'reservation-edit']);
+    }
+
+    private function allowAvailableRoomsLookup(): void
+    {
+        $this->authorizePermissions(['reservation-create', 'reservation-create-group', 'reservation-edit', 'reservation', 'view-rooms']);
     }
 
     /**
@@ -315,7 +352,7 @@ class BookingController extends Controller
 
     public function index(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
 
         return Booking::with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup'])
             ->when($request->booking_group_id, function ($q) use ($request) {
@@ -327,6 +364,8 @@ class BookingController extends Controller
 
     public function guestSearch(Request $request)
     {
+        $this->allowReservationRead();
+
         $phone = $request->query('phone');
         if (! $phone || strlen($phone) < 4) {
             return response()->json(['message' => 'Provide at least 4 digits to search.'], 422);
@@ -355,7 +394,7 @@ class BookingController extends Controller
 
     public function chart(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -391,7 +430,7 @@ class BookingController extends Controller
 
     public function summary(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
         $dayStartAt = $date->copy()->startOfDay();
@@ -461,7 +500,7 @@ class BookingController extends Controller
      */
     public function requestInspection(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
 
         if ($booking->status !== 'checked_in') {
             return response()->json([
@@ -517,7 +556,17 @@ class BookingController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('reservation');
+        $roomIdsRaw = $request->input('room_ids');
+        $roomIdsGate = is_array($roomIdsRaw) && count($roomIdsRaw) > 0
+            ? array_values(array_filter(array_map('intval', $roomIdsRaw), static fn(int $id): bool => $id > 0))
+            : ($request->filled('room_id') ? [(int) $request->input('room_id')] : []);
+        $isGroupBooking = count($roomIdsGate) > 1 || $request->filled('group_name');
+        if ($isGroupBooking) {
+            $this->allowReservationCreateGroup();
+        } else {
+            $this->allowReservationCreateSingle();
+        }
+
         $validated = $request->validate([
             'room_ids' => 'nullable|array',
             'room_ids.*' => 'exists:rooms,id',
@@ -866,7 +915,7 @@ class BookingController extends Controller
      */
     public function storeGroup(Request $request)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationCreateGroup();
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
@@ -889,14 +938,14 @@ class BookingController extends Controller
 
     public function show(Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationDetail();
 
         return $booking->load(['room.roomType.tax', 'ratePlan', 'creator', 'bookingGroup']);
     }
 
     public function update(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $validated = $request->validate([
             'room_id' => 'exists:rooms,id',
             'first_name' => 'string|max:255',
@@ -1248,7 +1297,7 @@ class BookingController extends Controller
     // ── Early Check-In ────────────────────────────────────────────────────────
     public function earlyCheckin(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $request->validate([
             'time' => 'required|date_format:H:i',
         ]);
@@ -1326,7 +1375,7 @@ class BookingController extends Controller
     // ── Late Checkout ─────────────────────────────────────────────────────────
     public function lateCheckout(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $request->validate([
             'time' => 'required|date_format:H:i',
         ]);
@@ -1455,6 +1504,8 @@ class BookingController extends Controller
     // ── Reservation Extension ─────────────────────────────────────────────────
     public function extendReservation(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         // IMPORTANT: for multi-segment (room-change) stays, extensions continue from the
         // LAST segment (latest check_out). Validate against that anchor — not only
         // bookings.check_out — or the API rejects valid dates while the UI shows the segment end.
@@ -1585,6 +1636,8 @@ class BookingController extends Controller
     // ── Hourly Reservation Extension (supports +1h, +2h, etc.) ─────────────────
     public function extendHourlyReservation(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         $validated = $request->validate([
             'extend_minutes' => 'required|integer|min:1',
             'rate_plan_id' => 'nullable|exists:rate_plans,id',
@@ -1682,6 +1735,8 @@ class BookingController extends Controller
      */
     public function previewHourlyExtension(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         $validated = $request->validate([
             'extend_minutes' => 'required|integer|min:1',
             'rate_plan_id' => 'nullable|exists:rate_plans,id',
@@ -1755,6 +1810,8 @@ class BookingController extends Controller
      */
     public function splitStay(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         $validated = $request->validate([
             'new_room_id' => 'required|exists:rooms,id',
             'new_check_out' => 'required|date|after:' . $booking->check_out,
@@ -1869,6 +1926,8 @@ class BookingController extends Controller
 
     public function reservationVoucher(Request $request, Booking $booking)
     {
+        $this->allowReservationBillingExport();
+
         $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
 
         $guestName = trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''));
@@ -1962,7 +2021,7 @@ class BookingController extends Controller
 
     public function reservationBilling(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationBillingExport();
 
         $data = ReservationInvoiceViewData::build($booking);
         $pdf = Pdf::loadView('bookings.reservation_invoice', $data)->setPaper('a4', 'portrait');
@@ -1976,7 +2035,7 @@ class BookingController extends Controller
      */
     public function folioPostings(Booking $booking)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
 
         $orders = PosOrder::query()
             ->where('booking_id', $booking->id)
@@ -2062,7 +2121,7 @@ class BookingController extends Controller
      */
     public function inspectionCharges(Booking $booking)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
 
         $penalties = $this->checkoutInspectionPenaltiesMap();
 
@@ -2215,7 +2274,7 @@ class BookingController extends Controller
      */
     public function folioOrderDetail(Booking $booking, PosOrder $order)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
 
         if ((int) $order->booking_id !== (int) $booking->id) {
             abort(404, 'Order is not linked to this booking.');
@@ -2266,6 +2325,8 @@ class BookingController extends Controller
 
     public function destroy(Booking $booking)
     {
+        $this->allowReservationDelete();
+
         // For split stays, booking->room may not reflect all rooms used. Fall back safely.
         $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
         Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => 'available']);
@@ -2276,6 +2337,8 @@ class BookingController extends Controller
 
     public function getAvailableRooms(Request $request)
     {
+        $this->allowAvailableRoomsLookup();
+
         $request->validate([
             'check_in' => 'required|date',
             // Do not use after:check_in — hourly bookings often share the same calendar date for
@@ -2341,7 +2404,7 @@ class BookingController extends Controller
 
     public function listRoomTransfers(Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
 
         return response()->json([
             'items' => BookingRoomTransferService::historyPayload($booking),
@@ -2354,7 +2417,7 @@ class BookingController extends Controller
 
     public function previewRoomTransfer(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $request->validate([
             'new_room_id' => 'required|exists:rooms,id',
             'transfer_reason' => 'required|string|max:64',
@@ -2372,7 +2435,7 @@ class BookingController extends Controller
 
     public function roomTransfer(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $request->validate([
             'new_room_id' => 'required|exists:rooms,id',
             'transfer_reason' => 'required|string|max:64',

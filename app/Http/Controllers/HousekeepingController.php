@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Events\BookingChargesUpdated;
 use App\Events\DailyRoomCleaningDeskNotify;
 use App\Events\HousekeepingStateUpdated;
@@ -37,12 +38,16 @@ use Illuminate\Support\Str;
 
 class HousekeepingController extends Controller
 {
-    private function checkPermission(string $permission): void
+    use AuthorizesSpatiePermissions;
+
+    private function allowHousekeepingView(): void
     {
-        $user = Auth::user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
+        $this->authorizePermissions(['housekeeping-view', 'view-rooms', 'manage-rooms']);
+    }
+
+    private function allowHousekeepingOperate(): void
+    {
+        $this->authorizePermissions(['housekeeping-operate', 'manage-rooms']);
     }
 
     /**
@@ -131,7 +136,7 @@ class HousekeepingController extends Controller
      */
     public function index(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
         $validated = $request->validate([
             'date' => 'nullable|date',
             'floor' => 'nullable|string|max:50',
@@ -207,7 +212,7 @@ class HousekeepingController extends Controller
      */
     public function navCounts()
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
 
         $dirty = (int) RoomStatusBlock::query()
             ->where('is_active', '=', true, 'and')
@@ -312,7 +317,7 @@ class HousekeepingController extends Controller
      */
     public function catalog()
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
 
         $validated = request()->validate([
             'room_id' => 'nullable|integer|exists:rooms,id',
@@ -338,18 +343,18 @@ class HousekeepingController extends Controller
         $guestRootIds = \App\Models\InventoryCategory::query()
             ->where('name', 'like', 'Guest Amenities%', 'and')
             ->pluck('id')
-            ->map(fn ($id) => (int) $id)
+            ->map(fn($id) => (int) $id)
             ->all();
         $guestChildIds = $guestRootIds === [] ? [] : \App\Models\InventoryCategory::query()
             ->whereIn('parent_id', $guestRootIds, 'and', false)
             ->pluck('id')
-            ->map(fn ($id) => (int) $id)
+            ->map(fn($id) => (int) $id)
             ->all();
 
         $amenityCatIds = collect($amenityCats)
             ->merge($guestRootIds)
             ->merge($guestChildIds)
-            ->map(fn ($id) => (int) $id)
+            ->map(fn($id) => (int) $id)
             ->unique()
             ->values()
             ->all();
@@ -357,9 +362,9 @@ class HousekeepingController extends Controller
         $amenities = $amenityCatIds === []
             ? collect()
             : InventoryItem::query()
-                ->whereIn('category_id', $amenityCatIds, 'and', false)
-                ->orderBy('name')
-                ->get(['id', 'name', 'sku', 'category_id']);
+            ->whereIn('category_id', $amenityCatIds, 'and', false)
+            ->orderBy('name')
+            ->get(['id', 'name', 'sku', 'category_id']);
 
         // Occupied-room daily cleaning: only consumable amenities (PAR kind=amenity) with qty > 0 in room.
         if (request()->boolean('for_daily_cleaning') && $roomContextEarly) {
@@ -387,9 +392,9 @@ class HousekeepingController extends Controller
             $amenities = $positiveIds === []
                 ? collect()
                 : InventoryItem::query()
-                    ->whereIn('id', array_keys($positiveIds), 'and', false)
-                    ->orderBy('name')
-                    ->get(['id', 'name', 'sku', 'category_id']);
+                ->whereIn('id', array_keys($positiveIds), 'and', false)
+                ->orderBy('name')
+                ->get(['id', 'name', 'sku', 'category_id']);
         }
 
         // Minibar items: direct-sale inventory items with a linked menu item for POS posting
@@ -407,7 +412,7 @@ class HousekeepingController extends Controller
             ->whereNotNull('inventory_item_id', 'and')
             ->get($menuCols);
 
-        $menuMap = $menuByInventory->keyBy(fn ($m) => (int) $m->inventory_item_id);
+        $menuMap = $menuByInventory->keyBy(fn($m) => (int) $m->inventory_item_id);
 
         $minibarPayload = $minibar->map(function ($i) use ($menuMap) {
             $m = $menuMap[(int) $i->id] ?? null;
@@ -499,7 +504,7 @@ class HousekeepingController extends Controller
                 continue;
             }
             $out[] = [
-                'key' => 'inv_'.$iid,
+                'key' => 'inv_' . $iid,
                 'inventory_item_id' => $iid,
                 'label' => (string) ($ln['item_name'] ?? 'Asset'),
                 'sku' => (string) ($ln['sku'] ?? ''),
@@ -619,7 +624,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionContext(Room $room)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
 
         $booking = $this->activeBookingForRoom((int) $room->id);
         $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
@@ -633,7 +638,7 @@ class HousekeepingController extends Controller
             'room_number' => (string) $room->room_number,
             'booking' => $booking ? [
                 'id' => (int) $booking->id,
-                'guest_name' => (string) ($booking->guest_name ?? trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''))),
+                'guest_name' => (string) ($booking->guest_name ?? trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''))),
                 'check_in' => $booking->check_in,
                 'check_out' => $booking->check_out,
                 'check_in_at' => $booking->check_in_at,
@@ -727,7 +732,7 @@ class HousekeepingController extends Controller
      */
     public function startCleaning(RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -752,7 +757,7 @@ class HousekeepingController extends Controller
      */
     public function upsertJob(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -878,7 +883,7 @@ class HousekeepingController extends Controller
      */
     public function finish(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -929,7 +934,7 @@ class HousekeepingController extends Controller
                     $st = (string) (($ln->meta['status'] ?? '') ?: '');
                     if (in_array($st, ['needs_repair', 'missing'], true)) {
                         $assetProblem = true;
-                        $assetNotes[] = ($ln->meta['label'] ?? $ln->meta['key'] ?? 'Asset').': '.$st;
+                        $assetNotes[] = ($ln->meta['label'] ?? $ln->meta['key'] ?? 'Asset') . ': ' . $st;
                     }
                 }
             }
@@ -1066,7 +1071,7 @@ class HousekeepingController extends Controller
 
             // If any asset is missing/broken, put room on maintenance until cleared.
             if ($assetProblem) {
-                $note = 'HK asset issue: '.implode('; ', array_slice($assetNotes, 0, 3));
+                $note = 'HK asset issue: ' . implode('; ', array_slice($assetNotes, 0, 3));
                 RoomStatusBlock::create([
                     'room_id' => $roomStatusBlock->room_id,
                     'status' => 'maintenance',
@@ -1111,7 +1116,7 @@ class HousekeepingController extends Controller
      */
     public function markInspected(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1213,7 +1218,7 @@ class HousekeepingController extends Controller
             $orderData['booking_id'] = $booking->id;
         }
         if ($hasPosOrders('customer_name')) {
-            $orderData['customer_name'] = $booking->guest_name ?? trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''));
+            $orderData['customer_name'] = $booking->guest_name ?? trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''));
         }
         if ($hasPosOrders('customer_phone')) {
             $orderData['customer_phone'] = $booking->phone ?? null;
@@ -1303,7 +1308,7 @@ class HousekeepingController extends Controller
      */
     public function markCleaned(RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1332,7 +1337,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionClear(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1398,7 +1403,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionValidate(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1454,7 +1459,7 @@ class HousekeepingController extends Controller
         foreach (($validated['assets'] ?? []) as $a) {
             $k = (string) ($a['key'] ?? '');
             if ($k === '' || ! in_array($k, $allowedAssetKeys, true)) {
-                return response()->json(['message' => 'Invalid or disallowed asset key: '.$k], 422);
+                return response()->json(['message' => 'Invalid or disallowed asset key: ' . $k], 422);
             }
         }
 
@@ -1467,7 +1472,7 @@ class HousekeepingController extends Controller
             $onHand = (float) ($onHandByItem[$itemId] ?? 0);
             if ($qty > $onHand + 0.0001) {
                 return response()->json([
-                    'message' => 'Minibar quantity exceeds on-hand stock for item #'.$itemId.' (max '.round($onHand, 4).').',
+                    'message' => 'Minibar quantity exceeds on-hand stock for item #' . $itemId . ' (max ' . round($onHand, 4) . ').',
                 ], 422);
             }
         }
@@ -1490,7 +1495,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionApply(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1550,7 +1555,7 @@ class HousekeepingController extends Controller
         foreach (($validated['assets'] ?? []) as $a) {
             $k = (string) ($a['key'] ?? '');
             if ($k === '' || ! in_array($k, $allowedAssetKeys, true)) {
-                return response()->json(['message' => 'Invalid or disallowed asset key: '.$k], 422);
+                return response()->json(['message' => 'Invalid or disallowed asset key: ' . $k], 422);
             }
         }
 
@@ -1573,7 +1578,7 @@ class HousekeepingController extends Controller
                     DB::rollBack();
 
                     return response()->json([
-                        'message' => 'Minibar quantity exceeds on-hand stock for item #'.$itemId.' (max '.round($onHand, 4).').',
+                        'message' => 'Minibar quantity exceeds on-hand stock for item #' . $itemId . ' (max ' . round($onHand, 4) . ').',
                     ], 422);
                 }
 
@@ -1673,7 +1678,7 @@ class HousekeepingController extends Controller
                     $assetDesc .= sprintf(' (penalty key: %s)', $penKey);
                 }
                 if ($lineNotes !== '') {
-                    $assetDesc .= ' — '.Str::limit($lineNotes, 240);
+                    $assetDesc .= ' — ' . Str::limit($lineNotes, 240);
                 }
                 $assetRow = [
                     'booking_id' => $booking->id,
@@ -1706,8 +1711,8 @@ class HousekeepingController extends Controller
                 $booking->extra_charges = (float) ($booking->extra_charges ?? 0) + round($chargeTotal, 2);
             }
             if (array_key_exists('remarks', $validated) && trim((string) $validated['remarks']) !== '') {
-                $booking->notes = trim((string) ($booking->notes ?? ''))."\n".
-                    '[Inspection: '.trim((string) $validated['remarks']).' on '.now()->format('Y-m-d H:i:s').']';
+                $booking->notes = trim((string) ($booking->notes ?? '')) . "\n" .
+                    '[Inspection: ' . trim((string) $validated['remarks']) . ' on ' . now()->format('Y-m-d H:i:s') . ']';
             }
             $booking->save();
 
@@ -1823,7 +1828,7 @@ class HousekeepingController extends Controller
     {
         $d = $serviceDay->toDateString();
         $segments = $this->dailyCleaningOccupiedSegments($serviceDay);
-        $roomIds = $segments->pluck('room_id')->map(fn ($id) => (int) $id)->all();
+        $roomIds = $segments->pluck('room_id')->map(fn($id) => (int) $id)->all();
         if ($roomIds === []) {
             return 0;
         }
@@ -1851,7 +1856,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningIndex(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
 
         $validated = $request->validate([
             'date' => 'nullable|date',
@@ -1883,7 +1888,7 @@ class HousekeepingController extends Controller
             return true;
         })->values();
 
-        $roomIds = $segments->pluck('room_id')->map(fn ($id) => (int) $id)->all();
+        $roomIds = $segments->pluck('room_id')->map(fn($id) => (int) $id)->all();
 
         $cleanings = DailyRoomCleaning::query()
             ->where('service_date', '=', $d)
@@ -1941,7 +1946,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningUpdateStatus(Request $request)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
@@ -2032,7 +2037,7 @@ class HousekeepingController extends Controller
             $notify = $request->boolean('notify_front_desk') && $newStatus === 'cleaned';
             if ($notify && ! $cleaning->front_desk_notified_at && config('broadcasting.default') !== 'null') {
                 $guest = $seg->booking ? (string) ($seg->booking->guest_name ?? '') : '';
-                $msg = 'Daily cleaning completed for room #'.(string) ($room?->room_number ?? $roomId);
+                $msg = 'Daily cleaning completed for room #' . (string) ($room?->room_number ?? $roomId);
                 $rn = (string) ($room?->room_number ?? '');
                 $guestBroadcast = $guest !== '' ? $guest : null;
                 App::terminating(function () use ($roomId, $rn, $bookingId, $d, $msg, $guestBroadcast) {
@@ -2074,7 +2079,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningRecordConsumption(Request $request)
     {
-        $this->checkPermission('manage-rooms');
+        $this->allowHousekeepingOperate();
 
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
@@ -2138,7 +2143,7 @@ class HousekeepingController extends Controller
                     DB::rollBack();
 
                     return response()->json([
-                        'message' => 'Quantity exceeds on-hand stock in the room for item #'.$itemId.' (max '.round($available, 4).').',
+                        'message' => 'Quantity exceeds on-hand stock in the room for item #' . $itemId . ' (max ' . round($available, 4) . ').',
                     ], 422);
                 }
 
@@ -2164,7 +2169,7 @@ class HousekeepingController extends Controller
                     'unit_cost' => round($unitCost, 4),
                     'total_cost' => round($qty * $unitCost, 2),
                     'reason' => 'Daily room cleaning consumption',
-                    'notes' => 'Occupied-room service — daily cleaning #'.$cleaning->id,
+                    'notes' => 'Occupied-room service — daily cleaning #' . $cleaning->id,
                     'user_id' => $userId,
                     'reference_id' => (string) $cleaning->id,
                     'reference_type' => 'daily_room_cleaning',
@@ -2211,7 +2216,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningHistory(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
 
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
@@ -2242,7 +2247,7 @@ class HousekeepingController extends Controller
      */
     public function roomCleaningHistory(Request $request, Room $room)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingView();
 
         $limit = min(120, max(1, (int) $request->query('limit', 60)));
 
@@ -2272,7 +2277,7 @@ class HousekeepingController extends Controller
 
             $remarks = trim(implode("\n\n", array_filter([
                 $r->remarks ? (string) $r->remarks : null,
-                $r->maintenance_note ? 'Maintenance: '.(string) $r->maintenance_note : null,
+                $r->maintenance_note ? 'Maintenance: ' . (string) $r->maintenance_note : null,
             ])));
 
             return [
@@ -2320,7 +2325,7 @@ class HousekeepingController extends Controller
 
             $remarks = trim(implode("\n\n", array_filter([
                 $job->remarks ? (string) $job->remarks : null,
-                $job->issues_summary ? 'Issues: '.(string) $job->issues_summary : null,
+                $job->issues_summary ? 'Issues: ' . (string) $job->issues_summary : null,
             ])));
 
             return [
