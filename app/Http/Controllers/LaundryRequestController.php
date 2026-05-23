@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\AuthorizesHousekeepingPermissions;
+use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Events\BookingChargesUpdated;
 use App\Events\HousekeepingStateUpdated;
 use App\Models\Booking;
@@ -19,13 +21,8 @@ use Illuminate\Support\Str;
 
 class LaundryRequestController extends Controller
 {
-    private function checkPermission(string $permission): void
-    {
-        $user = Auth::user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
-    }
+    use AuthorizesHousekeepingPermissions;
+    use AuthorizesSpatiePermissions;
 
     /**
      * Checked-in segment overlapping “today” for a room (same window as daily room cleaning).
@@ -80,7 +77,7 @@ class LaundryRequestController extends Controller
             'delivered_at' => $r->delivered_at?->toIso8601String(),
             'created_by' => $r->created_by ? (int) $r->created_by : null,
             'created_at' => $r->created_at?->toIso8601String(),
-            'lines' => $r->lines->map(fn (LaundryRequestLine $ln) => [
+            'lines' => $r->lines->map(fn(LaundryRequestLine $ln) => [
                 'id' => $ln->id,
                 'item_type' => $ln->item_type,
                 'service_type' => $ln->service_type,
@@ -147,7 +144,7 @@ class LaundryRequestController extends Controller
      */
     public function checkedInRooms(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryView();
 
         $validated = $request->validate([
             'date' => 'nullable|date',
@@ -160,7 +157,7 @@ class LaundryRequestController extends Controller
                 'id' => (int) $seg->room_id,
                 'room_number' => (string) ($seg->room?->room_number ?? ''),
             ];
-        })->filter(fn (array $r) => $r['room_number'] !== '');
+        })->filter(fn(array $r) => $r['room_number'] !== '');
 
         $sorted = $rows->sort(function (array $a, array $b) {
             return strnatcasecmp((string) $a['room_number'], (string) $b['room_number']);
@@ -171,7 +168,7 @@ class LaundryRequestController extends Controller
 
     public function prefill(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryView();
 
         $validated = $request->validate([
             'room_id' => 'required|integer|exists:rooms,id',
@@ -190,7 +187,7 @@ class LaundryRequestController extends Controller
 
         /** @var Booking $booking */
         $booking = $seg->booking;
-        $guestName = trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''));
+        $guestName = trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''));
 
         return response()->json([
             'room_id' => $roomId,
@@ -202,7 +199,7 @@ class LaundryRequestController extends Controller
 
     public function index(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryView();
 
         $validated = $request->validate([
             'queue' => 'nullable|string|in:all,pending_pickup,processing,ready,delivered',
@@ -239,13 +236,13 @@ class LaundryRequestController extends Controller
         $rows = $q->limit($limit)->get();
 
         return response()->json([
-            'data' => $rows->map(fn (LaundryRequest $r) => $this->formatRequest($r))->values()->all(),
+            'data' => $rows->map(fn(LaundryRequest $r) => $this->formatRequest($r))->values()->all(),
         ]);
     }
 
     public function store(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryOperate();
 
         $validated = $request->validate([
             'room_id' => 'required|integer|exists:rooms,id',
@@ -272,7 +269,7 @@ class LaundryRequestController extends Controller
         $booking = $seg->booking;
         $guestName = isset($validated['guest_name']) ? trim((string) $validated['guest_name']) : '';
         if ($guestName === '') {
-            $guestName = trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''));
+            $guestName = trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''));
         }
         if ($guestName === '') {
             $guestName = 'Guest';
@@ -302,7 +299,7 @@ class LaundryRequestController extends Controller
 
     public function show(LaundryRequest $laundryRequest)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryView();
         $laundryRequest->load(['room:id,room_number', 'booking:id,first_name,last_name', 'lines']);
 
         return response()->json($this->formatRequest($laundryRequest));
@@ -310,7 +307,7 @@ class LaundryRequestController extends Controller
 
     public function update(Request $request, LaundryRequest $laundryRequest)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryOperate();
 
         if ($laundryRequest->posted_at) {
             return response()->json(['message' => 'This laundry request is already posted to the folio.'], 422);
@@ -356,7 +353,7 @@ class LaundryRequestController extends Controller
 
     public function pickup(Request $request, LaundryRequest $laundryRequest)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryOperate();
 
         if ($laundryRequest->posted_at) {
             return response()->json(['message' => 'This laundry request is already posted to the folio.'], 422);
@@ -393,7 +390,7 @@ class LaundryRequestController extends Controller
 
     public function syncLines(Request $request, LaundryRequest $laundryRequest)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryOperate();
 
         if ($laundryRequest->posted_at) {
             return response()->json(['message' => 'This laundry request is already posted to the folio.'], 422);
@@ -454,7 +451,7 @@ class LaundryRequestController extends Controller
 
     public function updateStatus(Request $request, LaundryRequest $laundryRequest)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryOperate();
 
         if ($laundryRequest->posted_at) {
             return response()->json(['message' => 'This laundry request is already posted to the folio.'], 422);
@@ -476,7 +473,7 @@ class LaundryRequestController extends Controller
 
         if (! in_array($next, $allowed, true)) {
             return response()->json([
-                'message' => 'Invalid status transition from '.$cur.' to '.$next.'.',
+                'message' => 'Invalid status transition from ' . $cur . ' to ' . $next . '.',
             ], 422);
         }
 
@@ -505,7 +502,7 @@ class LaundryRequestController extends Controller
 
     public function postToRoom(LaundryRequest $laundryRequest)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowHousekeepingLaundryOperate();
 
         if ($laundryRequest->posted_at) {
             return response()->json(['message' => 'Already posted to the room folio.'], 422);
@@ -550,9 +547,9 @@ class LaundryRequestController extends Controller
             'express_surcharge_amount' => round($expressExtra, 2),
         ];
 
-        $label = 'Guest laundry #'.$laundryRequest->id;
+        $label = 'Guest laundry #' . $laundryRequest->id;
         $desc = Str::limit(
-            'Laundry — '.$label.' — '.$laundryRequest->guest_name,
+            'Laundry — ' . $label . ' — ' . $laundryRequest->guest_name,
             500,
         );
 

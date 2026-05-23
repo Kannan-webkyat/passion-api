@@ -38,17 +38,8 @@ use Illuminate\Support\Str;
 
 class HousekeepingController extends Controller
 {
+    use AuthorizesHousekeepingPermissions;
     use AuthorizesSpatiePermissions;
-
-    private function allowHousekeepingView(): void
-    {
-        $this->authorizePermissions(['housekeeping-view', 'view-rooms', 'manage-rooms']);
-    }
-
-    private function allowHousekeepingOperate(): void
-    {
-        $this->authorizePermissions(['housekeeping-operate', 'manage-rooms']);
-    }
 
     /**
      * Shared filters for housekeeping index lists (floor, room type, optional calendar overlap).
@@ -136,7 +127,6 @@ class HousekeepingController extends Controller
      */
     public function index(Request $request)
     {
-        $this->allowHousekeepingView();
         $validated = $request->validate([
             'date' => 'nullable|date',
             'floor' => 'nullable|string|max:50',
@@ -152,6 +142,7 @@ class HousekeepingController extends Controller
         $overlapOnly = $request->boolean('overlap_only');
 
         if (! empty($validated['checkout_scope'])) {
+            $this->allowHousekeepingViewSection([self::HK_CHECKOUT]);
             $scope = $validated['checkout_scope'];
             $query = RoomStatusBlock::query()->with(['room.roomType']);
 
@@ -185,6 +176,18 @@ class HousekeepingController extends Controller
 
         $hkStatus = $validated['hk_status'] ?? 'all';
 
+        $statusPermission = [
+            'dirty' => [self::HK_DIRTY],
+            'cleaning' => [self::HK_CLEANING],
+            'inspected' => [self::HK_CLEAN],
+            'pending_inspection' => [self::HK_CHECKOUT],
+        ];
+        if ($hkStatus === 'all') {
+            $this->allowHousekeepingNav();
+        } else {
+            $this->allowHousekeepingViewSection($statusPermission[$hkStatus] ?? [self::HK_DIRTY]);
+        }
+
         $statuses = $hkStatus === 'all' ? ['dirty', 'cleaning', 'inspected', 'pending_inspection'] : [$hkStatus];
 
         // List all active HK blocks — checkout may be scheduled on a future calendar day while the room
@@ -212,7 +215,7 @@ class HousekeepingController extends Controller
      */
     public function navCounts()
     {
-        $this->allowHousekeepingView();
+        $this->allowHousekeepingNav();
 
         $dirty = (int) RoomStatusBlock::query()
             ->where('is_active', '=', true, 'and')
@@ -317,7 +320,7 @@ class HousekeepingController extends Controller
      */
     public function catalog()
     {
-        $this->allowHousekeepingView();
+        $this->allowHousekeepingNav();
 
         $validated = request()->validate([
             'room_id' => 'nullable|integer|exists:rooms,id',
@@ -624,7 +627,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionContext(Room $room)
     {
-        $this->allowHousekeepingView();
+        $this->allowHousekeepingNav();
 
         $booking = $this->activeBookingForRoom((int) $room->id);
         $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
@@ -1856,7 +1859,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningIndex(Request $request)
     {
-        $this->allowHousekeepingView();
+        $this->allowHousekeepingViewSection([self::HK_DAILY]);
 
         $validated = $request->validate([
             'date' => 'nullable|date',
@@ -1946,6 +1949,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningUpdateStatus(Request $request)
     {
+        $this->allowHousekeepingViewSection([self::HK_DAILY]);
         $this->allowHousekeepingOperate();
 
         $validated = $request->validate([
@@ -2079,6 +2083,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningRecordConsumption(Request $request)
     {
+        $this->allowHousekeepingViewSection([self::HK_DAILY]);
         $this->allowHousekeepingOperate();
 
         $validated = $request->validate([
@@ -2216,7 +2221,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningHistory(Request $request)
     {
-        $this->allowHousekeepingView();
+        $this->allowHousekeepingViewSection([self::HK_DAILY]);
 
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
@@ -2247,7 +2252,7 @@ class HousekeepingController extends Controller
      */
     public function roomCleaningHistory(Request $request, Room $room)
     {
-        $this->allowHousekeepingView();
+        $this->allowHousekeepingNav();
 
         $limit = min(120, max(1, (int) $request->query('limit', 60)));
 

@@ -23,6 +23,6 @@ trait AuthorizesSpatiePermissions
                 return;
             }
         }
-        abort(403, 'Unauthorized action.');
+        abort(403, 'You do not have permission to perform this action.');
     }
 }

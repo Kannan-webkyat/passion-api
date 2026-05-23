@@ -28,8 +28,6 @@ class RolePermissionSeeder extends Seeder
             'room-types-create',
             'room-types-edit',
             'room-types-delete',
-            'room-blocks-view',
-            'room-blocks-manage',
             'reservation-view',
             'reservation-create',
             'reservation-create-group',
@@ -39,6 +37,12 @@ class RolePermissionSeeder extends Seeder
             'reservation-delete',
             'housekeeping-view',
             'housekeeping-operate',
+            'housekeeping-dirty-rooms',
+            'housekeeping-checkout-inspection',
+            'housekeeping-cleaning-tasks',
+            'housekeeping-daily-room-cleaning',
+            'housekeeping-clean-rooms',
+            'housekeeping-laundry',
             'manage-inventory',
             // Inventory report permissions (granular)
             'inventory-report-summary',
@@ -98,6 +102,12 @@ class RolePermissionSeeder extends Seeder
         $receptionist->syncPermissions([
             'manage-rooms',
             'view-rooms',
+            'room-types-view',
+            'room-types-create',
+            'room-types-edit',
+            'rooms-view',
+            'rooms-create',
+            'rooms-edit',
             'reservation-view',
             'reservation-create',
             'reservation-create-group',
@@ -130,6 +140,14 @@ class RolePermissionSeeder extends Seeder
         $seniorWaiter->syncPermissions(['pos-order', 'pos-void-item', 'pos-reopen-order']);
 
         $housekeeping = Role::firstOrCreate(['name' => 'Housekeeping', 'guard_name' => $guardName]);
-        $housekeeping->syncPermissions(['housekeeping-view', 'housekeeping-operate']);
+        $housekeeping->syncPermissions([
+            'housekeeping-dirty-rooms',
+            'housekeeping-checkout-inspection',
+            'housekeeping-cleaning-tasks',
+            'housekeeping-daily-room-cleaning',
+            'housekeeping-clean-rooms',
+            'housekeeping-laundry',
+            'housekeeping-operate',
+        ]);
     }
 }

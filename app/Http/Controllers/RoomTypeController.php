@@ -13,7 +13,13 @@ class RoomTypeController extends Controller
 
     public function index(Request $request)
     {
-        $this->authorizePermissions(['room-types-view', 'view-rooms', 'manage-rooms', 'reservation']);
+        // Read: admin Room Types page, room chart, rate calendar, housekeeping (not a substitute for create/edit/delete).
+        $this->authorizePermissions([
+            'room-types-view',
+            'view-rooms',
+            'reservation-view',
+            'reservation',
+        ]);
 
         $query = RoomType::with(['tax', 'ratePlans', 'seasons']);
         if (! $request->boolean('include_inactive')) {
@@ -42,7 +48,7 @@ class RoomTypeController extends Controller
 
     public function store(Request $request)
     {
-        $this->authorizePermissions(['room-types-create', 'manage-rooms']);
+        $this->authorizePermissions(['room-types-create']);
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
@@ -109,14 +115,19 @@ class RoomTypeController extends Controller
 
     public function show(RoomType $roomType)
     {
-        $this->authorizePermissions(['room-types-view', 'view-rooms', 'manage-rooms', 'reservation']);
+        $this->authorizePermissions([
+            'room-types-view',
+            'view-rooms',
+            'reservation-view',
+            'reservation',
+        ]);
 
         return $roomType->load(['tax', 'ratePlans', 'seasons']);
     }
 
     public function update(Request $request, RoomType $roomType)
     {
-        $this->authorizePermissions(['room-types-edit', 'manage-rooms']);
+        $this->authorizePermissions(['room-types-edit']);
         $validated = $request->validate([
             'name' => 'string|max:255',
             'description' => 'nullable|string',
@@ -250,7 +261,7 @@ class RoomTypeController extends Controller
 
     public function destroy(RoomType $roomType)
     {
-        $this->authorizePermissions(['room-types-delete', 'manage-rooms']);
+        $this->authorizePermissions(['room-types-delete']);
         try {
             $roomType->delete();
 
