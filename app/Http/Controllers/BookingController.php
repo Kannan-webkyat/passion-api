@@ -32,6 +32,7 @@ class BookingController extends Controller
     {
         $this->authorizePermissions([
             'reservation-view',
+            'reservation',
             'view-rooms',
             'manage-rooms',
             'rooms-view',
@@ -40,12 +41,12 @@ class BookingController extends Controller
 
     private function allowReservationRead(): void
     {
-        $this->authorizePermissions(['reservation-view']);
+        $this->authorizePermissions(['reservation-view', 'reservation']);
     }
 
     private function allowReservationDetail(): void
     {
-        $this->authorizePermissions(['reservation-view']);
+        $this->authorizePermissions(['reservation-view', 'reservation']);
     }
 
     /** Guest lookup while creating a booking (no view permission required). */

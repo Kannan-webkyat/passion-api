@@ -17,6 +17,7 @@ class RoomTypeController extends Controller
         $this->authorizePermissions([
             'room-types-view',
             'view-rooms',
+            'manage-rooms',
             'reservation-view',
             'reservation',
         ]);
@@ -118,6 +119,7 @@ class RoomTypeController extends Controller
         $this->authorizePermissions([
             'room-types-view',
             'view-rooms',
+            'manage-rooms',
             'reservation-view',
             'reservation',
         ]);
