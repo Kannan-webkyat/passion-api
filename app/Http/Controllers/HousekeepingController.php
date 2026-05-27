@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\AuthorizesHousekeepingPermissions;
 use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Events\BookingChargesUpdated;
 use App\Events\DailyRoomCleaningDeskNotify;
