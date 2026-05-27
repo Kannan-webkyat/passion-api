@@ -35,8 +35,6 @@ class RolePermissionSeeder extends Seeder
             'reservation-maintenance-room',
             'reservation-edit',
             'reservation-delete',
-            'housekeeping-view',
-            'housekeeping-operate',
             'housekeeping-dirty-rooms',
             'housekeeping-checkout-inspection',
             'housekeeping-cleaning-tasks',
@@ -147,7 +145,6 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-daily-room-cleaning',
             'housekeeping-clean-rooms',
             'housekeeping-laundry',
-            'housekeeping-operate',
         ]);
     }
 }

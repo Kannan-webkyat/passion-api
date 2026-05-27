@@ -21,7 +21,6 @@ class RoomStatusBlockController extends Controller
             'view-rooms',
             'reservation-hold-room',
             'reservation-maintenance-room',
-            'housekeeping-view',
         ]);
         $validated = $request->validate([
             'start' => 'nullable|date',
@@ -56,7 +55,11 @@ class RoomStatusBlockController extends Controller
         } elseif ($status === 'maintenance') {
             $this->authorizePermissions(['reservation-maintenance-room']);
         } else {
-            $this->authorizePermissions(['manage-rooms', 'housekeeping-operate']);
+            $this->authorizePermissions([
+                'manage-rooms',
+                'housekeeping-dirty-rooms',
+                'housekeeping-cleaning-tasks',
+            ]);
         }
     }
 
@@ -68,7 +71,11 @@ class RoomStatusBlockController extends Controller
         } elseif ($status === 'maintenance') {
             $this->authorizePermissions(['reservation-maintenance-room']);
         } else {
-            $this->authorizePermissions(['manage-rooms', 'housekeeping-operate']);
+            $this->authorizePermissions([
+                'manage-rooms',
+                'housekeeping-dirty-rooms',
+                'housekeeping-cleaning-tasks',
+            ]);
         }
     }
 

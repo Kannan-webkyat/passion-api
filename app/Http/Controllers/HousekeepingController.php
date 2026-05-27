@@ -28,6 +28,7 @@ use App\Models\RoomParTemplate;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
 use App\Models\User;
+use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -83,14 +84,14 @@ class HousekeepingController extends Controller
         if ($ids === []) {
             return $blocks;
         }
-        $names = User::query()
-            ->whereIn('id', $ids, 'and', false)
-            ->pluck('name', 'id');
-
-        return $blocks->map(function (RoomStatusBlock $b) use ($names) {
+        return $blocks->map(function (RoomStatusBlock $b) {
             $snap = $b->inspection_snapshot;
             $uid = is_array($snap) ? (int) ($snap['inspector_user_id'] ?? 0) : 0;
-            $b->setAttribute('inspector_name', $uid > 0 && $names->has($uid) ? (string) $names[$uid] : null);
+            $stored = is_array($snap) && isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null;
+            $b->setAttribute(
+                'inspector_name',
+                CheckoutInspectionInspector::displayNameForUserId($uid > 0 ? $uid : null, $stored),
+            );
 
             return $b;
         });
@@ -498,6 +499,23 @@ class HousekeepingController extends Controller
             return [];
         }
         $onHand = $roomContext['on_hand_by_item_id'] ?? [];
+        $itemIds = [];
+        foreach ($roomContext['par_lines'] as $ln) {
+            if (($ln['kind'] ?? '') !== 'asset') {
+                continue;
+            }
+            $iid = (int) ($ln['inventory_item_id'] ?? 0);
+            if ($iid > 0) {
+                $itemIds[$iid] = true;
+            }
+        }
+        $itemsById = $itemIds === []
+            ? collect()
+            : InventoryItem::query()
+            ->whereIn('id', array_keys($itemIds), 'and', false)
+            ->get(['id', 'name', 'sku', 'cost_price', 'conversion_factor', 'inspection_penalty_charge'])
+            ->keyBy('id');
+
         $out = [];
         foreach ($roomContext['par_lines'] as $ln) {
             if (($ln['kind'] ?? '') !== 'asset') {
@@ -507,13 +525,27 @@ class HousekeepingController extends Controller
             if ($iid <= 0) {
                 continue;
             }
+            /** @var InventoryItem|null $item */
+            $item = $itemsById->get($iid);
+            $itemCost = $item
+                ? CheckoutInspectionPenaltyAmount::issueUnitCost(
+                    (float) ($item->cost_price ?? 0),
+                    (float) ($item->conversion_factor ?? 1),
+                )
+                : 0.0;
+            $additional = $item
+                ? round(max(0.0, (float) ($item->inspection_penalty_charge ?? 0)), 2)
+                : 0.0;
             $out[] = [
                 'key' => 'inv_' . $iid,
                 'inventory_item_id' => $iid,
-                'label' => (string) ($ln['item_name'] ?? 'Asset'),
-                'sku' => (string) ($ln['sku'] ?? ''),
+                'label' => (string) ($ln['item_name'] ?? ($item->name ?? 'Asset')),
+                'sku' => (string) ($ln['sku'] ?? ($item->sku ?? '')),
                 'par_qty' => (float) ($ln['par_qty'] ?? 0),
                 'on_hand' => (float) ($onHand[$iid] ?? 0),
+                'item_cost' => $itemCost,
+                'inspection_penalty_charge' => $additional,
+                'unit_damage_charge' => round($itemCost + $additional, 2),
             ];
         }
 
@@ -594,7 +626,19 @@ class HousekeepingController extends Controller
             $label = (string) ($a['label'] ?? '');
             $penKey = isset($a['penalty_key']) ? trim((string) $a['penalty_key']) : '';
             $lineQty = isset($a['qty']) ? max(1, (int) $a['qty']) : 1;
-            [$amount, $mapLabel] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
+            $invItemId = isset($a['inventory_item_id']) ? (int) $a['inventory_item_id'] : null;
+            if (str_starts_with($key, 'inv_')) {
+                $fromKey = (int) substr($key, 4);
+                if ($fromKey > 0) {
+                    $invItemId = $invItemId ?: $fromKey;
+                }
+            }
+
+            [$amount, $mapLabel, $itemCost, $additionalPenalty] = CheckoutInspectionPenaltyAmount::resolveForAsset(
+                $invItemId,
+                $penKey,
+                $penalties,
+            );
             if ($mapLabel !== null && $mapLabel !== '') {
                 $label = $mapLabel;
             }
@@ -605,7 +649,10 @@ class HousekeepingController extends Controller
                 'key' => $key,
                 'label' => $label,
                 'qty' => $lineQty,
+                'inventory_item_id' => $invItemId ?: null,
                 'penalty_key' => $penKey !== '' ? $penKey : null,
+                'item_cost' => $itemCost,
+                'inspection_penalty_charge' => $additionalPenalty,
                 'unit_amount' => $amount,
                 'line_total' => $lineTotal,
             ];
@@ -736,7 +783,7 @@ class HousekeepingController extends Controller
      */
     public function startCleaning(RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -761,7 +808,7 @@ class HousekeepingController extends Controller
      */
     public function upsertJob(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -887,7 +934,7 @@ class HousekeepingController extends Controller
      */
     public function finish(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_CLEANING]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1120,7 +1167,7 @@ class HousekeepingController extends Controller
      */
     public function markInspected(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_CLEAN]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1171,6 +1218,40 @@ class HousekeepingController extends Controller
             ->where('status', '=', 'checked_in', 'and')
             ->orderByDesc('id')
             ->first();
+    }
+
+    /**
+     * Booking tied to checkout inspection on this room (departed guest or vacated leg), not the next arrival.
+     */
+    private function bookingForCheckoutInspectionRoom(int $roomId, string $startDate, string $endDate): ?Booking
+    {
+        $departed = BookingSegment::query()
+            ->where('room_id', '=', $roomId, 'and')
+            ->where(function ($q) {
+                $q->where('status', '=', 'checked_out', 'or')
+                    ->whereHas('booking', fn($b) => $b->where('status', '=', 'checked_out'));
+            })
+            ->where('check_in_at', '<', $endDate)
+            ->where('check_out_at', '>', $startDate)
+            ->with('booking')
+            ->orderByDesc('check_out_at')
+            ->orderByDesc('id')
+            ->first();
+
+        if ($departed?->booking instanceof Booking) {
+            return $departed->booking;
+        }
+
+        $stay = BookingSegment::query()
+            ->where('room_id', '=', $roomId, 'and')
+            ->whereNotIn('status', ['cancelled', 'completed'])
+            ->where('check_in_at', '<', $endDate)
+            ->where('check_out_at', '>', $startDate)
+            ->with('booking')
+            ->orderByDesc('id')
+            ->first();
+
+        return $stay?->booking instanceof Booking ? $stay->booking : null;
     }
 
     private function postMinibarRoomCharge(Booking $booking, $minibarLines, ?int $userId): void
@@ -1312,7 +1393,7 @@ class HousekeepingController extends Controller
      */
     public function markCleaned(RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_CLEANING]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1341,7 +1422,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionClear(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_CHECKOUT]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1351,8 +1432,15 @@ class HousekeepingController extends Controller
         }
 
         $userId = Auth::id();
+        $inspectorName = CheckoutInspectionInspector::displayNameForUserId(
+            $userId ? (int) $userId : null,
+            Auth::user() ? (string) Auth::user()->name : null,
+        );
         $startDate = (string) $roomStatusBlock->start_date;
         $endDate = (string) $roomStatusBlock->end_date;
+        $roomId = (int) $roomStatusBlock->room_id;
+        $booking = $this->bookingForCheckoutInspectionRoom($roomId, $startDate, $endDate);
+        $bookingId = $booking ? (int) $booking->id : null;
 
         DB::beginTransaction();
         try {
@@ -1369,7 +1457,9 @@ class HousekeepingController extends Controller
                 'submitted_at' => now()->toIso8601String(),
                 'inspected_at' => now()->toIso8601String(),
                 'inspector_user_id' => $userId,
-                'booking_id' => null,
+                'inspector_name' => $inspectorName,
+                'booking_id' => $bookingId,
+                'room_id' => $roomId,
             ];
 
             $newBlock = RoomStatusBlock::create([
@@ -1407,7 +1497,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionValidate(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_CHECKOUT]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1499,7 +1589,7 @@ class HousekeepingController extends Controller
      */
     public function checkoutInspectionApply(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_CHECKOUT]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1529,13 +1619,17 @@ class HousekeepingController extends Controller
         ]);
 
         $userId = Auth::id();
+        $inspectorName = CheckoutInspectionInspector::displayNameForUserId(
+            $userId ? (int) $userId : null,
+            Auth::user() ? (string) Auth::user()->name : null,
+        );
         $startDate = (string) $roomStatusBlock->start_date;
         $endDate = (string) $roomStatusBlock->end_date;
 
         $roomId = (int) $roomStatusBlock->room_id;
-        $booking = $this->activeBookingForRoom($roomId);
+        $booking = $this->bookingForCheckoutInspectionRoom($roomId, $startDate, $endDate);
         if (! $booking) {
-            return response()->json(['message' => 'No active booking found for this room.'], 422);
+            return response()->json(['message' => 'No booking found for this room inspection.'], 422);
         }
 
         $penaltiesRaw = (string) Setting::get('checkout_inspection_penalties', '{}');
@@ -1662,7 +1756,11 @@ class HousekeepingController extends Controller
                     }
                 }
 
-                [$amount, $mapLabel] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
+                [$amount, $mapLabel, $itemCost, $additionalPenalty] = CheckoutInspectionPenaltyAmount::resolveForAsset(
+                    $invItemId,
+                    $penKey,
+                    $penalties,
+                );
                 if ($mapLabel !== null && $mapLabel !== '') {
                     $label = $mapLabel;
                 }
@@ -1671,15 +1769,20 @@ class HousekeepingController extends Controller
                 $unitAmount = $amount;
                 $lineTotal = round($unitAmount * $lineQty, 2);
 
-                // Always record missing/damaged assets so reception can list them even when no penalty
-                // is configured (empty penalty key or unknown key in checkout_inspection_penalties).
                 $assetDesc = sprintf(
                     'Checkout inspection — asset %s: %s',
                     $status === 'missing' || $status === 'damaged' ? $status : 'issue',
                     $label,
                 );
-                if ($penKey !== '') {
-                    $assetDesc .= sprintf(' (penalty key: %s)', $penKey);
+                if ($itemCost > 0.0001 || $additionalPenalty > 0.0001) {
+                    $assetDesc .= sprintf(
+                        ' (item cost %s + penalty %s = %s per unit)',
+                        number_format($itemCost, 2, '.', ''),
+                        number_format($additionalPenalty, 2, '.', ''),
+                        number_format($unitAmount, 2, '.', ''),
+                    );
+                } elseif ($penKey !== '') {
+                    $assetDesc .= sprintf(' (legacy penalty key: %s)', $penKey);
                 }
                 if ($lineNotes !== '') {
                     $assetDesc .= ' — ' . Str::limit($lineNotes, 240);
@@ -1698,6 +1801,8 @@ class HousekeepingController extends Controller
                         'penalty_key' => $penKey !== '' ? $penKey : null,
                         'notes' => $lineNotes !== '' ? $lineNotes : null,
                         'inventory_item_id' => $invItemId ?: null,
+                        'item_cost' => $itemCost,
+                        'inspection_penalty_charge' => $additionalPenalty,
                     ],
                 ];
                 if ($bookingExtraChargesHasDescription) {
@@ -1720,14 +1825,42 @@ class HousekeepingController extends Controller
             }
             $booking->save();
 
+            $snapshotAssets = [];
+            foreach (($validated['assets'] ?? []) as $a) {
+                if (! is_array($a)) {
+                    continue;
+                }
+                $key = (string) ($a['key'] ?? '');
+                $penKey = isset($a['penalty_key']) ? trim((string) $a['penalty_key']) : '';
+                $invItemId = isset($a['inventory_item_id']) ? (int) $a['inventory_item_id'] : null;
+                if (str_starts_with($key, 'inv_')) {
+                    $fromKey = (int) substr($key, 4);
+                    if ($fromKey > 0) {
+                        $invItemId = $invItemId ?: $fromKey;
+                    }
+                }
+                [$unit,, $itemCost, $additionalPenalty] = CheckoutInspectionPenaltyAmount::resolveForAsset(
+                    $invItemId,
+                    $penKey,
+                    $penalties,
+                );
+                $snapshotAssets[] = array_merge($a, [
+                    'item_cost' => $itemCost,
+                    'inspection_penalty_charge' => $additionalPenalty,
+                    'unit_damage_charge' => $unit,
+                ]);
+            }
+
             $snapshot = [
                 'remarks' => array_key_exists('remarks', $validated) ? trim((string) $validated['remarks']) : null,
                 'minibar' => [],
-                'assets' => $validated['assets'] ?? [],
+                'assets' => $snapshotAssets,
                 'cleared' => false,
                 'submitted_at' => now()->toIso8601String(),
                 'booking_id' => (int) $booking->id,
+                'room_id' => $roomId,
                 'inspector_user_id' => $userId,
+                'inspector_name' => $inspectorName,
                 'inspected_at' => now()->toIso8601String(),
                 'room_condition' => $validated['room_condition'] ?? null,
                 'linen_check' => $validated['linen_check'] ?? null,
@@ -1950,8 +2083,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningUpdateStatus(Request $request)
     {
-        $this->allowHousekeepingViewSection([self::HK_DAILY]);
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_DAILY]);
 
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
@@ -2084,8 +2216,7 @@ class HousekeepingController extends Controller
      */
     public function dailyCleaningRecordConsumption(Request $request)
     {
-        $this->allowHousekeepingViewSection([self::HK_DAILY]);
-        $this->allowHousekeepingOperate();
+        $this->allowHousekeepingOperate([self::HK_DAILY]);
 
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',

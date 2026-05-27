@@ -17,15 +17,16 @@ trait AuthorizesHousekeepingPermissions
     public const HK_LAUNDRY = 'housekeeping-laundry';
 
     /** @return array<int, string> */
-    private static function hkLegacyView(): array
+    private static function granularHousekeepingMenuPermissions(): array
     {
-        return ['housekeeping-view', 'view-rooms', 'manage-rooms'];
-    }
-
-    /** @return array<int, string> */
-    private static function hkLegacyOperate(): array
-    {
-        return ['housekeeping-operate', 'manage-rooms'];
+        return [
+            self::HK_DIRTY,
+            self::HK_CHECKOUT,
+            self::HK_CLEANING,
+            self::HK_DAILY,
+            self::HK_CLEAN,
+            self::HK_LAUNDRY,
+        ];
     }
 
     /**
@@ -33,24 +34,20 @@ trait AuthorizesHousekeepingPermissions
      */
     protected function allowHousekeepingViewSection(array $section): void
     {
-        $this->authorizePermissions(array_merge($section, self::hkLegacyView()));
+        $this->authorizePermissions($section);
     }
 
     protected function allowHousekeepingNav(): void
     {
-        $this->authorizePermissions(array_merge([
-            self::HK_DIRTY,
-            self::HK_CHECKOUT,
-            self::HK_CLEANING,
-            self::HK_DAILY,
-            self::HK_CLEAN,
-            self::HK_LAUNDRY,
-        ], self::hkLegacyView()));
+        $this->authorizePermissions(self::granularHousekeepingMenuPermissions());
     }
 
-    protected function allowHousekeepingOperate(): void
+    /**
+     * @param  array<int, string>  $section
+     */
+    protected function allowHousekeepingOperate(array $section): void
     {
-        $this->authorizePermissions(self::hkLegacyOperate());
+        $this->allowHousekeepingViewSection($section);
     }
 
     protected function allowHousekeepingLaundryView(): void
@@ -60,6 +57,6 @@ trait AuthorizesHousekeepingPermissions
 
     protected function allowHousekeepingLaundryOperate(): void
     {
-        $this->authorizePermissions(array_merge([self::HK_LAUNDRY], self::hkLegacyOperate()));
+        $this->authorizePermissions([self::HK_LAUNDRY]);
     }
 }

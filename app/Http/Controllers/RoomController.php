@@ -21,7 +21,6 @@ class RoomController extends Controller
             'view-rooms',
             'reservation-view',
             'reservation',
-            'housekeeping-view',
         ]);
 
         $query = Room::with(['roomType', 'connectedRoom']);
@@ -63,7 +62,6 @@ class RoomController extends Controller
             'view-rooms',
             'reservation-view',
             'reservation',
-            'housekeeping-view',
         ]);
 
         return $room->load('roomType');

@@ -15,6 +15,7 @@ use App\Models\RoomStatusBlock;
 use App\Models\Setting;
 use App\Support\BookingInvoiceRoomStay;
 use App\Support\BookingRoomTransferService;
+use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
 use App\Support\SeasonalRoomPricing;
@@ -22,6 +23,7 @@ use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 
 class BookingController extends Controller
 {
@@ -438,17 +440,58 @@ class BookingController extends Controller
                         });
                 });
         }, 'segments' => function ($q) use ($rangeStartAt, $rangeEndAt) {
+            // Include checked_out segments so the chart can tell departure day (dirty) vs completed inspection.
             $q->where('check_in_at', '<', $rangeEndAt)
                 ->where('check_out_at', '>', $rangeStartAt)
-                ->whereNotIn('status', ['cancelled', 'checked_out'])
+                ->whereNotIn('status', ['cancelled'])
                 ->with(['booking', 'ratePlan']);
         }])->get();
+
+        $this->enrichCheckoutInspectionInspectorNamesOnRooms($rooms);
 
         return response()->json([
             'rooms' => $rooms,
             'start' => $start->toDateString(),
             'end' => $end->toDateString(),
         ]);
+    }
+
+    /**
+     * Room chart snapshots may only store inspector_user_id; attach inspector_name for display.
+     *
+     * @param  \Illuminate\Support\Collection<int, \App\Models\Room>|\Illuminate\Database\Eloquent\Collection<int, \App\Models\Room>  $rooms
+     */
+    private function enrichCheckoutInspectionInspectorNamesOnRooms($rooms): void
+    {
+        $userIds = [];
+        foreach ($rooms as $room) {
+            foreach ($room->statusBlocks ?? [] as $block) {
+                $snap = $block->inspection_snapshot;
+                if (! is_array($snap)) {
+                    continue;
+                }
+                $uid = (int) ($snap['inspector_user_id'] ?? 0);
+                if ($uid > 0 && trim((string) ($snap['inspector_name'] ?? '')) === '') {
+                    $userIds[$uid] = true;
+                }
+            }
+        }
+        if ($userIds === []) {
+            return;
+        }
+
+        foreach ($rooms as $room) {
+            foreach ($room->statusBlocks ?? [] as $block) {
+                $snap = $block->inspection_snapshot;
+                if (! is_array($snap)) {
+                    continue;
+                }
+                $enriched = CheckoutInspectionInspector::enrichSnapshot($snap);
+                if ($enriched !== null) {
+                    $block->setAttribute('inspection_snapshot', $enriched);
+                }
+            }
+        }
     }
 
     public function summary(Request $request)
@@ -2106,25 +2149,60 @@ class BookingController extends Controller
             ];
         }
 
+        $penalties = $this->checkoutInspectionPenaltiesMap();
+
         $ledgerRows = BookingExtraCharge::query()
             ->where('booking_id', '=', $booking->id, 'and')
             ->orderBy('id')
-            ->get(['id', 'source', 'kind', 'label', 'description', 'qty', 'unit_amount', 'total_amount', 'meta', 'created_at']);
+            ->get($this->bookingExtraChargeSelectColumns());
 
-        $ledgerItems = $ledgerRows->map(function (BookingExtraCharge $line) {
+        $ledgerHasDescription = Schema::hasColumn('booking_extra_charges', 'description');
+
+        $ledgerItems = $ledgerRows->map(function (BookingExtraCharge $line) use ($penalties, $ledgerHasDescription) {
+            $unit = round((float) ($line->unit_amount ?? 0), 2);
+            $total = round((float) ($line->total_amount ?? 0), 2);
+            $meta = is_array($line->meta) ? $line->meta : [];
+            if ($line->source === 'inspection' && $total < 0.0001) {
+                $invItemId = (int) ($meta['inventory_item_id'] ?? 0);
+                $penKey = trim((string) ($meta['penalty_key'] ?? ''));
+                if (isset($meta['unit_damage_charge']) && is_numeric($meta['unit_damage_charge'])) {
+                    $unit = round(max(0.0, (float) $meta['unit_damage_charge']), 2);
+                } else {
+                    [$unit] = CheckoutInspectionPenaltyAmount::resolveForAsset($invItemId, $penKey, $penalties);
+                }
+                $qty = max(1.0, (float) ($line->qty ?? 1));
+                $total = round($unit * $qty, 2);
+            }
+
+            $description = null;
+            if ($ledgerHasDescription && $line->description !== null && trim((string) $line->description) !== '') {
+                $description = (string) $line->description;
+            } elseif (isset($meta['asset_status'])) {
+                $description = 'Status: ' . (string) $meta['asset_status'];
+            }
+
             return [
                 'id' => (int) $line->id,
                 'source' => (string) $line->source,
                 'kind' => (string) $line->kind,
                 'label' => (string) $line->label,
-                'description' => $line->description !== null ? (string) $line->description : null,
+                'description' => $description,
                 'qty' => round((float) ($line->qty ?? 1), 2),
-                'unit_amount' => round((float) ($line->unit_amount ?? 0), 2),
-                'amount' => round((float) ($line->total_amount ?? 0), 2),
+                'unit_amount' => $unit,
+                'amount' => $total,
                 'posted_at' => $line->created_at?->toIso8601String(),
                 'meta' => $line->meta,
             ];
         })->values()->all();
+
+        $hasInspectionLedger = collect($ledgerItems)->contains(
+            fn(array $row) => ($row['source'] ?? '') === 'inspection' && (float) ($row['amount'] ?? 0) > 0.0001,
+        );
+        if (! $hasInspectionLedger) {
+            foreach ($this->inspectionSnapshotFallbackLines($booking, $penalties) as $line) {
+                $ledgerItems[] = $this->ledgerItemFromInspectionChargeLine($line);
+            }
+        }
 
         return response()->json([
             'extra_charges_total' => (float) ($booking->extra_charges ?? 0),
@@ -2162,10 +2240,85 @@ class BookingController extends Controller
             return $this->enrichInspectionChargeLineForDisplay($line, $penalties);
         })->values()->all();
 
+        $inspector = $this->checkoutInspectionInspectorForBooking($booking);
+
         return response()->json([
             'booking_id' => (int) $booking->id,
             'lines' => $linesOut,
+            'inspector' => $inspector,
         ]);
+    }
+
+    /**
+     * @return array{user_id: int|null, name: string|null}
+     */
+    private function checkoutInspectionInspectorForBooking(Booking $booking): array
+    {
+        $roomIds = array_values(array_unique(array_filter(array_merge(
+            [(int) $booking->room_id],
+            $booking->segments()->pluck('room_id')->map(fn($id) => (int) $id)->all()
+        ), static fn(int $id): bool => $id > 0)));
+
+        if ($roomIds === []) {
+            return ['user_id' => null, 'name' => null];
+        }
+
+        $blocks = RoomStatusBlock::query()
+            ->whereIn('room_id', $roomIds, 'and', false)
+            ->where('status', '=', 'inspected')
+            ->whereNotNull('inspection_snapshot')
+            ->orderByDesc('id')
+            ->get();
+
+        foreach ($blocks as $block) {
+            $snap = $block->inspection_snapshot;
+            if (! is_array($snap) || ! empty($snap['cleared'])) {
+                continue;
+            }
+            $snapBookingId = isset($snap['booking_id']) ? (int) $snap['booking_id'] : null;
+            if ($snapBookingId !== null && $snapBookingId !== (int) $booking->id) {
+                continue;
+            }
+
+            $snap = CheckoutInspectionInspector::enrichSnapshot($snap) ?? $snap;
+            $uid = isset($snap['inspector_user_id']) ? (int) $snap['inspector_user_id'] : 0;
+            $name = CheckoutInspectionInspector::displayNameForUserId(
+                $uid > 0 ? $uid : null,
+                isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null,
+            );
+
+            return [
+                'user_id' => $uid > 0 ? $uid : null,
+                'name' => $name,
+            ];
+        }
+
+        return ['user_id' => null, 'name' => null];
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     * @return array<string, mixed>
+     */
+    private function ledgerItemFromInspectionChargeLine(array $line): array
+    {
+        $qty = max(1.0, (float) ($line['qty'] ?? 1));
+        $unit = round((float) ($line['resolved_unit_amount'] ?? $line['unit_amount'] ?? 0), 2);
+        $total = round((float) ($line['resolved_total_amount'] ?? $line['total_amount'] ?? ($unit * $qty)), 2);
+        $meta = is_array($line['meta'] ?? null) ? $line['meta'] : [];
+
+        return [
+            'id' => (int) ($line['id'] ?? 0),
+            'source' => 'inspection',
+            'kind' => (string) ($line['kind'] ?? 'asset_penalty'),
+            'label' => (string) ($line['label'] ?? 'Inspection charge'),
+            'description' => isset($meta['asset_status']) ? 'Status: ' . (string) $meta['asset_status'] : null,
+            'qty' => $qty,
+            'unit_amount' => $unit,
+            'amount' => $total,
+            'posted_at' => null,
+            'meta' => $meta,
+        ];
     }
 
     /**
@@ -2198,7 +2351,14 @@ class BookingController extends Controller
             $meta = $row['meta'] ?? [];
             $meta = is_array($meta) ? $meta : [];
             $penKey = trim((string) ($meta['penalty_key'] ?? ''));
-            if ($resolvedUnit < 0.0001 && $penKey !== '') {
+            $invItemId = (int) ($meta['inventory_item_id'] ?? 0);
+            if ($resolvedUnit < 0.0001 && isset($meta['unit_damage_charge']) && is_numeric($meta['unit_damage_charge'])) {
+                $resolvedUnit = round(max(0.0, (float) $meta['unit_damage_charge']), 2);
+                $resolvedTotal = round($resolvedUnit * $qty, 2);
+            } elseif ($resolvedUnit < 0.0001 && $invItemId > 0) {
+                [$resolvedUnit] = CheckoutInspectionPenaltyAmount::resolveForAsset($invItemId, $penKey, $penalties);
+                $resolvedTotal = round($resolvedUnit * $qty, 2);
+            } elseif ($resolvedUnit < 0.0001 && $penKey !== '') {
                 [$resolvedUnit] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
                 $resolvedTotal = round($resolvedUnit * $qty, 2);
             }
@@ -2231,13 +2391,27 @@ class BookingController extends Controller
             return [];
         }
 
-        $block = RoomStatusBlock::query()
+        // Completed inspections close the HK block (is_active = false); snapshot still holds charges.
+        $blocks = RoomStatusBlock::query()
             ->whereIn('room_id', $roomIds, 'and', false)
-            ->where('is_active', '=', true, 'and')
-            ->whereIn('status', ['inspected', 'pending_inspection'], 'and', false)
+            ->where('status', '=', 'inspected')
             ->whereNotNull('inspection_snapshot')
             ->orderByDesc('id')
-            ->first();
+            ->get();
+
+        $block = null;
+        foreach ($blocks as $candidate) {
+            $snap = $candidate->inspection_snapshot;
+            if (! is_array($snap) || ! empty($snap['cleared'])) {
+                continue;
+            }
+            $snapBookingId = isset($snap['booking_id']) ? (int) $snap['booking_id'] : null;
+            // Only attach snapshot charges to the booking that completed checkout inspection.
+            if ($snapBookingId !== null && $snapBookingId === (int) $booking->id) {
+                $block = $candidate;
+                break;
+            }
+        }
 
         if (! $block || ! is_array($block->inspection_snapshot)) {
             return [];
@@ -2267,11 +2441,26 @@ class BookingController extends Controller
             $label = trim((string) ($a['label'] ?? '')) ?: ($key !== '' ? $key : 'Asset');
             $penKey = isset($a['penalty_key']) ? trim((string) $a['penalty_key']) : '';
             $lineQty = isset($a['qty']) ? max(1, (int) $a['qty']) : 1;
-            [$unit, $mapLabel] = CheckoutInspectionPenaltyAmount::resolve($penalties, $penKey);
-            if ($mapLabel !== null && $mapLabel !== '') {
-                $label = $mapLabel;
+            $invItemId = isset($a['inventory_item_id']) ? (int) $a['inventory_item_id'] : null;
+            if (str_starts_with($key, 'inv_')) {
+                $fromKey = (int) substr($key, 4);
+                if ($fromKey > 0) {
+                    $invItemId = $invItemId ?: $fromKey;
+                }
+            }
+            if (isset($a['unit_damage_charge']) && is_numeric($a['unit_damage_charge'])) {
+                $unit = round(max(0.0, (float) $a['unit_damage_charge']), 2);
+            } else {
+                [$unit] = CheckoutInspectionPenaltyAmount::resolveForAsset($invItemId, $penKey, $penalties);
             }
             $total = round($unit * $lineQty, 2);
+
+            $itemCost = isset($a['item_cost']) && is_numeric($a['item_cost'])
+                ? round(max(0.0, (float) $a['item_cost']), 2)
+                : 0.0;
+            $additionalPenalty = isset($a['inspection_penalty_charge']) && is_numeric($a['inspection_penalty_charge'])
+                ? round(max(0.0, (float) $a['inspection_penalty_charge']), 2)
+                : 0.0;
 
             $out[] = $this->enrichInspectionChargeLineForDisplay([
                 'id' => $nid--,
@@ -2282,8 +2471,43 @@ class BookingController extends Controller
                 'total_amount' => $total,
                 'meta' => [
                     'asset_key' => $key,
+                    'inventory_item_id' => $invItemId ?: null,
                     'asset_status' => $status,
                     'penalty_key' => $penKey !== '' ? $penKey : null,
+                    'item_cost' => $itemCost,
+                    'inspection_penalty_charge' => $additionalPenalty,
+                    'unit_damage_charge' => $unit,
+                    'from_inspection_snapshot' => true,
+                ],
+            ], $penalties);
+        }
+
+        foreach (($snap['minibar'] ?? []) as $row) {
+            if (! is_array($row)) {
+                continue;
+            }
+            $itemId = (int) ($row['inventory_item_id'] ?? 0);
+            $qty = (float) ($row['qty'] ?? 0);
+            if ($qty <= 0 || $itemId <= 0) {
+                continue;
+            }
+            /** @var \App\Models\InventoryItem|null $item */
+            $item = \App\Models\InventoryItem::query()->find($itemId, ['id', 'name', 'sku', 'cost_price', 'conversion_factor']);
+            if (! $item) {
+                continue;
+            }
+            $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
+            $unitCost = round((float) ($item->cost_price ?? 0) / $conv, 2);
+            $lineTotal = round($unitCost * $qty, 2);
+            $out[] = $this->enrichInspectionChargeLineForDisplay([
+                'id' => $nid--,
+                'kind' => 'minibar',
+                'label' => (string) ($row['name'] ?? $item->name ?? 'Minibar'),
+                'qty' => $qty,
+                'unit_amount' => $unitCost,
+                'total_amount' => $lineTotal,
+                'meta' => [
+                    'inventory_item_id' => $itemId,
                     'from_inspection_snapshot' => true,
                 ],
             ], $penalties);
@@ -2344,6 +2568,19 @@ class BookingController extends Controller
             'order_notes' => $order->notes ? (string) $order->notes : null,
             'lines' => $lines,
         ]);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function bookingExtraChargeSelectColumns(): array
+    {
+        $cols = ['id', 'source', 'kind', 'label', 'qty', 'unit_amount', 'total_amount', 'meta', 'created_at'];
+        if (Schema::hasColumn('booking_extra_charges', 'description')) {
+            $cols[] = 'description';
+        }
+
+        return $cols;
     }
 
     public function destroy(Booking $booking)
