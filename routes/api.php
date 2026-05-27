@@ -8,6 +8,7 @@ use App\Http\Controllers\{
     DepartmentController,
     DietaryTypeController,
     HousekeepingController,
+    CessSlabController,
     InventoryCategoryController,
     InventoryController,
     InventoryLocationController,
@@ -231,6 +232,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('store-requests/{storeRequest}/reject', [StoreRequestController::class, 'reject']);
         Route::post('store-requests/{storeRequest}/cancel', [StoreRequestController::class, 'cancel']);
 
+        Route::apiResource('cess-slabs', CessSlabController::class)->except(['show']);
         Route::apiResource('purchase-orders', PurchaseOrderController::class);
         Route::post('purchase-orders/{purchaseOrder}/receive', [PurchaseOrderController::class, 'receive']);
         Route::post('purchase-orders/{purchaseOrder}/send', [PurchaseOrderController::class, 'send']);

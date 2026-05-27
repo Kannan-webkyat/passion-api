@@ -15,6 +15,7 @@ class DatabaseSeeder extends Seeder
         $this->call([
             InventoryTaxSeeder::class,
             InventoryUomSeeder::class,
+            CessSlabSeeder::class,
             RolePermissionSeeder::class,
             DepartmentSeeder::class,
             LocationSeeder::class,

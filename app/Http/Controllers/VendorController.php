@@ -34,6 +34,7 @@ class VendorController extends Controller
             'state' => 'nullable|string|max:100',
             'is_registered_dealer' => 'boolean',
             'default_tax_price_basis' => 'nullable|string|in:tax_exclusive,tax_inclusive,non_taxable',
+            'is_liquor_supplier' => 'boolean',
         ]);
         $vendor = Vendor::create($validated);
 
@@ -59,6 +60,7 @@ class VendorController extends Controller
             'state' => 'nullable|string|max:100',
             'is_registered_dealer' => 'boolean',
             'default_tax_price_basis' => 'nullable|string|in:tax_exclusive,tax_inclusive,non_taxable',
+            'is_liquor_supplier' => 'boolean',
         ]);
         $vendor->update($validated);
 

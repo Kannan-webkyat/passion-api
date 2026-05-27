@@ -11,15 +11,25 @@ use Illuminate\Support\Facades\DB;
 class PurchaseOrderService
 {
     /**
-     * Mutates each line with subtotal (exclusive net), tax_amount, total_amount, tax_rate, tax_price_basis.
+     * Mutates each line with subtotal, tax, cess, and merchandise total_amount.
      *
      * @param  array<int, array<string, mixed>>  $items
-     * @return array{subtotal: float, tax_amount: float}
+     * @return array{subtotal: float, tax_amount: float, total_cess_amount: float}
      */
     public static function applyLineAmountsToItems(array &$items): array
     {
         $subtotalSum = 0.0;
         $taxSum = 0.0;
+        $cessSum = 0.0;
+
+        $itemIds = array_values(array_unique(array_filter(array_map(
+            fn ($line) => (int) ($line['inventory_item_id'] ?? 0),
+            $items
+        ))));
+        $inventoryById = InventoryItem::query()
+            ->whereIn('id', $itemIds)
+            ->get()
+            ->keyBy('id');
 
         foreach ($items as &$line) {
             $basis = PurchaseOrderLineAmounts::normalizeBasis($line['tax_price_basis'] ?? null);
@@ -31,20 +41,63 @@ class PurchaseOrderService
                 $rate = 0.0;
             }
 
-            $computed = PurchaseOrderLineAmounts::compute($qty, $up, $rate, $basis);
+            /** @var InventoryItem|null $inv */
+            $inv = $inventoryById->get((int) $line['inventory_item_id']);
+            $unitCess = $inv ? CessSlabResolver::resolveUnitCess($inv, $up) : 0.0;
+
+            $computed = PurchaseOrderLineAmounts::compute($qty, $up, $rate, $basis, $unitCess);
 
             $line['tax_price_basis'] = $basis;
             $line['tax_rate'] = $computed['tax_rate'];
             $line['subtotal'] = $computed['subtotal'];
             $line['tax_amount'] = $computed['tax_amount'];
             $line['total_amount'] = $computed['total_amount'];
+            $line['unit_cess'] = $computed['unit_cess'];
+            $line['total_cess'] = $computed['total_cess'];
 
             $subtotalSum += $computed['subtotal'];
             $taxSum += $computed['tax_amount'];
+            $cessSum += $computed['total_cess'];
         }
         unset($line);
 
-        return ['subtotal' => $subtotalSum, 'tax_amount' => $taxSum];
+        return [
+            'subtotal' => $subtotalSum,
+            'tax_amount' => $taxSum,
+            'total_cess_amount' => $cessSum,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $headerCharges  transportation_charge, loading_unloading_charge, tds_amount (optional)
+     * @return array<string, float|null>
+     */
+    public static function buildHeaderFinancials(array $lineTotals, array $headerCharges = []): array
+    {
+        $transport = round(max(0, (float) ($headerCharges['transportation_charge'] ?? 0)), 2);
+        $loading = round(max(0, (float) ($headerCharges['loading_unloading_charge'] ?? 0)), 2);
+        $tds = isset($headerCharges['tds_amount']) && $headerCharges['tds_amount'] !== ''
+            ? round(max(0, (float) $headerCharges['tds_amount']), 2)
+            : null;
+
+        $headerParts = PurchaseOrderLineAmounts::computeHeaderTotals([
+            'subtotal' => $lineTotals['subtotal'],
+            'tax_amount' => $lineTotals['tax_amount'],
+            'total_cess_amount' => $lineTotals['total_cess_amount'],
+            'transportation_charge' => $transport,
+            'loading_unloading_charge' => $loading,
+        ]);
+
+        return [
+            'subtotal' => round($lineTotals['subtotal'], 2),
+            'tax_amount' => round($lineTotals['tax_amount'], 2),
+            'total_cess_amount' => round($lineTotals['total_cess_amount'], 2),
+            'transportation_charge' => $transport,
+            'loading_unloading_charge' => $loading,
+            'total_amount' => $headerParts['total_amount'],
+            'grand_total_payable' => $headerParts['grand_total_payable'],
+            'tds_amount' => $tds,
+        ];
     }
 
     /**
@@ -62,9 +115,8 @@ class PurchaseOrderService
      */
     public function createFromValidatedDataWithinTransaction(array $validated, ?int $procurementRequisitionId = null, string $initialStatus = 'draft'): PurchaseOrder
     {
-        $totals = self::applyLineAmountsToItems($validated['items']);
-        $subtotal = $totals['subtotal'];
-        $taxAmount = $totals['tax_amount'];
+        $lineTotals = self::applyLineAmountsToItems($validated['items']);
+        $financials = self::buildHeaderFinancials($lineTotals, $validated);
 
         $year = date('Y', strtotime($validated['order_date']));
         $lastPO = PurchaseOrder::whereYear('order_date', $year)
@@ -85,9 +137,14 @@ class PurchaseOrderService
             'expected_delivery_date' => $validated['expected_delivery_date'] ?? null,
             'notes' => $validated['notes'] ?? null,
             'status' => $initialStatus,
-            'subtotal' => $subtotal,
-            'tax_amount' => $taxAmount,
-            'total_amount' => $subtotal + $taxAmount,
+            'subtotal' => $financials['subtotal'],
+            'tax_amount' => $financials['tax_amount'],
+            'total_cess_amount' => $financials['total_cess_amount'],
+            'transportation_charge' => $financials['transportation_charge'],
+            'loading_unloading_charge' => $financials['loading_unloading_charge'],
+            'total_amount' => $financials['total_amount'],
+            'grand_total_payable' => $financials['grand_total_payable'],
+            'tds_amount' => $financials['tds_amount'],
             'created_by' => auth()->id(),
             'po_number' => $poNumber,
             'procurement_requisition_id' => $procurementRequisitionId,
@@ -103,6 +160,8 @@ class PurchaseOrderService
                 'subtotal' => $line['subtotal'],
                 'tax_rate' => $line['tax_rate'] ?? 0,
                 'tax_amount' => $line['tax_amount'],
+                'unit_cess' => $line['unit_cess'],
+                'total_cess' => $line['total_cess'],
                 'total_amount' => $line['total_amount'],
             ]);
         }
@@ -136,12 +195,21 @@ class PurchaseOrderService
     }
 
     /**
-     * Keep procurement requisition status consistent with linked POs.
-     *
-     * Rules:
-     * - If there is at least one non-cancelled PO linked: status = po_generated
-     * - If there are zero non-cancelled linked POs and status was po_generated: revert to comparison
+     * Per-unit landed cost (exclusive merchandise + cess per bottle) for WAC / loss valuation.
      */
+    public static function landedUnitCostPerPurchaseUom(PurchaseOrderItem $poItem): float
+    {
+        $qty = (float) $poItem->quantity_ordered;
+        if ($qty <= 0) {
+            return 0.0;
+        }
+
+        $merchandise = (float) ($poItem->subtotal ?? 0);
+        $cess = (float) ($poItem->total_cess ?? 0);
+
+        return round(($merchandise + $cess) / $qty, 4);
+    }
+
     public static function syncProcurementRequisitionStatus(?int $procurementRequisitionId): void
     {
         if (! $procurementRequisitionId) {
@@ -160,6 +228,7 @@ class PurchaseOrderService
 
         if ($activePoCount > 0 && $req->status !== 'po_generated') {
             $req->update(['status' => 'po_generated']);
+
             return;
         }
 

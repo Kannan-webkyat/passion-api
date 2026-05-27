@@ -10,8 +10,50 @@ use Illuminate\Support\Facades\DB;
 
 class HotelInventoryOpeningStockSeeder extends Seeder
 {
+    /**
+     * Liquor SKUs that require BEVCO-style cess on purchase orders.
+     *
+     * @var array<string, array{liquor_category: string, cess_amount?: float|null}>
+     */
+    private function liquorCessBySku(): array
+    {
+        return [
+            'MB_ALCOHOL_MINIATURE' => ['liquor_category' => 'imfl'],
+            'FB-BR-JW1' => ['liquor_category' => 'imfl'],
+            'FB-BR-RC1' => ['liquor_category' => 'imfl'],
+        ];
+    }
+
+    /** Beer / wine have no BEVCO cess slabs — clear slab fields if previously seeded. */
+    private function clearNonSlabLiquorFlags(): void
+    {
+        InventoryItem::query()
+            ->whereIn('sku', ['FB-BR-KF1', 'FB-BR-BR1'])
+            ->update([
+                'is_alcohol' => true,
+                'is_cess_applicable' => false,
+                'liquor_category' => null,
+                'cess_amount' => null,
+            ]);
+    }
+
+    private function applyLiquorCessFlags(): void
+    {
+        $this->clearNonSlabLiquorFlags();
+
+        foreach ($this->liquorCessBySku() as $sku => $meta) {
+            InventoryItem::where('sku', '=', $sku, 'and')->update([
+                'is_alcohol' => true,
+                'is_cess_applicable' => true,
+                'liquor_category' => $meta['liquor_category'],
+                'cess_amount' => $meta['cess_amount'] ?? null,
+            ]);
+        }
+    }
+
     public function run(): void
     {
+        $this->applyLiquorCessFlags();
         /** @var InventoryLocation|null $mainStore */
         $mainStore = InventoryLocation::where('type', '=', 'main_store', 'and')->first();
         if (! $mainStore) {

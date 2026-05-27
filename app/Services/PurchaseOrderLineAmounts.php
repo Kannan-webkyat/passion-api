@@ -24,14 +24,17 @@ final class PurchaseOrderLineAmounts
     }
 
     /**
-     * @return array{subtotal: float, tax_amount: float, total_amount: float, tax_rate: float}
-     *                                                                                         subtotal = exclusive line net (inventory / ITC base); total_amount = gross payable line
+     * @return array{subtotal: float, tax_amount: float, total_amount: float, tax_rate: float, unit_cess: float, total_cess: float}
+     *                                                                                         subtotal = exclusive line net (inventory / ITC base); total_amount = merchandise + GST (excludes cess)
      */
-    public static function compute(float $quantity, float $unitPrice, float $taxRate, string $taxPriceBasis): array
+    public static function compute(float $quantity, float $unitPrice, float $taxRate, string $taxPriceBasis, float $unitCess = 0.0): array
     {
         $basis = self::normalizeBasis($taxPriceBasis);
         $q = max(0, $quantity);
         $up = max(0, $unitPrice);
+
+        $unitCessRounded = self::roundMoney2(self::strNum(max(0, $unitCess)));
+        $totalCess = self::roundMoney2(bcmul(self::strNum($q), self::strNum($unitCessRounded), 8));
 
         if ($basis === self::BASIS_NON_TAXABLE) {
             $sub = self::roundMoney2(bcmul(self::strNum($q), self::strNum($up), 8));
@@ -41,6 +44,8 @@ final class PurchaseOrderLineAmounts
                 'tax_amount' => 0.0,
                 'total_amount' => $sub,
                 'tax_rate' => 0.0,
+                'unit_cess' => $unitCessRounded,
+                'total_cess' => $totalCess,
             ];
         }
 
@@ -55,6 +60,8 @@ final class PurchaseOrderLineAmounts
                 'tax_amount' => $tax,
                 'total_amount' => self::roundMoney2(bcadd(self::strNum($sub), self::strNum($tax), 8)),
                 'tax_rate' => $rate,
+                'unit_cess' => $unitCessRounded,
+                'total_cess' => $totalCess,
             ];
         }
 
@@ -67,6 +74,8 @@ final class PurchaseOrderLineAmounts
                 'tax_amount' => 0.0,
                 'total_amount' => $gross,
                 'tax_rate' => $rate,
+                'unit_cess' => $unitCessRounded,
+                'total_cess' => $totalCess,
             ];
         }
 
@@ -81,6 +90,32 @@ final class PurchaseOrderLineAmounts
             'tax_amount' => $tax,
             'total_amount' => $gross,
             'tax_rate' => $rate,
+            'unit_cess' => $unitCessRounded,
+            'total_cess' => $totalCess,
+        ];
+    }
+
+    /**
+     * @param  array{subtotal: float, tax_amount: float, total_cess_amount: float, transportation_charge: float, loading_unloading_charge: float}  $parts
+     * @return array{total_amount: float, grand_total_payable: float}
+     */
+    public static function computeHeaderTotals(array $parts): array
+    {
+        $merchandise = round(
+            (float) $parts['subtotal'] + (float) $parts['tax_amount'],
+            2
+        );
+        $grand = round(
+            $merchandise
+            + (float) $parts['total_cess_amount']
+            + (float) $parts['transportation_charge']
+            + (float) $parts['loading_unloading_charge'],
+            2
+        );
+
+        return [
+            'total_amount' => $merchandise,
+            'grand_total_payable' => $grand,
         ];
     }
 

@@ -28,6 +28,25 @@ class InventoryController extends Controller
         }
     }
 
+    /** @param  array<string, mixed>  $validated */
+    private function normalizeAlcoholLiquorFields(array &$validated): void
+    {
+        $validated['is_alcohol'] = (bool) ($validated['is_alcohol'] ?? false);
+        $validated['is_cess_applicable'] = (bool) ($validated['is_cess_applicable'] ?? false);
+
+        if (! $validated['is_alcohol']) {
+            $validated['is_cess_applicable'] = false;
+            $validated['liquor_category'] = null;
+            $validated['cess_amount'] = null;
+
+            return;
+        }
+
+        if (! $validated['is_cess_applicable']) {
+            $validated['cess_amount'] = null;
+        }
+    }
+
     public function index()
     {
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get();
@@ -61,11 +80,16 @@ class InventoryController extends Controller
             'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
+            'is_alcohol' => 'nullable|boolean',
+            'is_cess_applicable' => 'nullable|boolean',
+            'cess_amount' => 'nullable|numeric|min:0',
+            'liquor_category' => 'nullable|string|max:32',
             'description' => 'nullable|string',
         ]);
 
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        $this->normalizeAlcoholLiquorFields($validated);
         $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
         $item = InventoryItem::create($validated);
 
@@ -128,8 +152,16 @@ class InventoryController extends Controller
             'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
+            'is_alcohol' => 'nullable|boolean',
+            'is_cess_applicable' => 'nullable|boolean',
+            'cess_amount' => 'nullable|numeric|min:0',
+            'liquor_category' => 'nullable|string|max:32',
             'description' => 'nullable|string',
         ]);
+
+        $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
+        $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        $this->normalizeAlcoholLiquorFields($validated);
 
         $oldStock = $item->current_stock;
         $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);

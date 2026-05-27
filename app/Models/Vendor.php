@@ -10,10 +10,12 @@ class Vendor extends Model
         'name', 'contact_person', 'phone', 'email', 'address',
         'gstin', 'pan', 'state', 'is_registered_dealer',
         'default_tax_price_basis',
+        'is_liquor_supplier',
     ];
 
     protected $casts = [
         'is_registered_dealer' => 'boolean',
+        'is_liquor_supplier' => 'boolean',
     ];
 
     public function items()

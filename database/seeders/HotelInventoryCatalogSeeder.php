@@ -105,6 +105,10 @@ class HotelInventoryCatalogSeeder extends Seeder
                 'current_stock' => 0,
                 'is_direct_sale' => false,
                 'is_prepared_item' => false,
+                'is_alcohol' => false,
+                'is_cess_applicable' => false,
+                'cess_amount' => null,
+                'liquor_category' => null,
                 'description' => null,
                 'vendor_id' => null,
                 'tax_id' => null,
@@ -184,11 +188,11 @@ class HotelInventoryCatalogSeeder extends Seeder
 
         foreach (
             [
-                ['Soda', $minibarDrinks, $BTL],
-                ['Juice', $minibarDrinks, $BTL],
-                ['Alcohol miniature', $minibarDrinks, $BTL],
-                ['Sparkling water', $minibarDrinks, $BTL],
-            ] as [$name, $cat, $uom]
+                ['Soda', $minibarDrinks, $BTL, false, null],
+                ['Juice', $minibarDrinks, $BTL, false, null],
+                ['Alcohol miniature', $minibarDrinks, $BTL, true, 'imfl'],
+                ['Sparkling water', $minibarDrinks, $BTL, false, null],
+            ] as [$name, $cat, $uom, $cessApplicable, $liquorCategory]
         ) {
             $base = $defaults($cat->id, $uom, $uom);
             $this->item(array_merge($base, [
@@ -196,6 +200,9 @@ class HotelInventoryCatalogSeeder extends Seeder
                 'sku' => $this->sku('MB', $name),
                 'is_direct_sale' => true,
                 'reorder_level' => 10,
+                'is_alcohol' => $cessApplicable,
+                'is_cess_applicable' => $cessApplicable,
+                'liquor_category' => $liquorCategory,
             ]));
         }
 
