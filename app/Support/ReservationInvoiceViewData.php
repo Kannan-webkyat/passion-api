@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Setting;
+use App\Support\BookingInspectionChargeLines;
 use Carbon\Carbon;
 use DateTimeInterface;
 use Illuminate\Support\Facades\Auth;
@@ -66,11 +67,14 @@ final class ReservationInvoiceViewData
         $staySummary = BookingInvoiceRoomStay::summarizeForInvoice($booking);
         $roomGrand = $staySummary['room_inclusive_grand'];
         $extraCharges = $staySummary['additive_extra_charges'];
+        $inspectionLines = BookingInspectionChargeLines::forBooking($booking);
+        $inspectionTotals = BookingInspectionChargeLines::totalsByKind($inspectionLines);
+        $posPostedTotal = BookingInvoiceRoomStay::sumPosRoomChargePayments($booking);
         $grossBill = $staySummary['gross_before_checkout_discount'];
         $checkoutDisc = max(0.0, min((float) ($booking->checkout_discount_amount ?? 0), $grossBill));
         $grand = max(0.0, $grossBill - $checkoutDisc);
         $paid = (float) ($booking->deposit_amount ?? 0);
-        
+
         /** Nearest whole rupee for settlement lines (round off shown in summary when needed). */
         $grandRounded = (float) round($grand);
         $roundOff = $grandRounded - $grand;
@@ -163,19 +167,101 @@ final class ReservationInvoiceViewData
             );
         }
 
-        if ($folioOrders->isEmpty() && $extraCharges > 0.004) {
+        $damageSac = trim((string) (Setting::get('invoice_damage_sac') ?? ''));
+        if ($damageSac === '') {
+            $damageSac = '—';
+        }
+
+        $minibarTotal = round((float) ($inspectionTotals['minibar'] ?? 0), 2);
+        if ($minibarTotal > 0.004) {
             $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
             $divF = 1 + ($fbRate / 100);
-            $taxableF = $divF > 0 ? ($extraCharges / $divF) : $extraCharges;
-            $gstF = $extraCharges - $taxableF;
+            $taxableF = $divF > 0 ? ($minibarTotal / $divF) : $minibarTotal;
+            $gstF = $minibarTotal - $taxableF;
+            $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
+
+            $lines[] = self::lineRow(
+                $sr++,
+                'Minibar consumption',
+                $fbSac !== '' ? $fbSac : '—',
+                '1',
+                $fmt($minibarTotal),
+                $fmt($minibarTotal),
+                $fmt(0),
+                $fmt($taxableF),
+                $gstF > 0.004 ? ($fbRate / 2) : 0.0,
+                $gstF / 2,
+                $gstF > 0.004 ? ($fbRate / 2) : 0.0,
+                $gstF / 2,
+                0.0,
+                0.0,
+                $fmt(0)
+            );
+        }
+
+        $damageTotal = round((float) ($inspectionTotals['asset_penalty'] ?? 0), 2);
+        if ($damageTotal > 0.004) {
+            $lines[] = self::lineRow(
+                $sr++,
+                'Damaged / missing items',
+                $damageSac,
+                '1',
+                $fmt($damageTotal),
+                $fmt($damageTotal),
+                $fmt(0),
+                $fmt($damageTotal),
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                $fmt(0)
+            );
+        }
+
+        $nonPosExtra = max(0.0, round($extraCharges - $posPostedTotal, 2));
+        $orphanNonInspection = max(
+            0.0,
+            round($nonPosExtra - $inspectionTotals['total'], 2),
+        );
+
+        if ($folioOrders->isEmpty() && $orphanNonInspection > 0.004) {
+            $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
+            $divF = 1 + ($fbRate / 100);
+            $taxableF = $divF > 0 ? ($orphanNonInspection / $divF) : $orphanNonInspection;
+            $gstF = $orphanNonInspection - $taxableF;
             $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
             $lines[] = self::lineRow(
                 $sr++,
                 'Posted to room (F&B / extras)',
                 $fbSac !== '' ? $fbSac : '—',
                 '1',
-                $fmt($extraCharges),
-                $fmt($extraCharges),
+                $fmt($orphanNonInspection),
+                $fmt($orphanNonInspection),
+                $fmt(0),
+                $fmt($taxableF),
+                $fbRate / 2,
+                $gstF / 2,
+                $fbRate / 2,
+                $gstF / 2,
+                0,
+                0,
+                $fmt(0)
+            );
+        } elseif ($folioOrders->isNotEmpty() && $orphanNonInspection > 0.004) {
+            $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
+            $divF = 1 + ($fbRate / 100);
+            $taxableF = $divF > 0 ? ($orphanNonInspection / $divF) : $orphanNonInspection;
+            $gstF = $orphanNonInspection - $taxableF;
+            $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
+            $lines[] = self::lineRow(
+                $sr++,
+                'Posted to room (extras)',
+                $fbSac !== '' ? $fbSac : '—',
+                '1',
+                $fmt($orphanNonInspection),
+                $fmt($orphanNonInspection),
                 $fmt(0),
                 $fmt($taxableF),
                 $fbRate / 2,

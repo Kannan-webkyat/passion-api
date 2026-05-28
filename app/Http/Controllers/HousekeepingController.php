@@ -490,8 +490,8 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * PAR-backed movable assets for checkout inspection (inv_{id} keys).
-     * When empty, clients fall back to legacy static `assets` list.
+     * Movable assets for checkout inspection (inv_{id} keys).
+     * Only items physically on hand in the room location are included.
      */
     private function checkoutInspectionAssetsFromContext(?array $roomContext): array
     {
@@ -505,7 +505,7 @@ class HousekeepingController extends Controller
                 continue;
             }
             $iid = (int) ($ln['inventory_item_id'] ?? 0);
-            if ($iid > 0) {
+            if ($iid > 0 && (float) ($onHand[$iid] ?? 0) > 0.0001) {
                 $itemIds[$iid] = true;
             }
         }
@@ -525,6 +525,10 @@ class HousekeepingController extends Controller
             if ($iid <= 0) {
                 continue;
             }
+            $onHandQty = (float) ($onHand[$iid] ?? 0);
+            if ($onHandQty <= 0.0001) {
+                continue;
+            }
             /** @var InventoryItem|null $item */
             $item = $itemsById->get($iid);
             $itemCost = $item
@@ -542,7 +546,7 @@ class HousekeepingController extends Controller
                 'label' => (string) ($ln['item_name'] ?? ($item->name ?? 'Asset')),
                 'sku' => (string) ($ln['sku'] ?? ($item->sku ?? '')),
                 'par_qty' => (float) ($ln['par_qty'] ?? 0),
-                'on_hand' => (float) ($onHand[$iid] ?? 0),
+                'on_hand' => $onHandQty,
                 'item_cost' => $itemCost,
                 'inspection_penalty_charge' => $additional,
                 'unit_damage_charge' => round($itemCost + $additional, 2),
@@ -550,6 +554,20 @@ class HousekeepingController extends Controller
         }
 
         return $out;
+    }
+
+    private function roomHasParAssetLines(?array $roomContext): bool
+    {
+        if (! $roomContext) {
+            return false;
+        }
+        foreach ($roomContext['par_lines'] ?? [] as $ln) {
+            if (($ln['kind'] ?? '') === 'asset') {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** Legacy static asset keys when room PAR has no asset lines. */
@@ -575,6 +593,10 @@ class HousekeepingController extends Controller
         foreach ($this->checkoutInspectionAssetsFromContext($ctx) as $row) {
             $fromPar[] = (string) ($row['key'] ?? '');
         }
+        if ($this->roomHasParAssetLines($ctx)) {
+            return $fromPar;
+        }
+
         if ($fromPar !== []) {
             return $fromPar;
         }
@@ -2380,6 +2402,106 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * Daily cleaning records for a service date (main daily board history panel).
+     */
+    public function dailyCleaningHistoryBoard(Request $request)
+    {
+        $this->allowHousekeepingViewSection([self::HK_DAILY]);
+
+        $validated = $request->validate([
+            'date' => 'required|date',
+            'floor' => 'nullable|string|max:50',
+            'room_type_id' => 'nullable|integer|exists:room_types,id',
+            'status' => 'nullable|string|in:pending_cleaning,in_progress,cleaned,all',
+            'limit' => 'nullable|integer|min:1|max:200',
+        ]);
+
+        $limit = (int) ($validated['limit'] ?? 100);
+        $date = Carbon::parse($validated['date'])->toDateString();
+        $status = (string) ($validated['status'] ?? 'all');
+
+        $query = DailyRoomCleaning::query()
+            ->whereDate('service_date', '=', $date, 'and')
+            ->with([
+                'room:id,room_number,floor,room_type_id',
+                'room.roomType:id,name',
+                'booking:id,first_name,last_name',
+                'assignedUser:id,name',
+                'startedByUser:id,name',
+                'completedByUser:id,name',
+            ])
+            ->orderByDesc('completed_at')
+            ->orderByDesc('id');
+
+        if ($status !== '' && $status !== 'all') {
+            $query->where('status', '=', $status, 'and');
+        }
+        if (! empty($validated['floor'])) {
+            $query->whereHas('room', fn($q) => $q->where('floor', '=', $validated['floor'], 'and'));
+        }
+        if (! empty($validated['room_type_id'])) {
+            $query->whereHas('room', fn($q) => $q->where('room_type_id', '=', (int) $validated['room_type_id'], 'and'));
+        }
+
+        $rows = $query->limit($limit)->get();
+
+        $entries = $rows->map(fn(DailyRoomCleaning $r) => $this->dailyCleaningHistoryEntry($r, true))->values()->all();
+
+        return response()->json([
+            'service_date' => $date,
+            'entries' => $entries,
+        ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function dailyCleaningHistoryEntry(DailyRoomCleaning $r, bool $includeRoom = false): array
+    {
+        $dailyLabel = [
+            'pending_cleaning' => 'Pending cleaning',
+            'in_progress' => 'In progress',
+            'cleaned' => 'Cleaned',
+        ];
+
+        $occ = $r->completed_at ?? $r->started_at ?? Carbon::parse($r->service_date)->endOfDay();
+        $staff = $r->completedByUser?->name
+            ?? $r->startedByUser?->name
+            ?? $r->assignedUser?->name;
+
+        $remarks = trim(implode("\n\n", array_filter([
+            $r->remarks ? (string) $r->remarks : null,
+            $r->maintenance_note ? 'Maintenance: ' . (string) $r->maintenance_note : null,
+        ])));
+
+        $entry = [
+            'source' => 'daily_service',
+            'record_id' => (int) $r->id,
+            'room_id' => (int) $r->room_id,
+            'source_label' => 'Daily service (occupied)',
+            'occurred_at' => $occ instanceof Carbon ? $occ->toIso8601String() : $occ,
+            'service_date' => $r->service_date instanceof Carbon ? $r->service_date->toDateString() : (string) $r->service_date,
+            'cleaning_status' => $dailyLabel[$r->status] ?? $r->status,
+            'staff_name' => $staff,
+            'remarks' => $remarks !== '' ? $remarks : null,
+            'inspection_status' => null,
+        ];
+
+        if ($includeRoom && $r->relationLoaded('room') && $r->room) {
+            $entry['room_number'] = (string) $r->room->room_number;
+            $entry['room_type_name'] = (string) ($r->room->roomType?->name ?? '');
+            $entry['floor'] = $r->room->floor !== null ? (string) $r->room->floor : null;
+        }
+
+        if ($includeRoom && $r->relationLoaded('booking') && $r->booking) {
+            $guest = trim(((string) ($r->booking->first_name ?? '')) . ' ' . ((string) ($r->booking->last_name ?? '')));
+            $entry['guest_name'] = $guest !== '' ? $guest : null;
+        }
+
+        return $entry;
+    }
+
+    /**
      * Unified housekeeping timeline for a room (daily occupied service + turnover jobs).
      */
     public function roomCleaningHistory(Request $request, Room $room)
@@ -2387,12 +2509,6 @@ class HousekeepingController extends Controller
         $this->allowHousekeepingNav();
 
         $limit = min(120, max(1, (int) $request->query('limit', 60)));
-
-        $dailyLabel = [
-            'pending_cleaning' => 'Pending cleaning',
-            'in_progress' => 'In progress',
-            'cleaned' => 'Cleaned',
-        ];
 
         $dailyRows = DailyRoomCleaning::query()
             ->where('room_id', '=', $room->id, 'and')
@@ -2406,27 +2522,8 @@ class HousekeepingController extends Controller
             ->limit($limit)
             ->get();
 
-        $dailyEntries = $dailyRows->map(function (DailyRoomCleaning $r) use ($dailyLabel) {
-            $occ = $r->completed_at ?? $r->started_at ?? Carbon::parse($r->service_date)->endOfDay();
-            $staff = $r->completedByUser?->name
-                ?? $r->startedByUser?->name
-                ?? $r->assignedUser?->name;
-
-            $remarks = trim(implode("\n\n", array_filter([
-                $r->remarks ? (string) $r->remarks : null,
-                $r->maintenance_note ? 'Maintenance: ' . (string) $r->maintenance_note : null,
-            ])));
-
-            return [
-                'source' => 'daily_service',
-                'source_label' => 'Daily service (occupied)',
-                'occurred_at' => $occ instanceof Carbon ? $occ->toIso8601String() : $occ,
-                'service_date' => $r->service_date instanceof Carbon ? $r->service_date->toDateString() : (string) $r->service_date,
-                'cleaning_status' => $dailyLabel[$r->status] ?? $r->status,
-                'staff_name' => $staff,
-                'remarks' => $remarks !== '' ? $remarks : null,
-                'inspection_status' => null,
-            ];
+        $dailyEntries = $dailyRows->map(function (DailyRoomCleaning $r) {
+            return $this->dailyCleaningHistoryEntry($r, false);
         })->all();
 
         $jobs = HousekeepingJob::query()
@@ -2467,6 +2564,7 @@ class HousekeepingController extends Controller
 
             return [
                 'source' => 'turnover',
+                'record_id' => (int) $job->id,
                 'source_label' => 'Turnover / checkout clean',
                 'occurred_at' => $occ instanceof Carbon ? $occ->toIso8601String() : (string) $occ,
                 'service_date' => $occ instanceof Carbon ? $occ->toDateString() : Carbon::parse($job->created_at)->toDateString(),
@@ -2487,5 +2585,232 @@ class HousekeepingController extends Controller
             'room_id' => (int) $room->id,
             'entries' => array_values($merged),
         ]);
+    }
+
+    /**
+     * Full detail for one row from {@see roomCleaningHistory} (daily occupied service or turnover job).
+     */
+    public function roomCleaningHistoryDetail(Request $request, Room $room)
+    {
+        $this->allowHousekeepingNav();
+
+        $validated = $request->validate([
+            'source' => 'required|string|in:daily_service,turnover',
+            'id' => 'required|integer|min:1',
+        ]);
+
+        $source = (string) $validated['source'];
+        $id = (int) $validated['id'];
+
+        if ($source === 'daily_service') {
+            /** @var DailyRoomCleaning|null $record */
+            $record = DailyRoomCleaning::query()
+                ->where('room_id', '=', $room->id, 'and')
+                ->where('id', '=', $id, 'and')
+                ->with([
+                    'consumptions.inventoryItem:id,name,sku',
+                    'assignedUser:id,name',
+                    'startedByUser:id,name',
+                    'completedByUser:id,name',
+                    'booking:id,first_name,last_name',
+                ])
+                ->first();
+
+            if (! $record) {
+                return response()->json(['message' => 'Cleaning record not found for this room.'], 404);
+            }
+
+            $dailyLabel = [
+                'pending_cleaning' => 'Pending cleaning',
+                'in_progress' => 'In progress',
+                'cleaned' => 'Cleaned',
+            ];
+
+            $guestName = null;
+            if ($record->booking) {
+                $guestName = trim(((string) ($record->booking->first_name ?? '')) . ' ' . ((string) ($record->booking->last_name ?? '')));
+                if ($guestName === '') {
+                    $guestName = null;
+                }
+            }
+
+            return response()->json([
+                'source' => 'daily_service',
+                'record_id' => (int) $record->id,
+                'room_id' => (int) $record->room_id,
+                'service_date' => $record->service_date instanceof Carbon
+                    ? $record->service_date->toDateString()
+                    : (string) $record->service_date,
+                'status' => (string) $record->status,
+                'status_label' => $dailyLabel[$record->status] ?? (string) $record->status,
+                'started_at' => $record->started_at?->toIso8601String(),
+                'completed_at' => $record->completed_at?->toIso8601String(),
+                'assigned_user' => $record->assignedUser
+                    ? ['id' => (int) $record->assignedUser->id, 'name' => (string) $record->assignedUser->name]
+                    : null,
+                'started_by_user' => $record->startedByUser
+                    ? ['id' => (int) $record->startedByUser->id, 'name' => (string) $record->startedByUser->name]
+                    : null,
+                'completed_by_user' => $record->completedByUser
+                    ? ['id' => (int) $record->completedByUser->id, 'name' => (string) $record->completedByUser->name]
+                    : null,
+                'guest_name' => $guestName,
+                'booking_id' => $record->booking_id ? (int) $record->booking_id : null,
+                'remarks' => $record->remarks ? (string) $record->remarks : null,
+                'maintenance_note' => $record->maintenance_note ? (string) $record->maintenance_note : null,
+                'checklist' => $this->formatDailyChecklistForDetail($record->checklist_done),
+                'consumptions' => $record->consumptions->map(fn($c) => [
+                    'id' => (int) $c->id,
+                    'qty' => (float) $c->qty,
+                    'notes' => $c->notes ? (string) $c->notes : null,
+                    'inventory_item' => $c->inventoryItem ? [
+                        'id' => (int) $c->inventoryItem->id,
+                        'name' => (string) $c->inventoryItem->name,
+                        'sku' => (string) ($c->inventoryItem->sku ?? ''),
+                    ] : null,
+                ])->values()->all(),
+            ]);
+        }
+
+        /** @var HousekeepingJob|null $job */
+        $job = HousekeepingJob::query()
+            ->where('room_id', '=', $room->id, 'and')
+            ->where('id', '=', $id, 'and')
+            ->with([
+                'block:id,status,is_active,start_date,end_date',
+                'startedByUser:id,name',
+                'finishedByUser:id,name',
+                'lines.inventoryItem:id,name,sku',
+                'lines.menuItem:id,name',
+            ])
+            ->first();
+
+        if (! $job) {
+            return response()->json(['message' => 'Cleaning record not found for this room.'], 404);
+        }
+
+        $jobStatusLabel = match ($job->status) {
+            'completed' => 'Completed',
+            'inspected' => 'Awaiting supervisor release',
+            'in_progress' => 'Cleaning in progress',
+            default => (string) $job->status,
+        };
+
+        $block = $job->block;
+        $inspection = match ($job->status) {
+            'completed' => 'Supervisor released (room available)',
+            'inspected' => $block && $block->is_active && $block->status === 'inspected'
+                ? 'Pending supervisor sign-off'
+                : ($block ? 'Turnover inspection stage' : null),
+            default => null,
+        };
+
+        $checklist = [];
+        $amenities = [];
+        $minibar = [];
+        $assets = [];
+
+        foreach ($job->lines as $line) {
+            $kind = (string) $line->kind;
+            $meta = is_array($line->meta) ? $line->meta : [];
+            if ($kind === 'checklist') {
+                $checklist[] = [
+                    'key' => (string) ($meta['key'] ?? ''),
+                    'label' => (string) ($meta['label'] ?? ($meta['key'] ?? 'Item')),
+                    'done' => (bool) ($meta['done'] ?? false),
+                ];
+            } elseif ($kind === 'amenity') {
+                $amenities[] = [
+                    'inventory_item_id' => $line->inventory_item_id ? (int) $line->inventory_item_id : null,
+                    'name' => (string) ($line->inventoryItem?->name ?? 'Amenity'),
+                    'sku' => (string) ($line->inventoryItem?->sku ?? ''),
+                    'qty' => (float) $line->qty,
+                    'found_qty' => array_key_exists('found_qty', $meta) ? (float) $meta['found_qty'] : null,
+                ];
+            } elseif ($kind === 'minibar') {
+                $minibar[] = [
+                    'inventory_item_id' => $line->inventory_item_id ? (int) $line->inventory_item_id : null,
+                    'menu_item_id' => $line->menu_item_id ? (int) $line->menu_item_id : null,
+                    'name' => (string) ($line->inventoryItem?->name ?? $line->menuItem?->name ?? 'Minibar item'),
+                    'sku' => (string) ($line->inventoryItem?->sku ?? ''),
+                    'qty' => (float) $line->qty,
+                    'found_qty' => array_key_exists('found_qty', $meta) ? (float) $meta['found_qty'] : null,
+                ];
+            } elseif ($kind === 'asset') {
+                $assets[] = [
+                    'key' => (string) ($meta['key'] ?? ''),
+                    'label' => (string) ($meta['label'] ?? ($meta['key'] ?? 'Asset')),
+                    'status' => (string) ($meta['status'] ?? 'ok'),
+                    'note' => isset($meta['note']) ? (string) $meta['note'] : null,
+                ];
+            }
+        }
+
+        return response()->json([
+            'source' => 'turnover',
+            'record_id' => (int) $job->id,
+            'room_id' => (int) $job->room_id,
+            'status' => (string) $job->status,
+            'status_label' => $jobStatusLabel,
+            'started_at' => $job->created_at?->toIso8601String(),
+            'completed_at' => $job->updated_at?->toIso8601String(),
+            'started_by_user' => $job->startedByUser
+                ? ['id' => (int) $job->startedByUser->id, 'name' => (string) $job->startedByUser->name]
+                : null,
+            'finished_by_user' => $job->finishedByUser
+                ? ['id' => (int) $job->finishedByUser->id, 'name' => (string) $job->finishedByUser->name]
+                : null,
+            'remarks' => $job->remarks ? (string) $job->remarks : null,
+            'issues_summary' => $job->issues_summary ? (string) $job->issues_summary : null,
+            'inspection_status' => $inspection,
+            'block' => $block ? [
+                'start_date' => $block->start_date instanceof Carbon
+                    ? $block->start_date->toDateString()
+                    : (string) $block->start_date,
+                'end_date' => $block->end_date instanceof Carbon
+                    ? $block->end_date->toDateString()
+                    : (string) $block->end_date,
+                'status' => (string) $block->status,
+                'is_active' => (bool) $block->is_active,
+            ] : null,
+            'checklist' => $checklist,
+            'amenities' => $amenities,
+            'minibar' => $minibar,
+            'assets' => $assets,
+        ]);
+    }
+
+    /**
+     * @return array<int, array{key: string, label: string, done: bool}>
+     */
+    private function formatDailyChecklistForDetail(?array $saved): array
+    {
+        $saved = is_array($saved) ? $saved : [];
+        $seen = [];
+        $out = [];
+
+        foreach ($this->housekeepingChecklistTemplate() as $item) {
+            $key = (string) $item['key'];
+            $seen[$key] = true;
+            $out[] = [
+                'key' => $key,
+                'label' => (string) $item['label'],
+                'done' => (bool) ($saved[$key] ?? false),
+            ];
+        }
+
+        foreach ($saved as $key => $done) {
+            $k = (string) $key;
+            if (isset($seen[$k])) {
+                continue;
+            }
+            $out[] = [
+                'key' => $k,
+                'label' => $k,
+                'done' => (bool) $done,
+            ];
+        }
+
+        return $out;
     }
 }

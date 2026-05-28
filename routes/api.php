@@ -71,6 +71,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
     Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
     Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
+    Route::get('housekeeping/rooms/{room}/cleaning-history/detail', [HousekeepingController::class, 'roomCleaningHistoryDetail']);
     Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
     Route::get('housekeeping/rooms/{room}/checkout-inspection-context', [HousekeepingController::class, 'checkoutInspectionContext']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
@@ -85,6 +86,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('housekeeping/daily-cleaning/status', [HousekeepingController::class, 'dailyCleaningUpdateStatus']);
     Route::post('housekeeping/daily-cleaning/consumption', [HousekeepingController::class, 'dailyCleaningRecordConsumption']);
     Route::get('housekeeping/daily-cleaning/history', [HousekeepingController::class, 'dailyCleaningHistory']);
+    Route::get('housekeeping/daily-cleaning/history-board', [HousekeepingController::class, 'dailyCleaningHistoryBoard']);
 
     Route::get('housekeeping/laundry/prefill', [LaundryRequestController::class, 'prefill']);
     Route::get('housekeeping/laundry/checked-in-rooms', [LaundryRequestController::class, 'checkedInRooms']);
