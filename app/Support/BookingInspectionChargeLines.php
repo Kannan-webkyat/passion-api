@@ -145,6 +145,23 @@ final class BookingInspectionChargeLines
             }
         }
 
+        if (! $block && $booking->status === 'checked_in') {
+            foreach ($blocks as $candidate) {
+                if (! $candidate->is_active || $candidate->status !== 'inspected') {
+                    continue;
+                }
+                $snap = $candidate->inspection_snapshot;
+                if (! is_array($snap) || ! empty($snap['cleared'])) {
+                    continue;
+                }
+                if (! in_array((int) $candidate->room_id, $roomIds, true)) {
+                    continue;
+                }
+                $block = $candidate;
+                break;
+            }
+        }
+
         if (! $block || ! is_array($block->inspection_snapshot)) {
             return [];
         }

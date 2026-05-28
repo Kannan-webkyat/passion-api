@@ -1160,6 +1160,8 @@ class BookingController extends Controller
             $currentCheckOut = $validated['check_out'] ?? $booking->check_out;
             if ($currentCheckOut > $today) {
                 $validated['check_out'] = $today;
+                // Keep segment/chart/HK on the same departure calendar day (date-only checkout).
+                $validated['check_out_at'] = Carbon::parse($today)->startOfDay()->addDay();
 
                 $user = Auth::user();
                 $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
@@ -1310,9 +1312,8 @@ class BookingController extends Controller
                 foreach ($segmentsForHk as $segment) {
                     $rid = (int) $segment->room_id;
                     $checkoutNotifyRoomIds[] = $rid;
-                    $checkoutDay = Carbon::parse(
-                        $segment->check_out_at ?? $segment->check_out ?? $booking->check_out_at ?? $booking->check_out
-                    )->startOfDay();
+                    $checkoutDate = (string) ($segment->check_out ?? $booking->check_out ?? $today);
+                    $checkoutDay = Carbon::parse($checkoutDate)->startOfDay();
                     $co = $checkoutDay->toDateString();
                     $coNext = $checkoutDay->copy()->addDay()->toDateString();
 
@@ -2277,21 +2278,45 @@ class BookingController extends Controller
                 continue;
             }
             $snapBookingId = isset($snap['booking_id']) ? (int) $snap['booking_id'] : null;
-            if ($snapBookingId !== null && $snapBookingId !== (int) $booking->id) {
-                continue;
+            if ($snapBookingId !== null && $snapBookingId === (int) $booking->id) {
+                $snap = CheckoutInspectionInspector::enrichSnapshot($snap) ?? $snap;
+                $uid = isset($snap['inspector_user_id']) ? (int) $snap['inspector_user_id'] : 0;
+                $name = CheckoutInspectionInspector::displayNameForUserId(
+                    $uid > 0 ? $uid : null,
+                    isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null,
+                );
+
+                return [
+                    'user_id' => $uid > 0 ? $uid : null,
+                    'name' => $name,
+                ];
             }
+        }
 
-            $snap = CheckoutInspectionInspector::enrichSnapshot($snap) ?? $snap;
-            $uid = isset($snap['inspector_user_id']) ? (int) $snap['inspector_user_id'] : 0;
-            $name = CheckoutInspectionInspector::displayNameForUserId(
-                $uid > 0 ? $uid : null,
-                isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null,
-            );
+        if ($booking->status === 'checked_in') {
+            foreach ($blocks as $block) {
+                if (! $block->is_active || $block->status !== 'inspected') {
+                    continue;
+                }
+                $snap = $block->inspection_snapshot;
+                if (! is_array($snap) || ! empty($snap['cleared'])) {
+                    continue;
+                }
+                if (! in_array((int) $block->room_id, $roomIds, true)) {
+                    continue;
+                }
+                $snap = CheckoutInspectionInspector::enrichSnapshot($snap) ?? $snap;
+                $uid = isset($snap['inspector_user_id']) ? (int) $snap['inspector_user_id'] : 0;
+                $name = CheckoutInspectionInspector::displayNameForUserId(
+                    $uid > 0 ? $uid : null,
+                    isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null,
+                );
 
-            return [
-                'user_id' => $uid > 0 ? $uid : null,
-                'name' => $name,
-            ];
+                return [
+                    'user_id' => $uid > 0 ? $uid : null,
+                    'name' => $name,
+                ];
+            }
         }
 
         return ['user_id' => null, 'name' => null];

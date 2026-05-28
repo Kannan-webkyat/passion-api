@@ -98,29 +98,6 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * After checkout inspection (apply or clear), close the handoff: room is available; block is closed.
-     * (No separate "mark available" step for this workflow.)
-     */
-    private function releaseRoomAfterCheckoutInspection(RoomStatusBlock $inspectedBlock): void
-    {
-        if (! $inspectedBlock->is_active || $inspectedBlock->status !== 'inspected') {
-            return;
-        }
-        if ($inspectedBlock->inspection_snapshot === null) {
-            return;
-        }
-
-        $inspectedBlock->update(['is_active' => false]);
-        Room::where('id', '=', $inspectedBlock->room_id, 'and')->update(['status' => 'available']);
-
-        $job = HousekeepingJob::where('room_status_block_id', '=', $inspectedBlock->id)->first();
-        if ($job) {
-            $job->status = 'completed';
-            $job->save();
-        }
-    }
-
-    /**
      * List active housekeeping status blocks (dirty / in cleaning).
      * By default returns all active blocks so rooms stay visible even when the dirty window is tied to
      * a future checkout day on the chart. Pass overlap_only=1 to restrict to blocks overlapping `date`.
@@ -1247,6 +1224,12 @@ class HousekeepingController extends Controller
      */
     private function bookingForCheckoutInspectionRoom(int $roomId, string $startDate, string $endDate): ?Booking
     {
+        // Pre-checkout inspection (pending_inspection): guest is usually still checked in.
+        $active = $this->activeBookingForRoom($roomId);
+        if ($active instanceof Booking) {
+            return $active;
+        }
+
         $departed = BookingSegment::query()
             ->where('room_id', '=', $roomId, 'and')
             ->where(function ($q) {
@@ -1440,7 +1423,7 @@ class HousekeepingController extends Controller
 
     /**
      * Checkout inspection: clear room with no extra charges (pending_inspection -> inspected snapshot).
-     * Room is then released to available — inspection workflow is closed (no separate "mark available").
+     * Inspected block stays active on the room chart until checkout or supervisor release.
      */
     public function checkoutInspectionClear(Request $request, RoomStatusBlock $roomStatusBlock)
     {
@@ -1499,12 +1482,10 @@ class HousekeepingController extends Controller
 
             DB::commit();
 
-            $this->releaseRoomAfterCheckoutInspection($newBlock->fresh());
-
             HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'checkout_inspection_clear');
 
             return response()->json([
-                'message' => 'Inspection completed. Room is available.',
+                'message' => 'Inspection completed. Room marked inspected on the chart.',
                 'block' => $newBlock->fresh()->load('room.roomType'),
             ]);
         } catch (\Throwable $e) {
@@ -1920,8 +1901,6 @@ class HousekeepingController extends Controller
 
             DB::commit();
 
-            $this->releaseRoomAfterCheckoutInspection($newBlock->fresh());
-
             if (config('broadcasting.default') !== 'null') {
                 $bookingIdBc = (int) $booking->id;
                 $extraBc = (float) ($booking->extra_charges ?? 0);
@@ -1943,7 +1922,7 @@ class HousekeepingController extends Controller
             HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'checkout_inspection_apply');
 
             return response()->json([
-                'message' => 'Inspection completed. Charges applied and room released.',
+                'message' => 'Inspection completed. Charges applied; room marked inspected on the chart.',
                 'booking_id' => (int) $booking->id,
                 'extra_charges' => (float) ($booking->extra_charges ?? 0),
                 'added_amount' => round($chargeTotal, 2),
