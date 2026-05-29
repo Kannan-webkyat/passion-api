@@ -60,6 +60,12 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('room-par/templates/{template}', [RoomParController::class, 'show']);
     Route::put('room-par/templates/{template}', [RoomParController::class, 'update']);
     Route::post('room-par/fill', [RoomParController::class, 'fill']);
+    Route::post('room-par/allocate', [RoomParController::class, 'allocate']);
+    Route::post('room-par/assign', [RoomParController::class, 'assign']);
+    Route::get('room-par/rooms/{room}/context', [RoomParController::class, 'roomContext']);
+    Route::post('room-par/rooms/{room}/assign', [RoomParController::class, 'assignRoom']);
+    Route::post('room-par/rooms/{room}/ensure-location', [RoomParController::class, 'ensureRoomLocation']);
+    Route::post('room-par/rooms/{room}/issue-to-par', [RoomParController::class, 'issueToPar']);
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);

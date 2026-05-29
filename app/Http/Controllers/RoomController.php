@@ -23,7 +23,7 @@ class RoomController extends Controller
             'reservation',
         ]);
 
-        $query = Room::with(['roomType', 'connectedRoom']);
+        $query = Room::with(['roomType', 'connectedRoom', 'parTemplate']);
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }

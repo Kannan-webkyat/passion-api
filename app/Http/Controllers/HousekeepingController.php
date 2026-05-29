@@ -30,6 +30,7 @@ use App\Models\Setting;
 use App\Models\User;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
+use App\Support\RoomParInventoryContext;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\App;
@@ -704,77 +705,7 @@ class HousekeepingController extends Controller
 
     private function roomContextPayload(?int $roomId): ?array
     {
-        if (! $roomId) {
-            return null;
-        }
-
-        $room = Room::with('roomType')->find($roomId, ['id', 'room_number', 'room_type_id']);
-        if (! $room) {
-            return null;
-        }
-
-        $roomLoc = InventoryLocation::where('room_id', '=', $room->id, 'and')->first();
-
-        $template = RoomParTemplate::where('room_type_id', '=', $room->room_type_id, 'and')
-            ->orderBy('name', 'asc')
-            ->with('lines.inventoryItem')
-            ->first();
-
-        $parLines = [];
-        if ($template) {
-            foreach ($template->lines as $ln) {
-                $parLines[] = [
-                    'kind' => $ln->kind,
-                    'inventory_item_id' => (int) $ln->inventory_item_id,
-                    'item_name' => (string) ($ln->inventoryItem?->name ?? ''),
-                    'sku' => (string) ($ln->inventoryItem?->sku ?? ''),
-                    'is_direct_sale' => (bool) ($ln->inventoryItem?->is_direct_sale ?? false),
-                    'par_qty' => (float) ($ln->par_qty ?? 0),
-                ];
-            }
-        }
-
-        $onHand = [];
-        $onHandItems = [];
-        if ($roomLoc) {
-            $rows = DB::table('inventory_item_locations')
-                ->where('inventory_location_id', '=', $roomLoc->id, 'and')
-                ->pluck('quantity', 'inventory_item_id');
-            foreach ($rows as $itemId => $qty) {
-                $onHand[(int) $itemId] = (float) $qty;
-            }
-
-            $positiveIds = [];
-            foreach ($onHand as $iid => $q) {
-                if ((float) $q > 0) {
-                    $positiveIds[] = (int) $iid;
-                }
-            }
-            if (! empty($positiveIds)) {
-                $items = InventoryItem::query()
-                    ->whereIn('id', $positiveIds, 'and', false)
-                    ->get(['id', 'name', 'sku', 'is_direct_sale']);
-                foreach ($items as $it) {
-                    $onHandItems[] = [
-                        'inventory_item_id' => (int) $it->id,
-                        'name' => (string) $it->name,
-                        'sku' => (string) $it->sku,
-                        'is_direct_sale' => (bool) $it->is_direct_sale,
-                        'qty' => (float) ($onHand[(int) $it->id] ?? 0),
-                    ];
-                }
-            }
-        }
-
-        return [
-            'room_id' => (int) $room->id,
-            'room_number' => (string) $room->room_number,
-            'room_location_id' => $roomLoc ? (int) $roomLoc->id : null,
-            'par_template_id' => $template ? (int) $template->id : null,
-            'par_lines' => $parLines,
-            'on_hand_by_item_id' => $onHand,
-            'on_hand_items' => $onHandItems,
-        ];
+        return RoomParInventoryContext::forRoomId($roomId);
     }
 
     /**

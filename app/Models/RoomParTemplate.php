@@ -21,4 +21,9 @@ class RoomParTemplate extends Model
     {
         return $this->hasMany(RoomParTemplateLine::class, 'template_id');
     }
+
+    public function rooms()
+    {
+        return $this->hasMany(Room::class, 'par_template_id');
+    }
 }
