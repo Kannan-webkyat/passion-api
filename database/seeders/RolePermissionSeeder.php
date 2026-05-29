@@ -41,6 +41,7 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-daily-room-cleaning',
             'housekeeping-clean-rooms',
             'housekeeping-laundry',
+            'housekeeping-room-stock',
             'manage-inventory',
             // Inventory report permissions (granular)
             'inventory-report-summary',
@@ -145,6 +146,7 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-daily-room-cleaning',
             'housekeeping-clean-rooms',
             'housekeeping-laundry',
+            'housekeeping-room-stock',
         ]);
     }
 }

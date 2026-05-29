@@ -212,6 +212,21 @@ class HousekeepingController extends Controller
             ->where('status', '=', 'inspected')
             ->count();
 
+        $roomStockShortfall = 0;
+        $roomRows = Room::query()
+            ->where('is_active', '=', true, 'and')
+            ->whereNotNull('par_template_id')
+            ->get(['id']);
+        foreach ($roomRows as $room) {
+            $ctx = RoomParInventoryContext::forRoomId((int) $room->id);
+            if (! $ctx) {
+                continue;
+            }
+            if ((bool) ($ctx['template_assigned'] ?? false) && (float) ($ctx['to_stock_total'] ?? 0) > 0.00001) {
+                $roomStockShortfall++;
+            }
+        }
+
         // Checkout Inspection tab: count rooms awaiting inspection only (main list default).
         $checkoutInspection = (int) RoomStatusBlock::query()
             ->where('is_active', '=', true, 'and')
@@ -242,6 +257,7 @@ class HousekeepingController extends Controller
             'cleaning' => $cleaning,
             'daily_cleaning' => $dailyCleaning,
             'inspected' => $inspected,
+            'room_stock_shortfall' => $roomStockShortfall,
             'laundry' => $laundryActionable,
             'laundry_pending_pickup' => $laundryPendingPickup,
             'laundry_ready' => $laundryReady,

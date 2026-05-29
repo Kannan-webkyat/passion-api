@@ -37,7 +37,7 @@ class LocationSeeder extends Seeder
                 InventoryLocation::updateOrCreate(
                     ['name' => $map['name']],
                     [
-                        'type' => 'sub_store',
+                        'type' => $map['code'] === 'HKP' ? 'housekeeping_store' : 'sub_store',
                         'department_id' => $dept->id,
                         'is_active' => true,
                     ]

@@ -6,10 +6,9 @@ use App\Models\InventoryItem;
 use App\Models\InventoryTransaction;
 use App\Models\RoomParTemplate;
 use App\Models\RoomParTemplateLine;
-use App\Models\StoreRequest;
-use App\Models\StoreRequestItem;
 use App\Models\InventoryLocation;
 use App\Models\Room;
+use App\Services\RoomParStoreRequestService;
 use App\Support\RoomParInventoryContext;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -787,6 +786,7 @@ class RoomParController extends Controller
 
         $created = [];
         $skipped = [];
+        $storeRequestService = app(RoomParStoreRequestService::class);
 
         DB::beginTransaction();
         try {
@@ -813,28 +813,7 @@ class RoomParController extends Controller
                     continue;
                 }
 
-                $roomLoc = RoomParInventoryContext::ensureRoomLocation($room);
-                $onHand = [];
-                if ($shortfallOnly) {
-                    $ctx = RoomParInventoryContext::forRoomId((int) $room->id);
-                    $onHand = $ctx['on_hand_by_item_id'] ?? [];
-                }
-
-                $lineQtys = [];
-                foreach ($template->lines as $ln) {
-                    $parQty = (float) ($ln->par_qty ?? 0);
-                    if ($parQty <= 0) {
-                        continue;
-                    }
-                    $itemId = (int) $ln->inventory_item_id;
-                    $qty = $shortfallOnly
-                        ? max(0, $parQty - (float) ($onHand[$itemId] ?? 0))
-                        : $parQty;
-                    if ($qty <= 0) {
-                        continue;
-                    }
-                    $lineQtys[] = ['inventory_item_id' => $itemId, 'quantity' => $qty];
-                }
+                $lineQtys = $storeRequestService->buildLineQtys($room, $template, $shortfallOnly);
 
                 if ($shortfallOnly && empty($lineQtys)) {
                     continue;
@@ -844,30 +823,16 @@ class RoomParController extends Controller
                     ? ('Restock to PAR (Template: ' . $template->name . ')')
                     : ('Initial Room Setup (Template: ' . $template->name . ')');
 
-                $sr = StoreRequest::create([
-                    'request_number' => 'REQ-' . date('Ymd') . '-' . strtoupper(uniqid()),
-                    // destination (room)
-                    'from_location_id' => $roomLoc->id,
-                    // source (Main Store)
-                    'to_location_id' => $source->id,
-                    'department_id' => $roomLoc->department_id,
-                    'requested_by' => Auth::id(),
-                    'status' => 'pending',
-                    'notes' => trim((string) ($validated['notes'] ?? '')) ?: $defaultNotes,
-                    'requested_at' => now(),
-                ]);
-
-                foreach ($lineQtys as $row) {
-                    StoreRequestItem::create([
-                        'store_request_id' => $sr->id,
-                        'inventory_item_id' => $row['inventory_item_id'],
-                        'quantity_requested' => $row['quantity'],
-                        'quantity_issued' => 0,
-                        'quantity_pending_acceptance' => 0,
-                    ]);
-                }
-
-                $created[] = $sr->load(['fromLocation', 'toLocation', 'items.item']);
+                $roomLoc = RoomParInventoryContext::ensureRoomLocation($room);
+                $created[] = $storeRequestService->createStoreRequest(
+                    $room,
+                    (int) $roomLoc->id,
+                    $source,
+                    $lineQtys,
+                    trim((string) ($validated['notes'] ?? '')) ?: $defaultNotes,
+                    Auth::id(),
+                    $roomLoc->department_id ? (int) $roomLoc->department_id : null
+                );
             }
 
             if ($shortfallOnly && empty($created)) {

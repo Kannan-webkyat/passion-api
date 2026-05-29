@@ -16,6 +16,8 @@ trait AuthorizesHousekeepingPermissions
 
     public const HK_LAUNDRY = 'housekeeping-laundry';
 
+    public const HK_ROOM_STOCK = 'housekeeping-room-stock';
+
     /** @return array<int, string> */
     private static function granularHousekeepingMenuPermissions(): array
     {
@@ -26,6 +28,7 @@ trait AuthorizesHousekeepingPermissions
             self::HK_DAILY,
             self::HK_CLEAN,
             self::HK_LAUNDRY,
+            self::HK_ROOM_STOCK,
         ];
     }
 
