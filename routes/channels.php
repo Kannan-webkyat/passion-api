@@ -45,6 +45,22 @@ Broadcast::channel('reception.housekeeping', function ($user) {
     return false;
 });
 
+/** Room PAR stock levels (inventory restock, HK refill, store request to room). */
+Broadcast::channel('inventory.room-par', function ($user) {
+    if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+        return true;
+    }
+    if (! method_exists($user, 'can')) {
+        return false;
+    }
+
+    return $user->can('manage-inventory')
+        || $user->can('housekeeping-room-stock')
+        || $user->can('view-rooms')
+        || $user->can('reservation-view')
+        || $user->can('reservation');
+});
+
 /** Reception live billing updates for a booking (checkout inspection charges). */
 Broadcast::channel('reception.booking.{bookingId}', function ($user, $bookingId) {
     // Same security intent as reception screens: allow staff who can view rooms / reservations.

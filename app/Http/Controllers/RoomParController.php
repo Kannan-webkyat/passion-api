@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\RoomParStockUpdated;
 use App\Models\InventoryItem;
 use App\Models\InventoryTransaction;
 use App\Models\RoomParTemplate;
@@ -54,6 +55,41 @@ class RoomParController extends Controller
         }
 
         return response()->json($payload);
+    }
+
+    public function stockSummary(Request $request)
+    {
+        $this->checkPermission('manage-inventory');
+
+        $query = Room::query()
+            ->where('is_active', '=', true, 'and')
+            ->whereNotNull('par_template_id')
+            ->orderBy('room_number');
+
+        if ($request->filled('room_ids')) {
+            $roomIds = array_values(array_filter(array_map('intval', (array) $request->input('room_ids'))));
+            if (! empty($roomIds)) {
+                $query->whereIn('id', $roomIds, 'and', false);
+            }
+        }
+
+        $rows = [];
+        foreach ($query->get(['id', 'room_number']) as $room) {
+            $ctx = RoomParInventoryContext::forRoomId((int) $room->id);
+            if (! $ctx) {
+                continue;
+            }
+
+            $toStockTotal = (float) ($ctx['to_stock_total'] ?? 0);
+            $rows[] = [
+                'room_id' => (int) $room->id,
+                'room_number' => (string) ($ctx['room_number'] ?? $room->room_number),
+                'to_stock_total' => $toStockTotal,
+                'needs_restock' => $toStockTotal > 0.00001,
+            ];
+        }
+
+        return response()->json(['rooms' => $rows]);
     }
 
     public function ensureRoomLocation(Room $room)
@@ -297,6 +333,11 @@ class RoomParController extends Controller
             return response()->json(['message' => $e->getMessage()], 500);
         }
 
+        RoomParStockUpdated::dispatchIfEnabled(
+            array_map(fn(array $row): int => (int) ($row['room_id'] ?? 0), $allocated),
+            'allocate'
+        );
+
         return response()->json([
             'count' => count($allocated),
             'rooms' => $allocated,
@@ -367,6 +408,8 @@ class RoomParController extends Controller
 
             return response()->json(['message' => $e->getMessage()], 500);
         }
+
+        RoomParStockUpdated::dispatchIfEnabled([(int) $room->id], 'issue_to_par');
 
         return response()->json([
             'transferred_lines' => $result['transferred_lines'],

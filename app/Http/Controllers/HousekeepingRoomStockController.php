@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\RoomParStockUpdated;
 use App\Http\Controllers\Concerns\AuthorizesHousekeepingPermissions;
 use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Models\Department;
@@ -305,6 +306,11 @@ class HousekeepingRoomStockController extends Controller
             return response()->json(['message' => $e->getMessage()], 500);
         }
 
+        RoomParStockUpdated::dispatchIfEnabled(
+            array_map(fn(array $row): int => (int) ($row['room_id'] ?? 0), $executed),
+            'hk_refill'
+        );
+
         return response()->json([
             'count' => count($executed),
             'transferred_lines' => $transferredLines,
@@ -387,6 +393,8 @@ class HousekeepingRoomStockController extends Controller
 
             return response()->json(['message' => $e->getMessage()], 500);
         }
+
+        RoomParStockUpdated::dispatchIfEnabled([(int) $room->id], 'hk_refill_item');
 
         return response()->json([
             'message' => 'Refill completed.',
