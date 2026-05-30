@@ -7,6 +7,7 @@ use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Events\BookingChargesUpdated;
 use App\Events\DailyRoomCleaningDeskNotify;
 use App\Events\HousekeepingStateUpdated;
+use App\Events\RoomParStockUpdated;
 use App\Models\Booking;
 use App\Models\BookingExtraCharge;
 use App\Models\BookingSegment;
@@ -822,8 +823,7 @@ class HousekeepingController extends Controller
 
             foreach (($validated['amenities'] ?? []) as $it) {
                 $qty = (float) ($it['qty'] ?? 0);
-                $hasFound = array_key_exists('found_qty', $it);
-                if ($qty <= 0.0001 && ! $hasFound) {
+                if ($qty <= 0.0001) {
                     continue;
                 }
                 HousekeepingJobLine::create([
@@ -831,14 +831,13 @@ class HousekeepingController extends Controller
                     'kind' => 'amenity',
                     'inventory_item_id' => (int) $it['inventory_item_id'],
                     'qty' => $qty,
-                    'meta' => $hasFound ? ['found_qty' => (float) $it['found_qty']] : null,
+                    'meta' => null,
                 ]);
             }
 
             foreach (($validated['minibar'] ?? []) as $it) {
                 $qty = (float) ($it['qty'] ?? 0);
-                $hasFound = array_key_exists('found_qty', $it);
-                if ($qty <= 0.0001 && ! $hasFound) {
+                if ($qty <= 0.0001) {
                     continue;
                 }
                 HousekeepingJobLine::create([
@@ -847,7 +846,7 @@ class HousekeepingController extends Controller
                     'inventory_item_id' => (int) $it['inventory_item_id'],
                     'menu_item_id' => $it['menu_item_id'] ? (int) $it['menu_item_id'] : null,
                     'qty' => $qty,
-                    'meta' => $hasFound ? ['found_qty' => (float) $it['found_qty']] : null,
+                    'meta' => null,
                 ]);
             }
 
@@ -916,13 +915,6 @@ class HousekeepingController extends Controller
 
             $job->load('lines');
 
-            $hkStore = InventoryLocation::where('name', '=', 'Housekeeping Store', 'and')->first()
-                ?: InventoryLocation::where('type', '=', 'main_store', 'and')->first();
-
-            if (! $hkStore) {
-                return response()->json(['message' => 'No inventory location available for housekeeping.'], 422);
-            }
-
             $assetProblem = false;
             $assetNotes = [];
 
@@ -936,23 +928,28 @@ class HousekeepingController extends Controller
                 }
             }
 
-            // Room-location logic:
-            // - staff enters found_qty (what is still in-room)
-            // - system computes consumed = max(0, par - found)
-            // - for amenities/minibar, consumption is deducted from Room location (if it exists)
-            // - replenishment is an explicit transfer from HK Store -> Room location using ln.qty
+            // Room-location logic (same model as daily-room-cleaning):
+            // - staff enters consumed qty per line (ln.qty)
+            // - consumed qty is deducted from the room location only
+            // - restock to par is done separately via Room Stock refill
 
-            $roomLoc = InventoryLocation::where('room_id', '=', $roomStatusBlock->room_id, 'and')->first();
-            $roomTypeId = (int) (Room::where('id', '=', $roomStatusBlock->room_id, 'and')->value('room_type_id') ?? 0);
-            $template = RoomParTemplate::where('room_type_id', '=', $roomTypeId, 'and')
-                ->orderBy('name', 'asc')
-                ->with('lines')
-                ->first();
-            $parMap = [];
-            if ($template) {
-                foreach ($template->lines as $pl) {
-                    $parMap[(int) $pl->inventory_item_id] = (float) ($pl->par_qty ?? 0);
-                }
+            /** @var Room|null $room */
+            $room = Room::find($roomStatusBlock->room_id);
+            if (! $room) {
+                DB::rollBack();
+
+                return response()->json(['message' => 'Room not found.'], 422);
+            }
+
+            $roomLoc = RoomParInventoryContext::ensureRoomLocation($room);
+
+            $onHand = [];
+            $locRows = DB::table('inventory_item_locations')
+                ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+                ->lockForUpdate()
+                ->pluck('quantity', 'inventory_item_id');
+            foreach ($locRows as $locItemId => $qty) {
+                $onHand[(int) $locItemId] = (float) $qty;
             }
 
             $lines = $job->lines->whereIn('kind', ['amenity', 'minibar'])->values();
@@ -961,100 +958,52 @@ class HousekeepingController extends Controller
                     continue;
                 }
                 $itemId = (int) $ln->inventory_item_id;
-
-                $par = (float) ($parMap[$itemId] ?? 0);
-                $found = isset($ln->meta['found_qty']) ? (float) $ln->meta['found_qty'] : null;
-                $consumed = ($found === null) ? null : max(0.0, $par - $found);
-
-                // 1) Replenishment transfer (HK Store -> Room location)
-                $replenishQty = (float) ($ln->qty ?? 0);
-                if ($replenishQty > 0) {
-                    // Deduct from HK store
-                    DB::table('inventory_item_locations')->updateOrInsert(
-                        ['inventory_item_id' => $itemId, 'inventory_location_id' => $hkStore->id],
-                        ['updated_at' => now(), 'created_at' => now()]
-                    );
-                    DB::table('inventory_item_locations')
-                        ->where('inventory_item_id', '=', $itemId, 'and')
-                        ->where('inventory_location_id', '=', $hkStore->id, 'and')
-                        ->decrement('quantity', $replenishQty);
-
-                    // Add to room location if available
-                    if ($roomLoc) {
-                        DB::table('inventory_item_locations')->updateOrInsert(
-                            ['inventory_item_id' => $itemId, 'inventory_location_id' => $roomLoc->id],
-                            ['updated_at' => now(), 'created_at' => now()]
-                        );
-                        DB::table('inventory_item_locations')
-                            ->where('inventory_item_id', '=', $itemId, 'and')
-                            ->where('inventory_location_id', '=', $roomLoc->id, 'and')
-                            ->increment('quantity', $replenishQty);
-                    }
-
-                    $item = InventoryItem::lockForUpdate()->find($itemId);
-                    $unitCost = floatval($item?->cost_price ?? 0) / floatval($item?->conversion_factor ?: 1);
-                    $refId = (string) Str::uuid();
-
-                    InventoryTransaction::create([
-                        'inventory_item_id' => $itemId,
-                        'inventory_location_id' => $hkStore->id,
-                        'type' => 'out',
-                        'quantity' => $replenishQty,
-                        'unit_cost' => round($unitCost, 4),
-                        'total_cost' => round($replenishQty * $unitCost, 2),
-                        'reason' => 'HK replenish to room',
-                        'notes' => 'Housekeeping replenish',
-                        'user_id' => $userId,
-                        'reference_id' => $refId,
-                        'reference_type' => 'housekeeping',
-                    ]);
-                    if ($roomLoc) {
-                        InventoryTransaction::create([
-                            'inventory_item_id' => $itemId,
-                            'inventory_location_id' => $roomLoc->id,
-                            'type' => 'in',
-                            'quantity' => $replenishQty,
-                            'unit_cost' => round($unitCost, 4),
-                            'total_cost' => round($replenishQty * $unitCost, 2),
-                            'reason' => 'HK replenish to room',
-                            'notes' => 'Housekeeping replenish',
-                            'user_id' => $userId,
-                            'reference_id' => $refId,
-                            'reference_type' => 'housekeeping',
-                        ]);
-                    }
-
-                    InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+                $consumed = (float) ($ln->qty ?? 0);
+                if ($consumed <= 0) {
+                    continue;
                 }
 
-                // 2) Consumption deduction from room location (baseline - found)
-                if ($roomLoc && $consumed !== null && $consumed > 0) {
-                    DB::table('inventory_item_locations')->updateOrInsert(
-                        ['inventory_item_id' => $itemId, 'inventory_location_id' => $roomLoc->id],
-                        ['updated_at' => now(), 'created_at' => now()]
-                    );
-                    DB::table('inventory_item_locations')
-                        ->where('inventory_item_id', '=', $itemId, 'and')
-                        ->where('inventory_location_id', '=', $roomLoc->id, 'and')
-                        ->decrement('quantity', $consumed);
+                $onHandQty = (float) ($onHand[$itemId] ?? 0);
+                if ($consumed > $onHandQty + 0.0001) {
+                    DB::rollBack();
+                    /** @var InventoryItem|null $badItem */
+                    $badItem = InventoryItem::query()->find($itemId);
 
-                    $item = InventoryItem::lockForUpdate()->find($itemId);
-                    $unitCost = floatval($item?->cost_price ?? 0) / floatval($item?->conversion_factor ?: 1);
-                    InventoryTransaction::create([
-                        'inventory_item_id' => $itemId,
-                        'inventory_location_id' => $roomLoc->id,
-                        'type' => 'out',
-                        'quantity' => $consumed,
-                        'unit_cost' => round($unitCost, 4),
-                        'total_cost' => round($consumed * $unitCost, 2),
-                        'reason' => 'Room consumption',
-                        'notes' => 'Consumed (par vs found) during housekeeping',
-                        'user_id' => $userId,
-                        'reference_id' => (string) Str::uuid(),
-                        'reference_type' => 'housekeeping',
-                    ]);
-                    InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+                    return response()->json([
+                        'message' => sprintf(
+                            'Quantity exceeds on-hand stock in the room for "%s" (max %s).',
+                            $badItem?->name ?? ('item #' . $itemId),
+                            round($onHandQty, 4)
+                        ),
+                    ], 422);
                 }
+
+                DB::table('inventory_item_locations')->updateOrInsert(
+                    ['inventory_item_id' => $itemId, 'inventory_location_id' => $roomLoc->id],
+                    ['updated_at' => now(), 'created_at' => now()]
+                );
+                DB::table('inventory_item_locations')
+                    ->where('inventory_item_id', '=', $itemId, 'and')
+                    ->where('inventory_location_id', '=', $roomLoc->id, 'and')
+                    ->decrement('quantity', $consumed);
+
+                $item = InventoryItem::lockForUpdate()->find($itemId);
+                $unitCost = floatval($item?->cost_price ?? 0) / floatval($item?->conversion_factor ?: 1);
+                InventoryTransaction::create([
+                    'inventory_item_id' => $itemId,
+                    'inventory_location_id' => $roomLoc->id,
+                    'type' => 'out',
+                    'quantity' => $consumed,
+                    'unit_cost' => round($unitCost, 4),
+                    'total_cost' => round($consumed * $unitCost, 2),
+                    'reason' => 'Room consumption',
+                    'notes' => 'Consumed during checkout cleaning',
+                    'user_id' => $userId,
+                    'reference_id' => (string) Str::uuid(),
+                    'reference_type' => 'housekeeping',
+                ]);
+                InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+                $onHand[$itemId] = $onHandQty - $consumed;
             }
 
             // Minibar billing via POS room_charge
@@ -1095,6 +1044,7 @@ class HousekeepingController extends Controller
             DB::commit();
 
             HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
+            RoomParStockUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
 
             return response()->json([
                 'message' => $assetProblem ? 'Cleaning finished.' : 'Cleaning complete. Room is available.',
@@ -2281,6 +2231,7 @@ class HousekeepingController extends Controller
             DB::commit();
 
             HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'daily_cleaning_consumption');
+            RoomParStockUpdated::dispatchIfEnabled([$roomId], 'daily_cleaning_consumption');
 
             return response()->json([
                 'cleaning' => $cleaning->fresh()->load([

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\HousekeepingStateUpdated;
 use App\Events\RoomParStockUpdated;
 use App\Http\Controllers\Concerns\AuthorizesHousekeepingPermissions;
 use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
@@ -306,10 +307,9 @@ class HousekeepingRoomStockController extends Controller
             return response()->json(['message' => $e->getMessage()], 500);
         }
 
-        RoomParStockUpdated::dispatchIfEnabled(
-            array_map(fn(array $row): int => (int) ($row['room_id'] ?? 0), $executed),
-            'hk_refill'
-        );
+        $refilledRoomIds = array_map(fn(array $row): int => (int) ($row['room_id'] ?? 0), $executed);
+        RoomParStockUpdated::dispatchIfEnabled($refilledRoomIds, 'hk_refill');
+        HousekeepingStateUpdated::dispatchIfEnabled($refilledRoomIds, 'hk_refill');
 
         return response()->json([
             'count' => count($executed),
@@ -395,6 +395,7 @@ class HousekeepingRoomStockController extends Controller
         }
 
         RoomParStockUpdated::dispatchIfEnabled([(int) $room->id], 'hk_refill_item');
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $room->id], 'hk_refill_item');
 
         return response()->json([
             'message' => 'Refill completed.',
