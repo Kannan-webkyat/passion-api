@@ -2,17 +2,20 @@
 
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\CessSlabController;
 use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\DietaryTypeController;
 use App\Http\Controllers\HousekeepingController;
+use App\Http\Controllers\HousekeepingRoomStockController;
 use App\Http\Controllers\InventoryCategoryController;
 use App\Http\Controllers\InventoryController;
 use App\Http\Controllers\InventoryLocationController;
 use App\Http\Controllers\InventoryReportController;
 use App\Http\Controllers\InventoryTaxController;
 use App\Http\Controllers\InventoryUomController;
+use App\Http\Controllers\LaundryRequestController;
 use App\Http\Controllers\MenuCategoryController;
 use App\Http\Controllers\MenuItemController;
 use App\Http\Controllers\MenuPricingController;
@@ -26,6 +29,7 @@ use App\Http\Controllers\RecipeController;
 use App\Http\Controllers\RestaurantMasterController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\RoomController;
+use App\Http\Controllers\RoomParController;
 use App\Http\Controllers\RoomStatusBlockController;
 use App\Http\Controllers\RoomTypeController;
 use App\Http\Controllers\SettingController;
@@ -49,7 +53,22 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Rooms
     Route::apiResource('rooms', RoomController::class);
+    Route::post('rooms/sync-inventory-locations', [RoomController::class, 'syncInventoryLocations']);
     Route::apiResource('room-status-blocks', RoomStatusBlockController::class);
+
+    // Room Par configuration
+    Route::get('room-par/templates', [RoomParController::class, 'index']);
+    Route::post('room-par/templates', [RoomParController::class, 'store']);
+    Route::get('room-par/templates/{template}', [RoomParController::class, 'show']);
+    Route::put('room-par/templates/{template}', [RoomParController::class, 'update']);
+    Route::post('room-par/fill', [RoomParController::class, 'fill']);
+    Route::post('room-par/allocate', [RoomParController::class, 'allocate']);
+    Route::post('room-par/assign', [RoomParController::class, 'assign']);
+    Route::get('room-par/stock-summary', [RoomParController::class, 'stockSummary']);
+    Route::get('room-par/rooms/{room}/context', [RoomParController::class, 'roomContext']);
+    Route::post('room-par/rooms/{room}/assign', [RoomParController::class, 'assignRoom']);
+    Route::post('room-par/rooms/{room}/ensure-location', [RoomParController::class, 'ensureRoomLocation']);
+    Route::post('room-par/rooms/{room}/issue-to-par', [RoomParController::class, 'issueToPar']);
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);
@@ -59,21 +78,61 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Bookings & Room Chart
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
+    Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
+    Route::get('housekeeping/rooms/{room}/cleaning-history/detail', [HousekeepingController::class, 'roomCleaningHistoryDetail']);
+    Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
+    Route::get('housekeeping/room-stock', [HousekeepingRoomStockController::class, 'index']);
+    Route::get('housekeeping/room-stock/rooms/{room}', [HousekeepingRoomStockController::class, 'roomContext']);
+    Route::post('housekeeping/room-stock/refill', [HousekeepingRoomStockController::class, 'refill']);
+    Route::post('housekeeping/room-stock/rooms/{room}/refill-item', [HousekeepingRoomStockController::class, 'refillItem']);
+    Route::get('housekeeping/room-stock/refill-history', [HousekeepingRoomStockController::class, 'refillHistory']);
+    Route::post('housekeeping/room-stock/request', [HousekeepingRoomStockController::class, 'requestRestock']);
+    Route::get('housekeeping/room-stock/requests', [HousekeepingRoomStockController::class, 'requestHistory']);
+    Route::get('housekeeping/rooms/{room}/checkout-inspection-context', [HousekeepingController::class, 'checkoutInspectionContext']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/job', [HousekeepingController::class, 'upsertJob']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/finish', [HousekeepingController::class, 'finish']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/clear', [HousekeepingController::class, 'checkoutInspectionClear']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/validate', [HousekeepingController::class, 'checkoutInspectionValidate']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/apply', [HousekeepingController::class, 'checkoutInspectionApply']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/mark-inspected', [HousekeepingController::class, 'markInspected']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
+    Route::get('housekeeping/daily-cleaning', [HousekeepingController::class, 'dailyCleaningIndex']);
+    Route::post('housekeeping/daily-cleaning/status', [HousekeepingController::class, 'dailyCleaningUpdateStatus']);
+    Route::post('housekeeping/daily-cleaning/consumption', [HousekeepingController::class, 'dailyCleaningRecordConsumption']);
+    Route::get('housekeeping/daily-cleaning/history', [HousekeepingController::class, 'dailyCleaningHistory']);
+    Route::get('housekeeping/daily-cleaning/history-board', [HousekeepingController::class, 'dailyCleaningHistoryBoard']);
+
+    Route::get('housekeeping/laundry/prefill', [LaundryRequestController::class, 'prefill']);
+    Route::get('housekeeping/laundry/checked-in-rooms', [LaundryRequestController::class, 'checkedInRooms']);
+    Route::get('housekeeping/laundry', [LaundryRequestController::class, 'index']);
+    Route::post('housekeeping/laundry', [LaundryRequestController::class, 'store']);
+    Route::get('housekeeping/laundry/{laundryRequest}', [LaundryRequestController::class, 'show']);
+    Route::patch('housekeeping/laundry/{laundryRequest}', [LaundryRequestController::class, 'update']);
+    Route::post('housekeeping/laundry/{laundryRequest}/pickup', [LaundryRequestController::class, 'pickup']);
+    Route::post('housekeeping/laundry/{laundryRequest}/lines', [LaundryRequestController::class, 'syncLines']);
+    Route::post('housekeeping/laundry/{laundryRequest}/status', [LaundryRequestController::class, 'updateStatus']);
+    Route::post('housekeeping/laundry/{laundryRequest}/post-to-room', [LaundryRequestController::class, 'postToRoom']);
 
     Route::get('bookings/guest-search', [BookingController::class, 'guestSearch']);
     Route::get('bookings/chart', [BookingController::class, 'chart']);
     Route::get('bookings/summary', [BookingController::class, 'summary']);
+    Route::post('bookings/{booking}/request-inspection', [BookingController::class, 'requestInspection']);
     Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
     Route::post('bookings/{booking}/late-checkout', [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
     Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);
+    Route::post('bookings/{booking}/preview-extend-hours', [BookingController::class, 'previewHourlyExtension']);
     Route::get('bookings/{booking}/voucher', [BookingController::class, 'reservationVoucher']);
     Route::get('bookings/{booking}/billing', [BookingController::class, 'reservationBilling']);
     Route::get('bookings/{booking}/folio-postings', [BookingController::class, 'folioPostings']);
+    Route::get('bookings/{booking}/inspection-charges', [BookingController::class, 'inspectionCharges']);
     Route::get('bookings/{booking}/folio-orders/{order}', [BookingController::class, 'folioOrderDetail'])->whereNumber('order');
     Route::post('bookings/{booking}/split-stay', [BookingController::class, 'splitStay']);
+    Route::get('bookings/{booking}/room-transfers', [BookingController::class, 'listRoomTransfers']);
+    Route::post('bookings/{booking}/preview-room-transfer', [BookingController::class, 'previewRoomTransfer']);
+    Route::post('bookings/{booking}/room-transfer', [BookingController::class, 'roomTransfer']);
     Route::get('bookings/available-rooms', [BookingController::class, 'getAvailableRooms']);
     Route::post('booking-groups', [BookingController::class, 'storeGroup']);
     Route::apiResource('bookings', BookingController::class);
@@ -94,6 +153,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::match(['put', 'post'], 'settings/receipt', [SettingController::class, 'updateReceiptDefaults']);
     Route::get('settings/global', [SettingController::class, 'globalConfig']);
     Route::put('settings/global', [SettingController::class, 'updateGlobalConfig']);
+    Route::get('settings/invoice-profile', [SettingController::class, 'invoiceProfile']);
+    Route::put('settings/invoice-profile', [SettingController::class, 'updateInvoiceProfile']);
+    Route::get('settings/invoice-bank', [SettingController::class, 'invoiceBank']);
+    Route::put('settings/invoice-bank', [SettingController::class, 'updateInvoiceBank']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);
@@ -215,6 +278,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('store-requests/{storeRequest}/reject', [StoreRequestController::class, 'reject']);
         Route::post('store-requests/{storeRequest}/cancel', [StoreRequestController::class, 'cancel']);
 
+        Route::apiResource('cess-slabs', CessSlabController::class)->except(['show']);
         Route::apiResource('purchase-orders', PurchaseOrderController::class);
         Route::post('purchase-orders/{purchaseOrder}/receive', [PurchaseOrderController::class, 'receive']);
         Route::post('purchase-orders/{purchaseOrder}/send', [PurchaseOrderController::class, 'send']);

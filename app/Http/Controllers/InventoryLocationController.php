@@ -36,7 +36,7 @@ class InventoryLocationController extends Controller
         $this->checkPermission('manage-inventory');
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name',
-            'type' => 'required|string|in:main_store,kitchen_store,bar_store,sub_store,satellite',
+            'type' => 'required|string|in:main_store,kitchen_store,sub_store,housekeeping_store,satellite',
             'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean',
         ]);
@@ -55,8 +55,8 @@ class InventoryLocationController extends Controller
     {
         $this->checkPermission('manage-inventory');
         $validated = $request->validate([
-            'name' => 'required|string|unique:inventory_locations,name,'.$location->id,
-            'type' => 'required|string|in:main_store,kitchen_store,bar_store,sub_store,satellite',
+            'name' => 'required|string|unique:inventory_locations,name,' . $location->id,
+            'type' => 'required|string|in:main_store,kitchen_store,sub_store,housekeeping_store,satellite',
             'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean',
         ]);

@@ -6,6 +6,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
+use Spatie\Permission\PermissionRegistrar;
 
 class AuthController extends Controller
 {
@@ -44,10 +45,15 @@ class AuthController extends Controller
 
     public function me(Request $request)
     {
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $user = $request->user();
+        $user->unsetRelation('roles');
+        $user->unsetRelation('permissions');
+
         return response()->json([
-            'user' => $request->user()->load(['departments', 'restaurants']),
-            'permissions' => $request->user()->getAllPermissions()->pluck('name'),
-            'roles' => $request->user()->getRoleNames(),
+            'user' => $user->load(['departments', 'restaurants']),
+            'permissions' => $user->getAllPermissions()->pluck('name'),
+            'roles' => $user->getRoleNames(),
         ]);
     }
 }

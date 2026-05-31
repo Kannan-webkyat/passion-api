@@ -30,15 +30,23 @@ class InventoryController extends Controller
         }
     }
 
-    /** Empty or whitespace-only SKU is stored as null (multiple nulls allowed under unique). */
-    private function mergeNormalizedSku(Request $request): void
+    /** @param  array<string, mixed>  $validated */
+    private function normalizeAlcoholLiquorFields(array &$validated): void
     {
-        if (! $request->has('sku')) {
+        $validated['is_alcohol'] = (bool) ($validated['is_alcohol'] ?? false);
+        $validated['is_cess_applicable'] = (bool) ($validated['is_cess_applicable'] ?? false);
+
+        if (! $validated['is_alcohol']) {
+            $validated['is_cess_applicable'] = false;
+            $validated['liquor_category'] = null;
+            $validated['cess_amount'] = null;
+
             return;
         }
-        $raw = $request->input('sku');
-        $normalized = (is_string($raw) && trim($raw) !== '') ? trim($raw) : null;
-        $request->merge(['sku' => $normalized]);
+
+        if (! $validated['is_cess_applicable']) {
+            $validated['cess_amount'] = null;
+        }
     }
 
     public function index()
@@ -71,16 +79,23 @@ class InventoryController extends Controller
             'conversion_factor' => 'required|numeric|min:0.01',
             'vendor_id' => 'nullable|exists:vendors,id',
             'cost_price' => 'nullable|numeric|min:0',
+            'inspection_penalty_charge' => 'nullable|numeric|min:0',
             'reorder_level' => 'nullable|numeric|min:0',
             'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
+            'is_alcohol' => 'nullable|boolean',
+            'is_cess_applicable' => 'nullable|boolean',
+            'cess_amount' => 'nullable|numeric|min:0',
+            'liquor_category' => 'nullable|string|max:32',
             'description' => 'nullable|string',
         ]);
 
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        $this->normalizeAlcoholLiquorFields($validated);
         $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
+        $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
         $item = InventoryItem::create($validated);
 
         $purchaseUnitCost = (float) $validated['cost_price'];
@@ -131,7 +146,7 @@ class InventoryController extends Controller
         $this->mergeNormalizedSku($request);
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'sku' => 'nullable|string|max:100|unique:inventory_items,sku,'.$item->id,
+            'sku' => 'required|string|max:100|unique:inventory_items,sku,' . $item->id,
             'category_id' => 'required|exists:inventory_categories,id',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
             'purchase_uom_id' => 'required|exists:inventory_uoms,id',
@@ -139,15 +154,25 @@ class InventoryController extends Controller
             'conversion_factor' => 'required|numeric|min:0.01',
             'vendor_id' => 'nullable|exists:vendors,id',
             'cost_price' => 'nullable|numeric|min:0',
+            'inspection_penalty_charge' => 'nullable|numeric|min:0',
             'reorder_level' => 'nullable|numeric|min:0',
             'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
+            'is_alcohol' => 'nullable|boolean',
+            'is_cess_applicable' => 'nullable|boolean',
+            'cess_amount' => 'nullable|numeric|min:0',
+            'liquor_category' => 'nullable|string|max:32',
             'description' => 'nullable|string',
         ]);
 
+        $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
+        $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        $this->normalizeAlcoholLiquorFields($validated);
+
         $oldStock = $item->current_stock;
         $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
+        $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
         $item->update($validated);
 
         // Stored cost is per purchase UOM (WAC on GRN; manual entry same convention).
@@ -211,10 +236,10 @@ class InventoryController extends Controller
             ->selectRaw('inventory_item_id, COALESCE(SUM(quantity), 0) as total')
             ->pluck('total', 'inventory_item_id');
 
-        $qty = fn (InventoryItem $i) => (float) ($sums[$i->id] ?? 0);
+        $qty = fn(InventoryItem $i) => (float) ($sums[$i->id] ?? 0);
 
-        $totalValue = $items->sum(fn ($i) => $qty($i) * ($i->cost_price / ($i->conversion_factor ?: 1)));
-        $lowStockCount = $items->filter(fn ($i) => $qty($i) <= (float) $i->reorder_level)->count();
+        $totalValue = $items->sum(fn($i) => $qty($i) * ($i->cost_price / ($i->conversion_factor ?: 1)));
+        $lowStockCount = $items->filter(fn($i) => $qty($i) <= (float) $i->reorder_level)->count();
         $recentTx = InventoryTransaction::with(['item', 'location'])->latest()->take(10)->get();
 
         return response()->json([
@@ -262,17 +287,17 @@ class InventoryController extends Controller
 
             // 3. Log OUT Transaction
             $outTx = \App\Models\InventoryTransaction::create([
-                'inventory_item_id' => $item->id,
+                'inventory_item_id'    => $item->id,
                 'inventory_location_id' => $sourceLocation->id,
-                'type' => 'out',
-                'quantity' => $qty,
-                'unit_cost' => round($unitCost, 4),
-                'total_cost' => round($qty * $unitCost, 2),
-                'reason' => $destLocation ? 'Transfer' : 'Consumption',
-                'notes' => $validated['notes'] ?? ($destLocation ? "Transfer to {$destLocation->name}" : 'Manual consumption'),
-                'user_id' => auth()->id(),
-                'reference_id' => $refId,
-                'reference_type' => 'requisition',
+                'type'                 => 'out',
+                'quantity'             => $qty,
+                'unit_cost'            => round($unitCost, 4),
+                'total_cost'           => round($qty * $unitCost, 2),
+                'reason'               => $destLocation ? 'Transfer' : 'Consumption',
+                'notes'                => $validated['notes'] ?? ($destLocation ? "Transfer to {$destLocation->name}" : "Manual consumption"),
+                'user_id'              => auth()->id(),
+                'reference_id'         => $refId,
+                'reference_type'       => 'requisition',
             ]);
 
             // 4. Handle Transfer (Increment Destination)
@@ -287,17 +312,17 @@ class InventoryController extends Controller
                     ->increment('quantity', $qty);
 
                 \App\Models\InventoryTransaction::create([
-                    'inventory_item_id' => $item->id,
+                    'inventory_item_id'    => $item->id,
                     'inventory_location_id' => $destLocation->id,
-                    'type' => 'in',
-                    'quantity' => $qty,
-                    'unit_cost' => round($unitCost, 4),
-                    'total_cost' => round($qty * $unitCost, 2),
-                    'reason' => 'Transfer',
-                    'notes' => "Received from {$sourceLocation->name}",
-                    'user_id' => auth()->id(),
-                    'reference_id' => $refId,
-                    'reference_type' => 'requisition',
+                    'type'                 => 'in',
+                    'quantity'             => $qty,
+                    'unit_cost'            => round($unitCost, 4),
+                    'total_cost'           => round($qty * $unitCost, 2),
+                    'reason'               => 'Transfer',
+                    'notes'                => "Received from {$sourceLocation->name}",
+                    'user_id'              => auth()->id(),
+                    'reference_id'         => $refId,
+                    'reference_type'       => 'requisition',
                 ]);
             }
 

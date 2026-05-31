@@ -39,8 +39,17 @@ class BarSeeder extends Seeder
         // ─── 1. Bar vendor ──────────────────────────────────────────────────
         $vendor = Vendor::firstOrCreate(
             ['name' => 'Bar Supplies Co'],
-            ['contact_person' => 'Bar Manager', 'phone' => '9876500000', 'email' => 'bar@supplies.com', 'address' => 'Wholesale Liquor, Chennai']
+            [
+                'contact_person' => 'Bar Manager',
+                'phone' => '9876500000',
+                'email' => 'bar@supplies.com',
+                'address' => 'Wholesale Liquor, Chennai',
+                'is_liquor_supplier' => true,
+            ]
         );
+        if (! $vendor->is_liquor_supplier) {
+            $vendor->update(['is_liquor_supplier' => true]);
+        }
 
         // ─── 2. Bar inventory category ─────────────────────────────────────
         $fb = InventoryCategory::where('name', 'F&B')->first();
@@ -57,16 +66,18 @@ class BarSeeder extends Seeder
 
         // ─── 3. Bar inventory items ─────────────────────────────────────────
         // Spirits: ml (peg-level), Beer: Pcs (bottle-level)
-        // [name, sku, cost, reorder, issue_uom, conversion_factor]
-        $itemDefs = [
-            ['Johnnie Walker Red 750ml', 'FB-BR-JW1', 1800, 1500, $ml->id, 750],   // spirits: ml, reorder 1500ml
-            ['Royal Challenge 750ml', 'FB-BR-RC1', 1200, 1500, $ml->id, 750],
-            ['Kingfisher Premium 650ml', 'FB-BR-KF1', 80, 6, $pcs->id, 1],        // beer: Pcs
+        // Spirits: IMFL cess slabs apply. Beer: no cess slabs.
+        $spiritDefs = [
+            ['Johnnie Walker Red 750ml', 'FB-BR-JW1', 1800, 1500, $ml->id, 750, 'imfl'],
+            ['Royal Challenge 750ml', 'FB-BR-RC1', 1200, 1500, $ml->id, 750, 'imfl'],
+        ];
+        $beerDefs = [
+            ['Kingfisher Premium 650ml', 'FB-BR-KF1', 80, 6, $pcs->id, 1],
             ['Bira 91 Blonde 330ml', 'FB-BR-BR1', 60, 6, $pcs->id, 1],
         ];
 
         $itemMap = [];
-        foreach ($itemDefs as [$name, $sku, $cost, $reorder, $issueUomId, $conv]) {
+        foreach ($spiritDefs as [$name, $sku, $cost, $reorder, $issueUomId, $conv, $liquorCategory]) {
             $itemMap[$name] = InventoryItem::firstOrCreate(
                 ['sku' => $sku],
                 [
@@ -81,10 +92,51 @@ class BarSeeder extends Seeder
                     'current_stock' => 0,
                     'tax_id' => $liquorVat->id,
                     'is_direct_sale' => true,
+                    'is_alcohol' => true,
+                    'is_cess_applicable' => true,
+                    'liquor_category' => $liquorCategory,
+                    'cess_amount' => null,
                 ]
             );
             $itemMap[$name]->update([
                 'is_direct_sale' => true,
+                'is_alcohol' => true,
+                'is_cess_applicable' => true,
+                'liquor_category' => $liquorCategory,
+                'cess_amount' => null,
+                'issue_uom_id' => $issueUomId,
+                'conversion_factor' => $conv,
+                'reorder_level' => $reorder,
+            ]);
+        }
+
+        foreach ($beerDefs as [$name, $sku, $cost, $reorder, $issueUomId, $conv]) {
+            $itemMap[$name] = InventoryItem::firstOrCreate(
+                ['sku' => $sku],
+                [
+                    'name' => $name,
+                    'category_id' => $catBar->id,
+                    'vendor_id' => $vendor->id,
+                    'purchase_uom_id' => $pcs->id,
+                    'issue_uom_id' => $issueUomId,
+                    'conversion_factor' => $conv,
+                    'cost_price' => $cost,
+                    'reorder_level' => $reorder,
+                    'current_stock' => 0,
+                    'tax_id' => $liquorVat->id,
+                    'is_direct_sale' => true,
+                    'is_alcohol' => true,
+                    'is_cess_applicable' => false,
+                    'liquor_category' => null,
+                    'cess_amount' => null,
+                ]
+            );
+            $itemMap[$name]->update([
+                'is_direct_sale' => true,
+                'is_alcohol' => true,
+                'is_cess_applicable' => false,
+                'liquor_category' => null,
+                'cess_amount' => null,
                 'issue_uom_id' => $issueUomId,
                 'conversion_factor' => $conv,
                 'reorder_level' => $reorder,

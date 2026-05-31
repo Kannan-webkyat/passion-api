@@ -7,11 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 class Room extends Model
 {
     protected $fillable = [
-        'room_number', 
-        'room_type_id', 
-        'is_active', 
-        'status', 
-        'floor', 
+        'room_number',
+        'room_type_id',
+        'par_template_id',
+        'is_active',
+        'status',
+        'floor',
         'bed_config',
         'amenities',
         'intercom_extension',
@@ -31,6 +32,11 @@ class Room extends Model
     public function roomType()
     {
         return $this->belongsTo(RoomType::class);
+    }
+
+    public function parTemplate()
+    {
+        return $this->belongsTo(RoomParTemplate::class, 'par_template_id');
     }
 
     public function bookings()

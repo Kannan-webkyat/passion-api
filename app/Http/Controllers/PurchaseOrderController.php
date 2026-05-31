@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryItem;
+use App\Models\InventoryLocation;
+use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Services\PurchaseOrderLineAmounts;
@@ -20,6 +22,29 @@ class PurchaseOrderController extends Controller
         }
     }
 
+    /** @return array<string, string> */
+    private function poHeaderChargeRules(): array
+    {
+        return [
+            'transportation_charge' => 'nullable|numeric|min:0',
+            'loading_unloading_charge' => 'nullable|numeric|min:0',
+            'tds_amount' => 'nullable|numeric|min:0',
+        ];
+    }
+
+    /** @return array<string, string> */
+    private function poLineRules(): array
+    {
+        return [
+            'items' => 'required|array|min:1',
+            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'items.*.quantity' => 'required|numeric|min:0.001',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.tax_rate' => 'nullable|numeric|min:0',
+            'items.*.tax_price_basis' => 'nullable|string|in:'.PurchaseOrderLineAmounts::BASIS_EXCLUSIVE.','.PurchaseOrderLineAmounts::BASIS_INCLUSIVE.','.PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
+        ];
+    }
+
     public function index()
     {
         return response()->json(
@@ -30,19 +55,13 @@ class PurchaseOrderController extends Controller
     public function store(Request $request)
     {
         $this->checkPermission('manage-inventory');
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge([
             'vendor_id' => 'required|exists:vendors,id',
             'location_id' => 'required|exists:inventory_locations,id',
             'order_date' => 'required|date',
             'expected_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-            'items' => 'required|array|min:1',
-            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
-            'items.*.quantity' => 'required|numeric|min:0.001',
-            'items.*.unit_price' => 'required|numeric|min:0',
-            'items.*.tax_rate' => 'nullable|numeric|min:0',
-            'items.*.tax_price_basis' => 'nullable|string|in:'.PurchaseOrderLineAmounts::BASIS_EXCLUSIVE.','.PurchaseOrderLineAmounts::BASIS_INCLUSIVE.','.PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
-        ]);
+        ], $this->poHeaderChargeRules(), $this->poLineRules()));
 
         try {
             $po = app(PurchaseOrderService::class)->createFromValidatedData($validated);
@@ -65,25 +84,18 @@ class PurchaseOrderController extends Controller
             return response()->json(['message' => 'Only draft orders can be edited'], 422);
         }
 
-        $validated = $request->validate([
+        $validated = $request->validate(array_merge([
             'vendor_id' => 'required|exists:vendors,id',
             'location_id' => 'required|exists:inventory_locations,id',
             'order_date' => 'required|date',
             'expected_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-            'items' => 'required|array|min:1',
-            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
-            'items.*.quantity' => 'required|numeric|min:0.001',
-            'items.*.unit_price' => 'required|numeric|min:0',
-            'items.*.tax_rate' => 'nullable|numeric|min:0',
-            'items.*.tax_price_basis' => 'nullable|string|in:'.PurchaseOrderLineAmounts::BASIS_EXCLUSIVE.','.PurchaseOrderLineAmounts::BASIS_INCLUSIVE.','.PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
-        ]);
+        ], $this->poHeaderChargeRules(), $this->poLineRules()));
 
         DB::beginTransaction();
         try {
-            $totals = PurchaseOrderService::applyLineAmountsToItems($validated['items']);
-            $subtotal = $totals['subtotal'];
-            $taxAmount = $totals['tax_amount'];
+            $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items']);
+            $financials = PurchaseOrderService::buildHeaderFinancials($lineTotals, $validated);
 
             PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
 
@@ -93,12 +105,16 @@ class PurchaseOrderController extends Controller
                 'order_date' => $validated['order_date'],
                 'expected_delivery_date' => $validated['expected_delivery_date'] ?? null,
                 'notes' => $validated['notes'] ?? null,
-                'subtotal' => $subtotal,
-                'tax_amount' => $taxAmount,
-                'total_amount' => $subtotal + $taxAmount,
+                'subtotal' => $financials['subtotal'],
+                'tax_amount' => $financials['tax_amount'],
+                'total_cess_amount' => $financials['total_cess_amount'],
+                'transportation_charge' => $financials['transportation_charge'],
+                'loading_unloading_charge' => $financials['loading_unloading_charge'],
+                'total_amount' => $financials['total_amount'],
+                'grand_total_payable' => $financials['grand_total_payable'],
+                'tds_amount' => $financials['tds_amount'],
             ]);
 
-            // Replace items
             $purchaseOrder->items()->delete();
             foreach ($validated['items'] as $line) {
                 PurchaseOrderItem::create([
@@ -110,6 +126,8 @@ class PurchaseOrderController extends Controller
                     'subtotal' => $line['subtotal'],
                     'tax_rate' => $line['tax_rate'] ?? 0,
                     'tax_amount' => $line['tax_amount'],
+                    'unit_cess' => $line['unit_cess'],
+                    'total_cess' => $line['total_cess'],
                     'total_amount' => $line['total_amount'],
                 ]);
             }
@@ -176,7 +194,7 @@ class PurchaseOrderController extends Controller
 
         $reason = trim((string) ($validated['reason'] ?? ''));
         if ($reason !== '') {
-            $purchaseOrder->notes = trim((string) ($purchaseOrder->notes ?? '')."\nCancelled: ".$reason);
+            $purchaseOrder->notes = trim((string) ($purchaseOrder->notes ?? '') . "\nCancelled: " . $reason);
         }
 
         $purchaseOrder->status = 'cancelled';
@@ -190,113 +208,38 @@ class PurchaseOrderController extends Controller
     public function receive(Request $request, PurchaseOrder $purchaseOrder)
     {
         $this->checkPermission('manage-inventory');
+
         $validated = $request->validate([
             'location_id' => 'nullable|exists:inventory_locations,id',
             'document' => 'nullable|file|max:4096',
+            'items' => 'required|array|min:1',
+            'items.*.purchase_order_item_id' => 'required|integer',
+            'items.*.quantity_received' => 'required|integer|min:0',
+            'items.*.quantity_damaged_transit' => 'nullable|integer|min:0',
+            'items.*.quantity_broken_transit' => 'nullable|integer|min:0',
         ]);
 
-        // Default to Main Store if no location provided
-        $locationId = $validated['location_id'] ?? \App\Models\InventoryLocation::where('type', 'main_store')->first()?->id;
-
+        $locationId = $validated['location_id'] ?? InventoryLocation::where('type', 'main_store')->first()?->id;
         if (! $locationId) {
             return response()->json(['message' => 'No target location available'], 422);
         }
 
-        DB::beginTransaction();
         try {
-            // Lock the PO to serialize concurrent receipt requests
-            $lockedPo = PurchaseOrder::lockForUpdate()->findOrFail($purchaseOrder->id);
-            if ($lockedPo->status === 'received') {
-                throw new \Exception('PO already received');
-            }
-            if ($lockedPo->status !== 'sent') {
-                return response()->json(['message' => 'Send the PO before receiving stock'], 422);
-            }
-
-            $updateData = ['status' => 'received', 'received_at' => now()];
+            $po = app(PurchaseOrderService::class)->receivePurchaseOrder(
+                $purchaseOrder,
+                (int) $locationId,
+                auth()->id()
+            );
 
             if ($request->hasFile('document')) {
                 $path = $request->file('document')->store('po_documents', 'public');
-                $updateData['received_document_path'] = $path;
+                $po->update(['received_document_path' => $path]);
             }
 
-            $lockedPo->update($updateData);
-
-            PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($lockedPo);
-
-            foreach ($lockedPo->items as $poItem) {
-                // Current flow receives the full ordered quantity (no partial receipt UI yet).
-                $poItem->update([
-                    'quantity_received' => (int) $poItem->quantity_ordered,
-                ]);
-
-                // Lock the underlying inventory item to serialize WAC calculations globally
-                /** @var \App\Models\InventoryItem|null $item */
-                $item = \App\Models\InventoryItem::lockForUpdate()->find($poItem->inventory_item_id);
-                if ($item) {
-                    // Convert quantity based on conversion factor (e.g., 1 KG -> 1000 Grams)
-                    $conversionFactor = floatval($item->conversion_factor ?? 1);
-                    $convertedQuantity = $poItem->quantity_ordered * $conversionFactor;
-
-                    // Inventory / COGS / ITC use exclusive (net) line value, not gross inclusive quote.
-                    $lineExclusiveTotal = (float) ($poItem->subtotal ?? 0);
-                    $qtyOrdered = (float) $poItem->quantity_ordered;
-                    $exclusiveUnitInPurchaseUom = $qtyOrdered > 0 ? $lineExclusiveTotal / $qtyOrdered : 0.0;
-
-                    // Unit cost for this transaction (per issue unit) — for auditing
-                    $unitCostPerIssue = $conversionFactor > 0 ? $exclusiveUnitInPurchaseUom / $conversionFactor : $exclusiveUnitInPurchaseUom;
-                    $totalCost = round($lineExclusiveTotal, 2);
-
-                    // WAC uses sum of locations as on-hand qty.
-                    // Use max(0, stockBefore) to prevent skewed averages when correcting negative stock exceptions.
-                    $stockBeforeIssue = \App\Models\InventoryItem::sumQuantityAcrossLocations($item->id);
-                    $onHandForWacIssue = max(0, $stockBeforeIssue);
-
-                    // Convert on-hand issue units to purchase units for WAC calculation
-                    $onHandForWacPurchase = $onHandForWacIssue / ($conversionFactor ?: 1);
-                    $currentPurchasePrice = (float) ($item->cost_price ?? 0);
-                    $newPurchaseQty = (float) $poItem->quantity_ordered;
-
-                    $denominatorPurchase = $onHandForWacPurchase + $newPurchaseQty;
-                    $newPurchaseCost = $denominatorPurchase > 0
-                        ? (($onHandForWacPurchase * $currentPurchasePrice) + ($newPurchaseQty * $exclusiveUnitInPurchaseUom)) / $denominatorPurchase
-                        : $exclusiveUnitInPurchaseUom;
-
-                    // ── 1. Update Location Stock atomically ──
-                    DB::table('inventory_item_locations')->updateOrInsert(
-                        ['inventory_item_id' => $item->id, 'inventory_location_id' => $locationId],
-                        ['updated_at' => now(), 'created_at' => now()]
-                    );
-                    DB::table('inventory_item_locations')
-                        ->where('inventory_item_id', $item->id)
-                        ->where('inventory_location_id', $locationId)
-                        ->increment('quantity', $convertedQuantity);
-
-                    $item->update(['cost_price' => round($newPurchaseCost, 4)]);
-                    InventoryItem::syncStoredCurrentStockFromLocations($item->id);
-
-                    \App\Models\InventoryTransaction::create([
-                        'inventory_item_id' => $item->id,
-                        'inventory_location_id' => $locationId,
-                        'type' => 'in',
-                        'quantity' => $convertedQuantity,
-                        'unit_cost' => round($unitCostPerIssue, 4),
-                        'total_cost' => $totalCost,
-                        'reason' => 'Purchase Receipt',
-                        'notes' => 'From PO: '.$purchaseOrder->po_number.' at '.\App\Models\InventoryLocation::find($locationId)->name.' (Ordered: '.$poItem->quantity_ordered.' '.($item->purchaseUom->short_name ?? '').')',
-                        'user_id' => auth()->id(),
-                        'reference_type' => 'purchase_order',
-                        'reference_id' => (string) $purchaseOrder->id,
-                    ]);
-                }
-            }
-
-            DB::commit();
-
-            return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem', 'creator'));
+            return response()->json($po->load('vendor', 'items.inventoryItem', 'creator'));
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
         } catch (\Exception $e) {
-            DB::rollBack();
-
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -313,11 +256,10 @@ class PurchaseOrderController extends Controller
 
         DB::beginTransaction();
         try {
-            // Lock PO for serialized payment assignments
             /** @var PurchaseOrder $lockedPo */
             $lockedPo = PurchaseOrder::lockForUpdate()->findOrFail($purchaseOrder->id);
 
-            if ($lockedPo->status !== 'received' && $lockedPo->status !== 'partial') {
+            if (! in_array($lockedPo->status, ['received', 'partial'], true)) {
                 throw new \Exception('Only received or partial orders can be paid');
             }
             if ($lockedPo->payment_status === 'paid') {
@@ -329,9 +271,10 @@ class PurchaseOrderController extends Controller
                 $lockedPo->invoice_path = $path;
             }
 
+            $payable = $lockedPo->payableAmount();
             $totalPaid = floatval($lockedPo->paid_amount) + floatval($validated['paid_amount']);
 
-            $lockedPo->payment_status = $totalPaid >= floatval($lockedPo->total_amount) - 0.01 ? 'paid' : 'partially_paid';
+            $lockedPo->payment_status = $totalPaid >= $payable - 0.01 ? 'paid' : 'partially_paid';
             $lockedPo->payment_method = $validated['payment_method'];
             $lockedPo->payment_reference = $validated['payment_reference'];
             $lockedPo->paid_amount = $totalPaid;

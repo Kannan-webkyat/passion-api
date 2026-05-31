@@ -11,6 +11,11 @@ class Booking extends Model
         return $this->hasMany(BookingSegment::class);
     }
 
+    public function roomTransfers()
+    {
+        return $this->hasMany(BookingRoomTransfer::class)->orderByDesc('transferred_at');
+    }
+
     protected $fillable = [
         'room_id',
         'first_name',
@@ -64,9 +69,19 @@ class Booking extends Model
         return $this->belongsTo(Room::class);
     }
 
+    public function ratePlan()
+    {
+        return $this->belongsTo(RatePlan::class);
+    }
+
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function laundryRequests()
+    {
+        return $this->hasMany(LaundryRequest::class);
     }
 
     // Accessor for full name

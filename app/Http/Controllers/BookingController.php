@@ -2,9 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Support\ReservationInvoiceViewData;
-use App\Support\SeasonalRoomPricing;
+use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
+use App\Events\HousekeepingStateUpdated;
 use App\Models\Booking;
+use App\Models\BookingExtraCharge;
 use App\Models\BookingGroup;
 use App\Models\BookingSegment;
 use App\Models\PosOrder;
@@ -12,19 +13,86 @@ use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
+use App\Support\BookingInspectionChargeLines;
+use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingRoomTransferService;
+use App\Support\CheckoutInspectionInspector;
+use App\Support\CheckoutInspectionPenaltyAmount;
+use App\Support\ReservationInvoiceViewData;
+use App\Support\SeasonalRoomPricing;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 
 class BookingController extends Controller
 {
-    private function checkPermission(string $permission)
+    use AuthorizesSpatiePermissions;
+
+    /** Room chart grid + summary tiles (no booking drawer / folio). */
+    private function allowReservationChartRead(): void
     {
-        $user = Auth::user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
+        $this->authorizePermissions([
+            'reservation-view',
+            'reservation',
+            'view-rooms',
+            'manage-rooms',
+            'rooms-view',
+        ]);
+    }
+
+    private function allowReservationRead(): void
+    {
+        $this->authorizePermissions(['reservation-view', 'reservation']);
+    }
+
+    private function allowReservationDetail(): void
+    {
+        $this->authorizePermissions(['reservation-view', 'reservation']);
+    }
+
+    /** Guest lookup while creating a booking (no view permission required). */
+    private function allowReservationGuestSearch(): void
+    {
+        $this->authorizePermissions([
+            'reservation-view',
+            'reservation-create',
+            'reservation-create-group',
+            'reservation-edit',
+        ]);
+    }
+
+    /** Single-room (non-group) POST /bookings. */
+    private function allowReservationCreateSingle(): void
+    {
+        $this->authorizePermissions(['reservation-create']);
+    }
+
+    /** Multi-room or group-name POST /bookings, or POST /booking-groups. */
+    private function allowReservationCreateGroup(): void
+    {
+        $this->authorizePermissions(['reservation-create-group']);
+    }
+
+    private function allowReservationEdit(): void
+    {
+        $this->authorizePermissions(['reservation-edit']);
+    }
+
+    private function allowReservationDelete(): void
+    {
+        $this->authorizePermissions(['reservation-delete']);
+    }
+
+    private function allowReservationBillingExport(): void
+    {
+        $this->authorizePermissions(['reservation-view', 'reservation-edit']);
+    }
+
+    private function allowAvailableRoomsLookup(): void
+    {
+        $this->authorizePermissions(['reservation-create', 'reservation-create-group', 'reservation-edit', 'reservation', 'view-rooms']);
     }
 
     /**
@@ -39,7 +107,7 @@ class BookingController extends Controller
         $byPart = $userName !== '' ? " by {$userName}" : '';
         $onPart = " on {$when}";
 
-        $sanitize = static fn (?string $s): string => trim(str_replace(["\n", "\r", ']'], [' ', ' ', ''], (string) $s));
+        $sanitize = static fn(?string $s): string => trim(str_replace(["\n", "\r", ']'], [' ', ' ', ''], (string) $s));
 
         $lines = [];
 
@@ -51,19 +119,22 @@ class BookingController extends Controller
             $old = $sanitize((string) ($booking->{$field} ?? ''));
             $new = $sanitize((string) $validated[$field]);
             if ($old !== $new) {
-                $guestBits[] = "{$label}: ".($old !== '' ? $old : '—').' → '.($new !== '' ? $new : '—');
+                $guestBits[] = "{$label}: " . ($old !== '' ? $old : '—') . ' → ' . ($new !== '' ? $new : '—');
             }
         }
+
         foreach (['adults_count' => 'Adults', 'children_count' => 'Children', 'infants_count' => 'Infants', 'extra_beds_count' => 'Extra beds'] as $field => $label) {
             if (! array_key_exists($field, $validated)) {
                 continue;
             }
+
             $old = (int) ($booking->{$field} ?? 0);
             $new = (int) $validated[$field];
             if ($old !== $new) {
                 $guestBits[] = "{$label}: {$old} → {$new}";
             }
         }
+
         if (array_key_exists('child_ages', $validated)) {
             $oldJson = json_encode($booking->child_ages ?? []);
             $newJson = json_encode($validated['child_ages'] ?? []);
@@ -71,6 +142,7 @@ class BookingController extends Controller
                 $guestBits[] = 'Child ages updated';
             }
         }
+
         if (array_key_exists('booking_unit', $validated)) {
             $old = (string) ($booking->booking_unit ?? 'day');
             $new = (string) $validated['booking_unit'];
@@ -78,8 +150,9 @@ class BookingController extends Controller
                 $guestBits[] = "Booking unit: {$old} → {$new}";
             }
         }
+
         if ($guestBits !== []) {
-            $lines[] = '[Guest / stay: '.implode('; ', $guestBits).$byPart.$onPart.']';
+            $lines[] = '[Guest / stay: ' . implode('; ', $guestBits) . $byPart . $onPart . ']';
         }
 
         if (array_key_exists('rate_plan_id', $validated)) {
@@ -87,8 +160,8 @@ class BookingController extends Controller
             $nv = $validated['rate_plan_id'] ?? null;
             $newId = $nv !== null && $nv !== '' ? (int) $nv : null;
             if ($oldId !== $newId) {
-                $oldName = $oldId ? (RatePlan::find($oldId)?->name ?? "#{$oldId}") : '—';
-                $newName = $newId ? (RatePlan::find($newId)?->name ?? "#{$newId}") : '—';
+                $oldName = $oldId ? (RatePlan::find($oldId, ['name'])?->name ?? "#{$oldId}") : '—';
+                $newName = $newId ? (RatePlan::find($newId, ['name'])?->name ?? "#{$newId}") : '—';
                 $lines[] = "[Rate plan: {$oldName} → {$newName}{$byPart}{$onPart}]";
             }
         }
@@ -120,7 +193,7 @@ class BookingController extends Controller
                     '[Refund recorded: ₹%s%s%s]',
                     number_format($new, 2, '.', ''),
                     $method !== '' ? " ({$method})" : '',
-                    $byPart.$onPart
+                    $byPart . $onPart
                 );
             }
         }
@@ -132,6 +205,7 @@ class BookingController extends Controller
                 $lines[] = sprintf('[Total: ₹%s → ₹%s%s%s]', number_format($old, 2, '.', ''), number_format($new, 2, '.', ''), $byPart, $onPart);
             }
         }
+
         if (array_key_exists('payment_status', $validated)) {
             $old = (string) ($booking->payment_status ?? '');
             $new = (string) $validated['payment_status'];
@@ -139,13 +213,15 @@ class BookingController extends Controller
                 $lines[] = "[Payment status: {$old} → {$new}{$byPart}{$onPart}]";
             }
         }
+
         if (array_key_exists('payment_method', $validated)) {
             $old = (string) ($booking->payment_method ?? '');
             $new = (string) ($validated['payment_method'] ?? '');
             if ($old !== $new) {
-                $lines[] = '[Payment method: '.($old !== '' ? $old : '—').' → '.($new !== '' ? $new : '—').$byPart.$onPart.']';
+                $lines[] = '[Payment method: ' . ($old !== '' ? $old : '—') . ' → ' . ($new !== '' ? $new : '—') . $byPart . $onPart . ']';
             }
         }
+
         foreach (['adult_breakfast_count' => 'Adult breakfast', 'child_breakfast_count' => 'Child breakfast'] as $field => $label) {
             if (! array_key_exists($field, $validated)) {
                 continue;
@@ -169,8 +245,8 @@ class BookingController extends Controller
             $oldR = (int) $booking->room_id;
             $newR = (int) $validated['room_id'];
             if ($oldR !== $newR) {
-                $o = Room::find($oldR)?->room_number ?? (string) $oldR;
-                $n = Room::find($newR)?->room_number ?? (string) $newR;
+                $o = Room::find($oldR, ['room_number'])?->room_number ?? (string) $oldR;
+                $n = Room::find($newR, ['room_number'])?->room_number ?? (string) $newR;
                 $lines[] = "[Room: #{$o} → #{$n}{$byPart}{$onPart}]";
             }
         }
@@ -190,7 +266,7 @@ class BookingController extends Controller
             $new = (float) $validated['checkout_discount_amount'];
             if (abs($old - $new) > 0.004) {
                 $reason = $sanitize((string) ($validated['checkout_discount_reason'] ?? $booking->checkout_discount_reason ?? ''));
-                $reasonBit = $reason !== '' ? ' — '.$reason : '';
+                $reasonBit = $reason !== '' ? ' — ' . $reason : '';
                 $lines[] = sprintf(
                     '[Checkout discount: ₹%s → ₹%s%s%s%s]',
                     number_format($old, 2, '.', ''),
@@ -208,7 +284,7 @@ class BookingController extends Controller
 
         $block = implode("\n", $lines);
         $existing = $validated['notes'] ?? $booking->notes ?? '';
-        $validated['notes'] = $existing !== '' ? $existing."\n".$block : $block;
+        $validated['notes'] = $existing !== '' ? $existing . "\n" . $block : $block;
     }
 
     private function dateEndExclusiveFromDateTime(Carbon $dt): string
@@ -278,6 +354,7 @@ class BookingController extends Controller
 
     /**
      * Room + tax (recomputed or stored) + folio extras, before checkout discount.
+     * Uses {@see BookingInvoiceRoomStay::summarizeForInvoice} so totals match the reservation invoice PDF and room chart.
      */
     private function bookingGrossBeforeCheckoutDiscount(Booking $booking): float
     {
@@ -287,32 +364,7 @@ class BookingController extends Controller
             return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
         }
 
-        $roomType = $booking->room?->roomType;
-        $roomType?->loadMissing('seasons');
-        $plan = $roomType?->ratePlans?->firstWhere('id', $booking->rate_plan_id);
-        if (! $plan) {
-            return (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
-        }
-
-        $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
-        $checkOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
-
-        $basePerNight = (float) ($plan->base_price ?? 0);
-        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $extraBedCost = (float) ($roomType?->extra_bed_cost ?? 0);
-        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
-            $basePerNight,
-            $extraBedCost,
-            $extraBeds,
-            $checkInAt->copy()->startOfDay(),
-            $checkOutAt->copy()->startOfDay(),
-            $roomType->seasons ?? []
-        );
-        $taxRate = (float) ($roomType?->tax?->rate ?? 0);
-
-        $grand = round($beforeTax * (1 + ($taxRate / 100)), 2);
-
-        return $grand + (float) ($booking->extra_charges ?? 0);
+        return BookingInvoiceRoomStay::summarizeForInvoice($booking)['gross_before_checkout_discount'];
     }
 
     /** Payable total after checkout (commercial) discount. */
@@ -326,8 +378,9 @@ class BookingController extends Controller
 
     public function index(Request $request)
     {
-        $this->checkPermission('view-rooms');
-        return Booking::with(['room.roomType', 'creator', 'bookingGroup'])
+        $this->allowReservationRead();
+
+        return Booking::with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup'])
             ->when($request->booking_group_id, function ($q) use ($request) {
                 $q->where('booking_group_id', $request->booking_group_id);
             })
@@ -337,8 +390,10 @@ class BookingController extends Controller
 
     public function guestSearch(Request $request)
     {
+        $this->allowReservationGuestSearch();
+
         $phone = $request->query('phone');
-        if (!$phone || strlen($phone) < 4) {
+        if (! $phone || strlen($phone) < 4) {
             return response()->json(['message' => 'Provide at least 4 digits to search.'], 422);
         }
 
@@ -347,7 +402,7 @@ class BookingController extends Controller
             ->orderByDesc('created_at')
             ->first();
 
-        if (!$booking instanceof Booking) {
+        if (! $booking instanceof Booking) {
             return response()->json(['message' => 'No guest found with this phone number.'], 404);
         }
 
@@ -365,7 +420,7 @@ class BookingController extends Controller
 
     public function chart(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationChartRead();
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -374,15 +429,26 @@ class BookingController extends Controller
         $rangeEndAt = $end->copy()->addDay()->startOfDay();
 
         $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons', 'statusBlocks' => function ($q) use ($start, $end) {
-            $q->where('is_active', true)
-                ->where('start_date', '<', $end->toDateString())
-                ->where('end_date', '>', $start->toDateString());
+            // Active HK workflow blocks + closed checkout-inspection records (inactive but with snapshot)
+            // so Room Chart / drawer still show "inspected" and inspection details after apply/clear.
+            $q->where('start_date', '<', $end->toDateString())
+                ->where('end_date', '>', $start->toDateString())
+                ->where(function ($w) {
+                    $w->where('is_active', true)
+                        ->orWhere(function ($w2) {
+                            $w2->where('status', 'inspected')
+                                ->whereNotNull('inspection_snapshot');
+                        });
+                });
         }, 'segments' => function ($q) use ($rangeStartAt, $rangeEndAt) {
+            // Include checked_out segments so the chart can tell departure day (dirty) vs completed inspection.
             $q->where('check_in_at', '<', $rangeEndAt)
                 ->where('check_out_at', '>', $rangeStartAt)
                 ->whereNotIn('status', ['cancelled'])
                 ->with(['booking', 'ratePlan']);
         }])->get();
+
+        $this->enrichCheckoutInspectionInspectorNamesOnRooms($rooms);
 
         return response()->json([
             'rooms' => $rooms,
@@ -391,9 +457,47 @@ class BookingController extends Controller
         ]);
     }
 
+    /**
+     * Room chart snapshots may only store inspector_user_id; attach inspector_name for display.
+     *
+     * @param  \Illuminate\Support\Collection<int, \App\Models\Room>|\Illuminate\Database\Eloquent\Collection<int, \App\Models\Room>  $rooms
+     */
+    private function enrichCheckoutInspectionInspectorNamesOnRooms($rooms): void
+    {
+        $userIds = [];
+        foreach ($rooms as $room) {
+            foreach ($room->statusBlocks ?? [] as $block) {
+                $snap = $block->inspection_snapshot;
+                if (! is_array($snap)) {
+                    continue;
+                }
+                $uid = (int) ($snap['inspector_user_id'] ?? 0);
+                if ($uid > 0 && trim((string) ($snap['inspector_name'] ?? '')) === '') {
+                    $userIds[$uid] = true;
+                }
+            }
+        }
+        if ($userIds === []) {
+            return;
+        }
+
+        foreach ($rooms as $room) {
+            foreach ($room->statusBlocks ?? [] as $block) {
+                $snap = $block->inspection_snapshot;
+                if (! is_array($snap)) {
+                    continue;
+                }
+                $enriched = CheckoutInspectionInspector::enrichSnapshot($snap);
+                if ($enriched !== null) {
+                    $block->setAttribute('inspection_snapshot', $enriched);
+                }
+            }
+        }
+    }
+
     public function summary(Request $request)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationChartRead();
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
         $dayStartAt = $date->copy()->startOfDay();
@@ -419,8 +523,8 @@ class BookingController extends Controller
             'dirty' => 0,
             'cleaning' => 0,
             'available' => 0,
-            'checkins_today' => Booking::whereDate('check_in', $today)->whereIn('status', ['confirmed', 'checked_in'])->count(),
-            'checkouts_today' => Booking::whereDate('check_out', $today)->whereIn('status', ['checked_in', 'checked_out'])->count(),
+            'checkins_today' => Booking::whereDate('check_in', '=', $today, 'and')->whereIn('status', ['confirmed', 'checked_in'])->count(),
+            'checkouts_today' => Booking::whereDate('check_out', '=', $today, 'and')->whereIn('status', ['checked_in', 'checked_out'])->count(),
         ];
 
         foreach ($rooms as $room) {
@@ -457,9 +561,79 @@ class BookingController extends Controller
         return response()->json($counts);
     }
 
+    /**
+     * Reception: request a pre-checkout inspection (moves room to pending_inspection).
+     * This is intentionally independent from booking checkout; billing remains open until checkout is confirmed.
+     */
+    public function requestInspection(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        if ($booking->status !== 'checked_in') {
+            return response()->json([
+                'message' => 'Inspection can only be requested for a checked-in booking.',
+            ], 422);
+        }
+
+        $roomId = (int) $booking->room_id;
+        if ($roomId <= 0) {
+            return response()->json(['message' => 'Booking has no room assigned.'], 422);
+        }
+
+        // Span the whole remaining stay on the room chart (same overlap rule as `cellInfo`):
+        // active when `dayStart >= start_date && dayStart < end_date`.
+        $checkInAt = $booking->check_in_at
+            ? Carbon::parse($booking->check_in_at)
+            : Carbon::parse($booking->check_in)->startOfDay();
+        $checkOutAt = $booking->check_out_at
+            ? Carbon::parse($booking->check_out_at)
+            : Carbon::parse($booking->check_out)->startOfDay();
+
+        $startDate = $checkInAt->copy()->startOfDay()->toDateString();
+        $endExclusive = $this->dateEndExclusiveFromDateTime($checkOutAt);
+
+        // Ensure this room shows as pending inspection (override chart visuals).
+        // Deactivate any overlapping housekeeping blocks so there is a single, deterministic status block.
+        RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', ['dirty', 'cleaning', 'inspected', 'pending_inspection'], 'and', false)
+            ->where('start_date', '<', $endExclusive)
+            ->where('end_date', '>', $startDate)
+            ->update(['is_active' => false]);
+
+        $block = RoomStatusBlock::create([
+            'room_id' => $roomId,
+            'status' => 'pending_inspection',
+            'start_date' => $startDate,
+            'end_date' => $endExclusive,
+            'note' => 'Reception: requested checkout inspection',
+            'is_active' => true,
+            'created_by' => Auth::id(),
+        ]);
+
+        Room::where('id', '=', $roomId, 'and')->update(['status' => 'pending_inspection']);
+
+        HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'request_inspection');
+
+        return response()->json([
+            'message' => 'Inspection requested.',
+            'block' => $block->fresh()->load('room.roomType'),
+        ]);
+    }
+
     public function store(Request $request)
     {
-        $this->checkPermission('reservation');
+        $roomIdsRaw = $request->input('room_ids');
+        $roomIdsGate = is_array($roomIdsRaw) && count($roomIdsRaw) > 0
+            ? array_values(array_filter(array_map('intval', $roomIdsRaw), static fn(int $id): bool => $id > 0))
+            : ($request->filled('room_id') ? [(int) $request->input('room_id')] : []);
+        $isGroupBooking = count($roomIdsGate) > 1 || $request->filled('group_name');
+        if ($isGroupBooking) {
+            $this->allowReservationCreateGroup();
+        } else {
+            $this->allowReservationCreateSingle();
+        }
+
         $validated = $request->validate([
             'room_ids' => 'nullable|array',
             'room_ids.*' => 'exists:rooms,id',
@@ -539,7 +713,7 @@ class BookingController extends Controller
 
         // 1. Availability Check (Overlap) - Using BookingSegment (datetime-safe)
         foreach ($roomIds as $roomId) {
-            $overlap = BookingSegment::where('room_id', $roomId)
+            $overlap = BookingSegment::where('room_id', '=', $roomId, 'and')
                 // Checked-out/completed segments must not block fresh reservations.
                 ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
                 ->where(function ($query) use ($checkInAt, $checkOutAt) {
@@ -552,10 +726,10 @@ class BookingController extends Controller
                 })->exists();
 
             if ($overlap) {
-                $room = Room::find($roomId);
+                $room = Room::find($roomId, ['room_number']);
 
                 return response()->json([
-                    'message' => "Room #{$room->room_number} is already reserved for the selected dates.",
+                    'message' => 'Room #' . ($room?->room_number ?? (string) $roomId) . ' is already reserved for the selected dates.',
                 ], 422);
             }
 
@@ -566,18 +740,18 @@ class BookingController extends Controller
             $startDate = $startAt->toDateString();
             $endDateExclusive = $this->dateEndExclusiveFromDateTime($endAt);
 
-            $blocking = RoomStatusBlock::where('room_id', $roomId)
+            $blocking = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
                 ->where('is_active', true)
                 ->where('start_date', '<', $endDateExclusive)
                 ->where('end_date', '>', $startDate)
                 ->get();
 
-            if ($blocking->contains(fn ($b) => $b->status === 'maintenance')) {
+            if ($blocking->contains(fn($b) => $b->status === 'maintenance')) {
                 return response()->json(['message' => "Room #{$room->room_number} is under maintenance."], 422);
             }
 
             // Dirty/Cleaning blocks should only prevent immediate check-in.
-            if ($status === 'checked_in' && $blocking->contains(fn ($b) => in_array($b->status, ['dirty', 'cleaning'], true))) {
+            if ($status === 'checked_in' && $blocking->contains(fn($b) => in_array($b->status, ['dirty', 'cleaning'], true))) {
                 return response()->json(['message' => "Room #{$room->room_number} requires cleaning before check-in."], 422);
             }
         }
@@ -587,8 +761,8 @@ class BookingController extends Controller
         $bookingGroupId = null;
         if ($isGroup) {
             $group = BookingGroup::create([
-                'name' => $request->input('group_name') ?: ('Group - '.$validated['first_name'].' '.$validated['last_name']),
-                'contact_person' => $validated['first_name'].' '.$validated['last_name'],
+                'name' => $request->input('group_name') ?: ('Group - ' . $validated['first_name'] . ' ' . $validated['last_name']),
+                'contact_person' => $validated['first_name'] . ' ' . $validated['last_name'],
                 'phone' => $validated['phone'],
                 'email' => $validated['email'],
                 'status' => 'confirmed',
@@ -610,9 +784,9 @@ class BookingController extends Controller
                     // Base64 from Camera or Upload
                     $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
                     $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
-                    $fileName = 'guest_id_'.time().'_'.$index.'.'.$format;
-                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/'.$fileName, $data);
-                    $imagePaths[] = 'identities/'.$fileName;
+                    $fileName = 'guest_id_' . time() . '_' . $index . '.' . $format;
+                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
+                    $imagePaths[] = 'identities/' . $fileName;
                 } elseif ($request->hasFile("guest_identities.{$index}")) {
                     // Direct File Upload (if sent as multipart/form-data)
                     $imagePaths[] = $request->file("guest_identities.{$index}")->store('identities', 'public');
@@ -639,7 +813,7 @@ class BookingController extends Controller
             $bookingData['child_breakfast_count'] = $validated['child_breakfast_count'] ?? 0;
             $bookingData['rate_plan_id'] = $validated['rate_plan_id'] ?? null;
             $bookingData['booking_unit'] = $bookingUnit;
-            
+
             // Audit Fix: Only apply group deposit/discount to the FIRST booking in the loop
             if ($isGroup && $index > 0) {
                 $bookingData['deposit_amount'] = 0;
@@ -712,7 +886,10 @@ class BookingController extends Controller
                             $room->roomType?->seasons ?? []
                         );
                         $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
-                        $totalPrice = round($beforeTax * (1 + ($taxRate / 100)), 2);
+                        $roomRatesIncludeGst = filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
+                        $totalPrice = $roomRatesIncludeGst
+                            ? round($beforeTax, 2)
+                            : round($beforeTax * (1 + ($taxRate / 100)), 2);
                     }
                 }
             }
@@ -735,7 +912,7 @@ class BookingController extends Controller
             $coStr = $finalCheckOutAt ? $finalCheckOutAt->toDateString() : $ciStr;
             $creationAudit = "[Reservation created: Room #{$roomNum} · {$roomTypeLabel} · {$ciStr} → {$coStr}{$byCreated} on {$createdAt}]";
             $notesIncoming = trim((string) ($bookingData['notes'] ?? ''));
-            $bookingData['notes'] = $notesIncoming !== '' ? $creationAudit."\n".$notesIncoming : $creationAudit;
+            $bookingData['notes'] = $notesIncoming !== '' ? $creationAudit . "\n" . $notesIncoming : $creationAudit;
 
             $this->assignEarlyCheckinTimeFromEstimatedArrival($bookingData, $bookingUnit);
 
@@ -805,7 +982,7 @@ class BookingController extends Controller
      */
     public function storeGroup(Request $request)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationCreateGroup();
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
@@ -828,13 +1005,14 @@ class BookingController extends Controller
 
     public function show(Booking $booking)
     {
-        $this->checkPermission('reservation');
-        return $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
+        $this->allowReservationDetail();
+
+        return $booking->load(['room.roomType.tax', 'ratePlan', 'creator', 'bookingGroup']);
     }
 
     public function update(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $validated = $request->validate([
             'room_id' => 'exists:rooms,id',
             'first_name' => 'string|max:255',
@@ -873,7 +1051,25 @@ class BookingController extends Controller
             'booking_group_id' => 'nullable|exists:booking_groups,id',
             'checkout_discount_amount' => 'nullable|numeric|min:0',
             'checkout_discount_reason' => 'nullable|string|max:500',
+            /** room = settle/check out this booking only; group = pooled group balance (default). */
+            'checkout_scope' => 'nullable|in:room,group',
+            'force_room_change' => 'nullable|boolean',
         ]);
+
+        if (
+            array_key_exists('room_id', $validated)
+            && in_array($booking->status, ['confirmed', 'checked_in'], true)
+            && (int) $validated['room_id'] !== (int) $booking->room_id
+            && ! $request->boolean('force_room_change')
+        ) {
+            return response()->json([
+                'message' => 'Use Room Transfer in the reservation panel to move this guest (reason and rate options are required).',
+            ], 422);
+        }
+        unset($validated['force_room_change']);
+
+        $checkoutScope = $validated['checkout_scope'] ?? 'group';
+        unset($validated['checkout_scope']);
 
         if ($request->has('checkout_discount_amount') || $request->has('checkout_discount_reason')) {
             if ($booking->status !== 'checked_in') {
@@ -890,7 +1086,7 @@ class BookingController extends Controller
             $gross = $this->bookingGrossBeforeCheckoutDiscount($booking);
             if ($newAmt > $gross + 0.009) {
                 return response()->json([
-                    'message' => 'Discount cannot exceed the bill before discount (₹'.number_format($gross, 2, '.', '').').',
+                    'message' => 'Discount cannot exceed the bill before discount (₹' . number_format($gross, 2, '.', '') . ').',
                 ], 422);
             }
             if ($newAmt > 0.004 && strlen($reason) < 3) {
@@ -927,16 +1123,22 @@ class BookingController extends Controller
             $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
             $isPaid = ($currentPaymentStatus === 'paid');
 
-            // Group-aware checkout rule:
-            // if this booking belongs to a group, allow checkout when the group is fully paid
-            // even if this single room booking still has pending/partial status.
+            // Group checkout: pooled payment (group scope) or per-room settlement (room scope).
             if (! $isPaid && ! empty($booking->booking_group_id)) {
-                $groupBookings = Booking::where('booking_group_id', $booking->booking_group_id)
-                    ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
-                    ->get();
-                $groupGrand = (float) $groupBookings->sum(fn ($b) => $this->effectiveBookingGrand($b));
-                $groupPaid = (float) $groupBookings->sum(fn ($b) => (float) ($b->deposit_amount ?? 0));
-                $isPaid = $groupPaid + 0.009 >= $groupGrand;
+                if ($checkoutScope === 'room') {
+                    $paid = (float) ($booking->deposit_amount ?? 0);
+                    $grand = $this->effectiveBookingGrand($booking);
+                    $storedTotal = (float) ($booking->total_price ?? 0);
+                    $bill = max($grand, $storedTotal);
+                    $isPaid = $paid + 0.009 >= $bill;
+                } else {
+                    $groupBookings = Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')
+                        ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
+                        ->get();
+                    $groupGrand = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
+                    $groupPaid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
+                    $isPaid = $groupPaid + 0.009 >= $groupGrand;
+                }
             }
 
             // Single booking: allow checkout when advance/deposit covers the bill, even if
@@ -958,42 +1160,49 @@ class BookingController extends Controller
             $currentCheckOut = $validated['check_out'] ?? $booking->check_out;
             if ($currentCheckOut > $today) {
                 $validated['check_out'] = $today;
+                // Keep segment/chart/HK on the same departure calendar day (date-only checkout).
+                $validated['check_out_at'] = Carbon::parse($today)->startOfDay()->addDay();
 
                 $user = Auth::user();
                 $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-                $auditMsg = "[Early CO: on {$today}".($userName ? " by {$userName}" : '').']';
+                $auditMsg = "[Early CO: on {$today}" . ($userName ? " by {$userName}" : '') . ']';
                 $existingNotes = $validated['notes'] ?? $booking->notes;
-                $validated['notes'] = $existingNotes ? $existingNotes."\n".$auditMsg : $auditMsg;
+                $validated['notes'] = $existingNotes ? $existingNotes . "\n" . $auditMsg : $auditMsg;
             }
         }
 
-        // Handle Identity Images (Update/Append)
+        // Handle Identity Images (Update/Append): incoming array is indexed by guest slot; null clears.
         if ($request->has('guest_identities')) {
-            $existingIdentities = $booking->guest_identities ?: [];
-            $incomingImages = $request->input('guest_identities') ?: [];
+            $incomingImages = $request->input('guest_identities');
+            if (! is_array($incomingImages)) {
+                $incomingImages = [];
+            }
             $newPaths = [];
-
             foreach ($incomingImages as $index => $imageData) {
-                if (! $imageData) {
+                $i = (int) $index;
+                if ($imageData === null || $imageData === '') {
+                    $newPaths[$i] = null;
+
                     continue;
                 }
 
-                if (str_starts_with($imageData, 'data:image')) {
+                if (str_starts_with((string) $imageData, 'data:image')) {
                     // New Base64 from Camera or Upload
-                    $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
-                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
-                    $fileName = 'guest_id_'.time().'_'.$index.'.'.$format;
-                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/'.$fileName, $data);
-                    $newPaths[] = 'identities/'.$fileName;
-                } elseif ($request->hasFile("guest_identities.{$index}")) {
+                    $format = str_contains((string) $imageData, 'png') ? 'png' : 'jpg';
+                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', (string) $imageData));
+                    $fileName = 'guest_id_' . time() . '_' . $i . '.' . $format;
+                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
+                    $newPaths[$i] = 'identities/' . $fileName;
+                } elseif ($request->hasFile("guest_identities.{$i}")) {
                     // New Direct File Upload
-                    $newPaths[] = $request->file("guest_identities.{$index}")->store('identities', 'public');
+                    $newPaths[$i] = $request->file("guest_identities.{$i}")->store('identities', 'public');
                 } else {
-                    // Retain existing image path
-                    $newPaths[] = $imageData;
+                    // Retain existing image path (string storage key)
+                    $newPaths[$i] = $imageData;
                 }
             }
-            $validated['guest_identities'] = $newPaths;
+            ksort($newPaths);
+            $validated['guest_identities'] = array_values($newPaths);
         }
 
         // Keep legacy date columns aligned whenever datetime fields are sent.
@@ -1007,6 +1216,25 @@ class BookingController extends Controller
         $this->appendAuditNotesForBookingUpdate($booking, $validated, $request);
 
         $booking->update($validated);
+
+        // Room chart renders occupancy from `booking_segments` first (`segment.adults_count ?? booking.adults_count`).
+        // Keep segments aligned whenever guest mix or segment-level pricing fields change on the booking.
+        if (
+            $request->has('adults_count')
+            || $request->has('children_count')
+            || $request->has('infants_count')
+            || $request->has('extra_beds_count')
+            || $request->has('rate_plan_id')
+            || $request->has('total_price')
+        ) {
+            $booking->segments()->update([
+                'adults_count' => (int) ($booking->adults_count ?? 1),
+                'children_count' => (int) ($booking->children_count ?? 0),
+                'extra_beds_count' => (int) ($booking->extra_beds_count ?? 0),
+                'rate_plan_id' => $booking->rate_plan_id,
+                'total_price' => $booking->total_price,
+            ]);
+        }
 
         // Sync Stay Segments
         if (isset($validated['room_id']) || isset($validated['check_in']) || isset($validated['check_out']) || isset($validated['status'])) {
@@ -1061,7 +1289,7 @@ class BookingController extends Controller
             // Collect every distinct room touched by this booking's segments
             $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
 
-            Room::whereIn('id', $allRoomIds)->update(['status' => $roomStatus]);
+            Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => $roomStatus]);
 
             // NEW FLOW: date-based housekeeping after checkout
             // When a booking is checked out, mark the affected rooms as DIRTY for that checkout date
@@ -1080,15 +1308,36 @@ class BookingController extends Controller
                     ]);
                 }
 
+                $checkoutNotifyRoomIds = [];
                 foreach ($segmentsForHk as $segment) {
                     $rid = (int) $segment->room_id;
-                    $checkoutDay = Carbon::parse(
-                        $segment->check_out_at ?? $segment->check_out ?? $booking->check_out_at ?? $booking->check_out
-                    )->startOfDay();
+                    $checkoutNotifyRoomIds[] = $rid;
+                    $checkoutDate = (string) ($segment->check_out ?? $booking->check_out ?? $today);
+                    $checkoutDay = Carbon::parse($checkoutDate)->startOfDay();
                     $co = $checkoutDay->toDateString();
                     $coNext = $checkoutDay->copy()->addDay()->toDateString();
 
-                    $hasBlock = RoomStatusBlock::where('room_id', $rid)
+                    // Close housekeeping handoff on departure: an inspected/pending_inspection block may span
+                    // the whole stay — trimming checkout day still leaves prior nights green on the chart with
+                    // no guest segment. Deactivate handoff blocks for this room so past stay columns clear;
+                    // then the dirty block marks departure day for housekeeping.
+                    RoomStatusBlock::query()
+                        ->where('room_id', '=', $rid, 'and')
+                        ->where('is_active', '=', true, 'and')
+                        ->whereIn('status', ['inspected', 'pending_inspection'], 'and', false)
+                        ->update(['is_active' => false]);
+
+                    // Close any dirty/cleaning block on the checkout night so the new departure dirty task
+                    // is not suppressed by an older workflow row (otherwise Dirty Rooms stays empty).
+                    RoomStatusBlock::query()
+                        ->where('room_id', '=', $rid, 'and')
+                        ->where('is_active', '=', true, 'and')
+                        ->whereIn('status', ['cleaning', 'dirty'], 'and', false)
+                        ->where('start_date', '<', $coNext)
+                        ->where('end_date', '>', $co)
+                        ->update(['is_active' => false]);
+
+                    $hasBlock = RoomStatusBlock::where('room_id', '=', $rid, 'and')
                         ->where('is_active', true)
                         ->where('start_date', '<', $coNext)
                         ->where('end_date', '>', $co)
@@ -1106,6 +1355,7 @@ class BookingController extends Controller
                         ]);
                     }
                 }
+                HousekeepingStateUpdated::dispatchIfEnabled($checkoutNotifyRoomIds, 'booking_checkout');
             }
         }
 
@@ -1115,7 +1365,7 @@ class BookingController extends Controller
     // ── Early Check-In ────────────────────────────────────────────────────────
     public function earlyCheckin(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $request->validate([
             'time' => 'required|date_format:H:i',
         ]);
@@ -1127,10 +1377,10 @@ class BookingController extends Controller
         // Conflict: a prior booking for this room is still checked_in on the same day
         // AND its late_checkout_time would overlap with the requested early check-in time.
         // (A booking that is already checked_out is NOT a conflict.)
-        $conflict = Booking::where('room_id', $roomId)
+        $conflict = Booking::where('room_id', '=', $roomId, 'and')
             ->where('id', '!=', $booking->id)
             ->where('status', 'checked_in')           // Only block if guest is still in the room
-            ->whereDate('check_out', $checkInDay)
+            ->whereDate('check_out', '=', $checkInDay, 'and')
             ->where(function ($q) use ($time) {
                 // Blocked if: no explicit late_checkout (assume standard noon) OR late_checkout >= requested early CI
                 $q->whereNull('late_checkout_time')
@@ -1146,18 +1396,18 @@ class BookingController extends Controller
 
         $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Early CI: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
-        
+        $auditMsg = "[Early CI: {$time}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+
         $rt = $booking->room?->roomType;
         $standardTime = Setting::get('standard_check_in_time', '14:00');
         $fee = 0;
-        $units = "";
+        $units = '';
 
         if ($rt && $time < $standardTime) {
             $policyTime = Carbon::createFromFormat('H:i', $standardTime);
             $actualTime = Carbon::createFromFormat('H:i', $time);
             $totalGapMins = $policyTime->diffInMinutes($actualTime);
-            
+
             $bufferMins = (int) ($rt->early_check_in_buffer_minutes ?? 0);
             $billableMins = max(0, $totalGapMins - $bufferMins);
 
@@ -1178,8 +1428,8 @@ class BookingController extends Controller
         if ($fee > 0) {
             $auditMsg .= " Fee: ₹{$fee} {$units} applied.";
         }
-        
-        $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
+
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
             'early_checkin_time' => $time,
@@ -1193,7 +1443,7 @@ class BookingController extends Controller
     // ── Late Checkout ─────────────────────────────────────────────────────────
     public function lateCheckout(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationEdit();
         $request->validate([
             'time' => 'required|date_format:H:i',
         ]);
@@ -1204,10 +1454,10 @@ class BookingController extends Controller
 
         // Conflict: another booking starts on this room the same checkout day
         // and its early_checkin_time (or standard noon) is <= the requested late time
-        $conflict = Booking::where('room_id', $roomId)
+        $conflict = Booking::where('room_id', '=', $roomId, 'and')
             ->where('id', '!=', $booking->id)
             ->where('status', '!=', 'cancelled')
-            ->whereDate('check_in', $checkOutDay)
+            ->whereDate('check_in', '=', $checkOutDay, 'and')
             ->where(function ($q) use ($time) {
                 $q->whereNull('early_checkin_time')
                     ->orWhereTime('early_checkin_time', '<=', $time);
@@ -1222,44 +1472,97 @@ class BookingController extends Controller
 
         $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Late CO: {$time}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
 
         $rt = $booking->room?->roomType;
-        $standardTime = Setting::get('standard_check_out_time', '11:00');
-        $fee = 0;
-        $units = "";
+        $standardTimeRaw = (string) Setting::get('standard_check_out_time', '11:00');
+        $normalizeClockTime = static function (?string $raw, string $fallback): string {
+            $s = trim((string) $raw);
+            if ($s === '') {
+                return $fallback;
+            }
+            // canonical HH:mm
+            if (preg_match('/^\d{1,2}:\d{2}$/', $s)) {
+                [$h, $m] = array_pad(explode(':', $s, 3), 2, '00');
 
-        if ($rt && $time > $standardTime) {
+                return str_pad((string) ((int) $h), 2, '0', STR_PAD_LEFT) . ':' . str_pad((string) ((int) $m), 2, '0', STR_PAD_LEFT);
+            }
+            // tolerate formats like "02:00 PM", "2:00PM", etc.
+            try {
+                return Carbon::parse($s)->format('H:i');
+            } catch (\Throwable) {
+                return $fallback;
+            }
+        };
+        $standardTime = $normalizeClockTime($standardTimeRaw, '11:00');
+        $when = now()->format('Y-m-d H:i:s');
+
+        $computeLateFee = static function ($rt, string $standardTime, ?string $t): float {
+            if (! $rt || ! $t) {
+                return 0.0;
+            }
+            $t = trim((string) $t);
+            if ($t === '') {
+                return 0.0;
+            }
+            // Ensure HH:mm for safe comparisons + parsing (tolerate legacy AM/PM)
+            if (! preg_match('/^\d{2}:\d{2}$/', $t)) {
+                try {
+                    $t = Carbon::parse($t)->format('H:i');
+                } catch (\Throwable) {
+                    return 0.0;
+                }
+            }
+            if ($t <= $standardTime) {
+                return 0.0;
+            }
+
             $policyTime = Carbon::createFromFormat('H:i', $standardTime);
-            $actualTime = Carbon::createFromFormat('H:i', $time);
+            $actualTime = Carbon::createFromFormat('H:i', $t);
             $totalGapMins = $actualTime->diffInMinutes($policyTime);
 
             $bufferMins = (int) ($rt->late_check_out_buffer_minutes ?? 0);
             $billableMins = max(0, $totalGapMins - $bufferMins);
-
-            if ($billableMins > 0) {
-                if ($rt->late_check_out_type === 'per_hour') {
-                    $billableHours = ceil($billableMins / 60);
-                    $fee = $billableHours * (float) $rt->late_check_out_fee;
-                    $units = "({$billableHours}h)";
-                } elseif ($rt->late_check_out_type === 'per_minute') {
-                    $fee = $billableMins * (float) $rt->late_check_out_fee;
-                    $units = "({$billableMins}m)";
-                } else { // flat_fee
-                    $fee = (float) $rt->late_check_out_fee;
-                }
+            if ($billableMins <= 0) {
+                return 0.0;
             }
+
+            if ($rt->late_check_out_type === 'per_hour') {
+                $billableHours = ceil($billableMins / 60);
+
+                return $billableHours * (float) $rt->late_check_out_fee;
+            }
+            if ($rt->late_check_out_type === 'per_minute') {
+                return $billableMins * (float) $rt->late_check_out_fee;
+            }
+
+            return (float) $rt->late_check_out_fee;
+        };
+
+        $prevTime = $booking->late_checkout_time ? (string) $booking->late_checkout_time : null;
+        $prevFee = $computeLateFee($rt, (string) $standardTime, $prevTime);
+        $newFee = $computeLateFee($rt, (string) $standardTime, (string) $time);
+        $delta = $newFee - $prevFee;
+
+        // Clear only when the requested time is at/before the property standard checkout time.
+        // Even if the room type policy yields ₹0 (buffer covers it), we still persist the late time
+        // so the UI can show the correct "departure time" and "applied" state.
+        $shouldClear = $time <= $standardTime;
+        $timeToSave = $shouldClear ? null : (string) $time;
+
+        $auditMsg = $shouldClear
+            ? "[Late CO cleared: {$time}" . ($userName ? " by {$userName}" : '') . " on {$when}]"
+            : "[Late CO: {$time}" . ($userName ? " by {$userName}" : '') . " on {$when}]";
+
+        $nextExtra = (float) ($booking->extra_charges ?? 0) + $delta;
+        if ($nextExtra < 0) {
+            $nextExtra = 0;
         }
 
-        if ($fee > 0) {
-            $auditMsg .= " Fee: ₹{$fee} {$units} applied.";
-        }
-
-        $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
-            'late_checkout_time' => $time,
-            'extra_charges' => (float) ($booking->extra_charges ?? 0) + $fee,
+            'late_checkout_time' => $timeToSave,
+            'extra_charges' => $nextExtra,
             'notes' => $notes,
         ]);
 
@@ -1269,6 +1572,8 @@ class BookingController extends Controller
     // ── Reservation Extension ─────────────────────────────────────────────────
     public function extendReservation(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         // IMPORTANT: for multi-segment (room-change) stays, extensions continue from the
         // LAST segment (latest check_out). Validate against that anchor — not only
         // bookings.check_out — or the API rejects valid dates while the UI shows the segment end.
@@ -1292,7 +1597,7 @@ class BookingController extends Controller
 
         $anchorCheckOut = $lastSegment->check_out;
         $request->validate([
-            'new_check_out' => 'required|date|after:'.$anchorCheckOut,
+            'new_check_out' => 'required|date|after:' . $anchorCheckOut,
         ]);
 
         $oldCheckOut = $lastSegment->check_out;
@@ -1320,7 +1625,7 @@ class BookingController extends Controller
         }
 
         // Block extension into dates where the room is on hold
-        $holdBlock = RoomStatusBlock::where('room_id', $roomId)
+        $holdBlock = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
             ->where('is_active', true)
             ->where('status', 'on_hold')
             ->where('start_date', '<', $newCheckOut)
@@ -1376,8 +1681,8 @@ class BookingController extends Controller
 
         $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
-        $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
+        $auditMsg = "[Extension: {$oldCheckOut} → {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
             'check_out' => $newCheckOut,
@@ -1399,6 +1704,8 @@ class BookingController extends Controller
     // ── Hourly Reservation Extension (supports +1h, +2h, etc.) ─────────────────
     public function extendHourlyReservation(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         $validated = $request->validate([
             'extend_minutes' => 'required|integer|min:1',
             'rate_plan_id' => 'nullable|exists:rate_plans,id',
@@ -1470,8 +1777,8 @@ class BookingController extends Controller
         $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
         $hoursLabel = round(((int) $validated['extend_minutes']) / 60, 2);
-        $auditMsg = "[Hourly Extension: +{$hoursLabel}h to ".$newCheckOutAt->format('Y-m-d H:i:s').($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
-        $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
+        $auditMsg = "[Hourly Extension: +{$hoursLabel}h to " . $newCheckOutAt->format('Y-m-d H:i:s') . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
             'rate_plan_id' => $planId,
@@ -1492,13 +1799,90 @@ class BookingController extends Controller
     }
 
     /**
+     * Preview hourly extension totals (same pricing as {@see extendHourlyReservation}) without persisting.
+     */
+    public function previewHourlyExtension(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        $validated = $request->validate([
+            'extend_minutes' => 'required|integer|min:1',
+            'rate_plan_id' => 'nullable|exists:rate_plans,id',
+        ]);
+
+        if (($booking->booking_unit ?? 'day') !== 'hour_package') {
+            return response()->json([
+                'message' => 'This preview is only for hourly package bookings.',
+            ], 422);
+        }
+
+        $checkInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
+        $currentCheckOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
+        $newCheckOutAt = $currentCheckOutAt->copy()->addMinutes((int) $validated['extend_minutes']);
+
+        $lastSegment = $booking->segments()->orderBy('check_out_at', 'desc')->first();
+        $roomId = (int) ($lastSegment?->room_id ?? $booking->room_id ?? 0);
+        if ($roomId <= 0) {
+            return response()->json(['message' => 'No room assigned for this booking.'], 422);
+        }
+
+        $hasConflict = false;
+        $conflictMessage = null;
+        $conflictSegment = BookingSegment::with(['booking.room.roomType'])
+            ->where('room_id', $roomId)
+            ->where('booking_id', '!=', $booking->id)
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+            ->where('check_in_at', '<', $newCheckOutAt)
+            ->where('check_out_at', '>', $currentCheckOutAt)
+            ->orderBy('check_in_at', 'asc')
+            ->first();
+
+        if ($conflictSegment?->booking) {
+            $hasConflict = true;
+            $conflictMessage = 'Room conflict for the extended window — move the overlapping reservation or shorten this stay.';
+        }
+
+        $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail($roomId);
+        $planId = (int) ($validated['rate_plan_id'] ?? $booking->rate_plan_id ?? 0);
+        if ($planId <= 0) {
+            return response()->json(['message' => 'rate_plan_id is required for hourly extension preview.'], 422);
+        }
+
+        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
+        $calcCurrent = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $currentCheckOutAt, $extraBeds);
+        if (! $calcCurrent['ok']) {
+            return response()->json(['message' => $calcCurrent['message']], 422);
+        }
+
+        $calcNew = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $newCheckOutAt, $extraBeds);
+        if (! $calcNew['ok']) {
+            return response()->json(['message' => $calcNew['message']], 422);
+        }
+
+        $currentTotal = (float) $calcCurrent['total'];
+        $newTotal = (float) $calcNew['total'];
+        $delta = round($newTotal - $currentTotal, 2);
+
+        return response()->json([
+            'current_total' => $currentTotal,
+            'new_total' => $newTotal,
+            'delta' => $delta,
+            'new_check_out_at' => $newCheckOutAt->toIso8601String(),
+            'has_conflict' => $hasConflict,
+            'conflict_message' => $conflictMessage,
+        ]);
+    }
+
+    /**
      * Handle Split Stay: Add a new segment to an existing booking.
      */
     public function splitStay(Request $request, Booking $booking)
     {
+        $this->allowReservationEdit();
+
         $validated = $request->validate([
             'new_room_id' => 'required|exists:rooms,id',
-            'new_check_out' => 'required|date|after:'.$booking->check_out,
+            'new_check_out' => 'required|date|after:' . $booking->check_out,
             'complimentary_upgrade' => 'nullable|boolean',
         ]);
 
@@ -1594,9 +1978,9 @@ class BookingController extends Controller
         $user = Auth::user();
         $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
         $auditMsg = $complimentaryUpgrade
-            ? "[Split Stay: Complimentary upgrade to Room #{$newRoom->room_number} ({$rt->name}) from {$oldCheckOut} to {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']'
-            : "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}".($userName ? " by {$userName}" : '').' on '.now()->format('Y-m-d H:i:s').']';
-        $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
+            ? "[Split Stay: Complimentary upgrade to Room #{$newRoom->room_number} ({$rt->name}) from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']'
+            : "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
             'check_out' => $newCheckOut,
@@ -1610,13 +1994,13 @@ class BookingController extends Controller
 
     public function reservationVoucher(Request $request, Booking $booking)
     {
+        $this->allowReservationBillingExport();
+
         $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']);
 
-        $guestName = trim(($booking->first_name ?? '').' '.($booking->last_name ?? ''));
+        $guestName = trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''));
         $guestName = $guestName !== '' ? $guestName : 'Guest';
-        $roomNo = $booking->room?->room_number ?? '-';
-        $roomType = $booking->room?->roomType?->name ?? '-';
-        $bookingType = ($booking->booking_unit ?? 'day') === 'hour_package' ? 'Hourly Package' : 'Day Stay';
+
         $ci = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : Carbon::parse($booking->check_in)->startOfDay();
         $co = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
         $createdAt = $booking->created_at ? Carbon::parse($booking->created_at) : now();
@@ -1624,213 +2008,94 @@ class BookingController extends Controller
         $grand = (float) ($booking->total_price ?? 0);
         $paid = (float) ($booking->deposit_amount ?? 0);
         $balance = max(0, $grand - $paid);
-        $currency = 'INR';
 
-        $rt = $booking->room?->roomType;
-        $taxRate = (float) ($rt?->tax?->rate ?? 0);
-        $divisor = 1 + ($taxRate > 0 ? $taxRate / 100 : 0);
-        $beforeTax = $divisor > 0 ? ($grand / $divisor) : $grand;
-        $gst = max(0, $grand - $beforeTax);
+        $roomNo = (string) ($booking->room?->room_number ?? '-');
+        $roomType = (string) ($booking->room?->roomType?->name ?? '-');
+        $roomLabel = $roomType . ' / ' . $roomNo;
 
-        $ratePlan = $rt?->ratePlans?->firstWhere('id', $booking->rate_plan_id);
-        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $extraBedCost = (float) ($rt?->extra_bed_cost ?? 0);
-        $baseRoomTotal = $beforeTax;
-        $extraHourTotal = 0.0;
+        $adults = (int) ($booking->adults_count ?? 1);
+        $children = (int) ($booking->children_count ?? 0);
+        $personsLabel = $adults . ' (A) / ' . $children . ' (C)';
+        $nights = max(1, (int) $ci->copy()->startOfDay()->diffInDays($co->copy()->startOfDay()));
 
-        if (($booking->booking_unit ?? 'day') === 'hour_package' && $ratePlan) {
-            $pkg = (float) ($ratePlan->package_price ?? $ratePlan->base_price ?? 0);
-            $baseRoomTotal = $pkg + ($extraBeds > 0 ? ($extraBeds * $extraBedCost) : 0);
-            $extraHourTotal = max(0, $beforeTax - $baseRoomTotal);
+        $contact = trim(((string) ($booking->phone ?? '')) . (($booking->email ?? null) ? ' · ' . (string) $booking->email : ''));
+        $contact = $contact !== '' ? $contact : '—';
+
+        $defaults = Setting::getReceiptDefaults();
+        $hotelName = Setting::get('invoice_company_name', 'Hotel');
+        if ($hotelName === 'Hotel' && ! empty($defaults['address'])) {
+            $first = explode("\n", (string) $defaults['address'])[0];
+            $hotelName = trim($first) !== '' ? trim($first) : 'Hotel';
         }
+        $hotelAddress = (string) Setting::get('invoice_address', (string) ($defaults['address'] ?? ''));
+        $hotelGstin = (string) Setting::get('invoice_gstin', '');
 
-        $title = "Reservation Voucher #{$booking->id}";
-        $voucherNights = (string) max(1, $ci->diffInDays($co));
-        $reservationNo = e((string) $booking->id);
-        $bookingDate = e($createdAt->format('d M Y'));
-        $checkInText = e($ci->format('d M Y, h:i A'));
-        $checkOutText = e($co->format('d M Y, h:i A'));
-        $guestNameEsc = e($guestName);
-        $roomTypeEsc = e((string) $roomType);
-        $hotelName = 'Grand Palace Hotel';
-        $hotelAddress = '123 Royal Avenue, Downtown, City - 560001';
-        $hotelPhone = '+91 98765 43210';
-        $hotelEmail = 'reservations@grandpalace.com';
-        $hotelWebsite = 'www.grandpalace.com';
-        $adultCount = (int) ($booking->adults_count ?? 1);
-        $childCount = (int) ($booking->children_count ?? 0);
-        $contact = trim(((string) ($booking->phone ?? '')).(($booking->email ?? null) ? ' · '.(string) $booking->email : ''));
-        $contact = $contact !== '' ? $contact : '-';
-        $roomCount = max(1, $booking->segments()->distinct('room_id')->count('room_id'));
-        $bedType = (string) ($rt?->bed_config ?? '-');
-        $paymentStatus = strtoupper((string) ($booking->payment_status ?? 'pending'));
-        $paymentMethod = strtoupper((string) ($booking->payment_method ?? 'N/A'));
-        $guestCountLabel = $childCount > 0 ? 'Adults / Children' : 'Adults';
-        $guestCountValue = $childCount > 0 ? ($adultCount.' / '.$childCount) : (string) $adultCount;
-        $paymentMethodRow = $paid > 0
-            ? "<div class='row'><span class='k'>Payment Method</span><span class='v'>".e($paymentMethod).'</span></div>'
-            : '';
-        $specialRequestsRaw = trim((string) preg_replace('/\[[^\]]+\]/', '', (string) ($booking->notes ?? '')));
-        $specialRequestsShort = $specialRequestsRaw !== '' ? substr($specialRequestsRaw, 0, 80).(strlen($specialRequestsRaw) > 80 ? '...' : '') : '-';
-
-        $html = "<!doctype html>
-<html>
-<head>
-  <meta charset='utf-8'>
-  <title>{$title}</title>
-  <style>
-    @page { size: A4 portrait; margin: 10mm; }
-    body { font-family: DejaVu Sans, Arial, Helvetica, sans-serif; color: #020617; margin: 0; font-size: 11px; line-height: 1.5; background: #fff; }
-    .wrap { max-width: 720px; margin: 0 auto; }
-    .head { margin-bottom: 14px; text-align: center; padding-bottom: 8px; border-bottom: 1px solid #e5e7eb; }
-    .hotel-name { font-size: 18px; font-weight: 800; margin: 0; color: #020617; }
-    .hotel-address { font-size: 10.5px; margin-top: 2px; color: #374151; }
-    .head-title { font-size: 11px; font-weight: 700; margin: 8px 0 0 0; letter-spacing: .16em; text-transform: uppercase; color: #6b7280; }
-    .head-sub { font-size: 9.5px; margin-top: 2px; color: #4b5563; }
-    .info-row { width: 100%; border-collapse: collapse; margin: 12px 0 14px 0; }
-    .info-row td { vertical-align: top; padding: 0; font-size: 10.5px; color: #111827; }
-    .info-block { padding-right: 24px; }
-    .info-label { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: .08em; color: #4b5563; margin-bottom: 2px; font-weight: 600; }
-    .info-value { display: block; font-weight: 700; color: #020617; }
-    .info-spacer { height: 5px; }
-    .section-title { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #4b5563; margin: 12px 0 6px 0; font-weight: 700; }
-    .simple-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; border: 1px solid #d4d4d8; }
-    .simple-table th,
-    .simple-table td { padding: 5px 8px; font-size: 10.5px; border-top: 1px solid #e5e7eb; }
-    .simple-table tr:first-child th { border-top: none; }
-    .simple-table th { background: #f4f4f5; text-align: left; font-weight: 700; color: #111827; }
-    .label { color: #111827; }
-    .value { text-align: right; font-weight: 700; color: #020617; }
-    .muted { color: #4b5563; font-size: 9.5px; margin-top: 10px; }
-  </style>
-</head>
-<body>
-  <div class='wrap'>
-    <div class='head'>
-      <p class='hotel-name'>".e($hotelName)."</p>
-      <p class='hotel-address'>".e($hotelAddress)."</p>
-      <p class='head-title'>Reservation Voucher</p>
-      <p class='head-sub'>Reservation #{$reservationNo} · Booked on {$bookingDate}</p>
-    </div>
-
-    <table class='info-row'>
-      <tr>
-        <td class='info-block'>
-          <span class='info-label'>Guest</span>
-          <span class='info-value'>{$guestNameEsc}</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Guests</span>
-          <span class='info-value'>{$guestCountValue}</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Contact</span>
-          <span class='info-value'>".e($contact)."</span>
-        </td>
-        <td class='info-block'>
-          <span class='info-label'>Stay</span>
-          <span class='info-value'>{$checkInText} → {$checkOutText}</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Nights</span>
-          <span class='info-value'>{$voucherNights}</span>
-          <div class='info-spacer'></div>
-          <span class='info-label'>Status</span>
-          <span class='info-value'>".e($paymentStatus)."</span>
-        </td>
-      </tr>
-    </table>
-
-    <div>
-      <p class='section-title'>Room</p>
-      <table class='simple-table'>
-        <tr>
-          <th>Field</th>
-          <th style='text-align:right'>Value</th>
-        </tr>
-        <tr>
-          <td class='label'>Room Type</td>
-          <td class='value'>{$roomTypeEsc}</td>
-        </tr>
-        <tr>
-          <td class='label'>Number of Rooms</td>
-          <td class='value'>{$roomCount}</td>
-        </tr>
-        <tr>
-          <td class='label'>Bed Type</td>
-          <td class='value'>".e($bedType)."</td>
-        </tr>
-      </table>
-    </div>
-
-    <div>
-      <p class='section-title'>Payment ({$currency})</p>
-      <table class='simple-table'>
-        <tr>
-          <th>Description</th>
-          <th style='text-align:right'>Amount</th>
-        </tr>
-        <tr>
-          <td class='label'>Total Amount</td>
-          <td class='value'>".number_format($grand, 2).'</td>
-        </tr>';
-
-        if ($extraHourTotal > 0) {
-            $html .= "
-        <tr>
-          <td class='label'>Extra Hour(s) Included</td>
-          <td class='value'>".number_format($extraHourTotal, 2).'</td>
-        </tr>';
+        $bankCompanyName = (string) Setting::get('invoice_bank_legal_name', $hotelName);
+        $bankLines = [];
+        $pairs = [
+            ['Bank name', (string) Setting::get('invoice_bank_name', '')],
+            ['Account no.', (string) Setting::get('invoice_bank_account_no', '')],
+            ['IFSC', (string) Setting::get('invoice_bank_ifsc', '')],
+            ['Branch', (string) Setting::get('invoice_bank_branch', '')],
+            ['SWIFT / BIC', (string) Setting::get('invoice_bank_swift', '')],
+        ];
+        foreach ($pairs as [$label, $value]) {
+            $v = trim((string) $value);
+            if ($v !== '') {
+                $bankLines[] = $label . ': ' . $v;
+            }
         }
+        $bankDetails = implode("\n", $bankLines);
 
-        $html .= "
-        <tr>
-          <td class='label'>GST</td>
-          <td class='value'>".number_format($gst, 2)."</td>
-        </tr>
-        <tr>
-          <td class='label'>Total Before Tax</td>
-          <td class='value'>".number_format($beforeTax, 2)."</td>
-        </tr>
-        <tr>
-          <td class='label'>Amount Paid</td>
-          <td class='value'>".number_format($paid, 2)."</td>
-        </tr>
-        <tr>
-          <td class='label'>Balance</td>
-          <td class='value'>".number_format($balance, 2).'</td>
-        </tr>';
+        $notes = trim((string) preg_replace('/\[[^\]]+\]/', '', (string) ($booking->notes ?? '')));
+        $notes = $notes !== '' ? $notes : '—';
 
-        if ($paid > 0) {
-            $html .= "
-        <tr>
-          <td class='label'>Payment Method</td>
-          <td class='value'>".e($paymentMethod).'</td>
-        </tr>';
-        }
+        $extraCharges = (float) ($booking->extra_charges ?? 0);
+        $roomAmount = max(0.0, $grand - $extraCharges);
 
-        $html .= "
-      </table>
-    </div>
+        $fmt = static fn(float $n): string => number_format(round($n, 2), 2, '.', '');
 
-    <p class='section-title'>Notes</p>
-    <p class='muted'>Special Requests: ".e($specialRequestsShort)."</p>
-    <p class='muted'>Please carry a valid government photo ID for all adult guests. Check-in and check-out timings are subject to hotel policy and availability.</p>
-  </div>
-</body>
-</html>";
+        $data = [
+            'hotelName' => $hotelName,
+            'hotelAddress' => $hotelAddress,
+            'hotelGstin' => $hotelGstin,
+            'resNo' => (string) $booking->id,
+            'bookedOn' => $createdAt->format('d/m/Y'),
+            'guestName' => $guestName,
+            'contact' => $contact,
+            'roomLabel' => $roomLabel,
+            'personsLabel' => $personsLabel,
+            'arrivalStr' => $ci->format('d/m/Y h:i A'),
+            'departureStr' => $co->format('d/m/Y h:i A'),
+            'nights' => (string) $nights,
+            'currency' => 'INR',
+            'roomAmount' => $roomAmount,
+            'extraCharges' => $extraCharges,
+            'grand' => $grand,
+            'paid' => $paid,
+            'balance' => $balance,
+            'notes' => $notes,
+            'receptionName' => $booking->creator?->name ?? '—',
+            'footerDate' => Carbon::now()->format('d/m/Y h:i:s A'),
+            'bankCompanyName' => $bankCompanyName,
+            'bankDetails' => $bankDetails,
+            'fmt' => $fmt,
+        ];
 
-        $pdf = Pdf::loadHTML($html)->setPaper('a4', 'portrait');
+        $pdf = Pdf::loadView('bookings.reservation_voucher', $data)->setPaper('a4', 'portrait');
 
-        return $pdf->download('Reservation_Voucher_'.$booking->id.'.pdf');
+        return $pdf->download('Reservation_Voucher_' . $booking->id . '.pdf');
     }
 
     public function reservationBilling(Request $request, Booking $booking)
     {
-        $this->checkPermission('reservation');
+        $this->allowReservationBillingExport();
 
         $data = ReservationInvoiceViewData::build($booking);
         $pdf = Pdf::loadView('bookings.reservation_invoice', $data)->setPaper('a4', 'portrait');
         $safeName = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) $data['invoiceNo']);
 
-        return $pdf->download('Invoice_'.$safeName.'.pdf');
+        return $pdf->download('Invoice_' . $safeName . '.pdf');
     }
 
     /**
@@ -1838,39 +2103,248 @@ class BookingController extends Controller
      */
     public function folioPostings(Booking $booking)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
 
         $orders = PosOrder::query()
             ->where('booking_id', $booking->id)
             ->where('status', 'paid')
             ->with([
                 'restaurant:id,name',
-                'payments' => function ($q) {
-                    $q->where('method', 'room_charge');
-                },
+                'payments',
             ])
             ->orderByDesc('closed_at')
             ->get();
 
         $items = [];
+        $folioCgst = 0.0;
+        $folioSgst = 0.0;
+        $folioIgst = 0.0;
+        $folioVat = 0.0;
+
         foreach ($orders as $order) {
             $roomCharge = (float) $order->payments->where('method', 'room_charge')->sum('amount');
             if ($roomCharge <= 0) {
                 continue;
             }
+            $tot = max((float) $order->total_amount, 0.0001);
+            $ratio = min(1.0, $roomCharge / $tot);
+            $cgst = (float) ($order->cgst_amount ?? 0) * $ratio;
+            $sgst = (float) ($order->sgst_amount ?? 0) * $ratio;
+            $igst = (float) ($order->igst_amount ?? 0) * $ratio;
+            $vat = (float) ($order->vat_tax_amount ?? 0) * $ratio;
+            $folioCgst += $cgst;
+            $folioSgst += $sgst;
+            $folioIgst += $igst;
+            $folioVat += $vat;
+
             $items[] = [
+                'booking_id' => (int) $booking->id,
                 'pos_order_id' => $order->id,
                 'outlet' => $order->restaurant?->name ?? 'Outlet',
                 'amount' => round($roomCharge, 2),
                 'posted_at' => $order->closed_at?->toIso8601String(),
                 'order_type' => $order->order_type,
+                'cgst' => round($cgst, 2),
+                'sgst' => round($sgst, 2),
+                'igst' => round($igst, 2),
+                'vat' => round($vat, 2),
             ];
+        }
+
+        $penalties = BookingInspectionChargeLines::penaltiesMap();
+
+        $ledgerRows = BookingExtraCharge::query()
+            ->where('booking_id', '=', $booking->id, 'and')
+            ->orderBy('id')
+            ->get($this->bookingExtraChargeSelectColumns());
+
+        $ledgerHasDescription = Schema::hasColumn('booking_extra_charges', 'description');
+
+        $ledgerItems = $ledgerRows->map(function (BookingExtraCharge $line) use ($penalties, $ledgerHasDescription) {
+            $unit = round((float) ($line->unit_amount ?? 0), 2);
+            $total = round((float) ($line->total_amount ?? 0), 2);
+            $meta = is_array($line->meta) ? $line->meta : [];
+            if ($line->source === 'inspection' && $total < 0.0001) {
+                $invItemId = (int) ($meta['inventory_item_id'] ?? 0);
+                $penKey = trim((string) ($meta['penalty_key'] ?? ''));
+                if (isset($meta['unit_damage_charge']) && is_numeric($meta['unit_damage_charge'])) {
+                    $unit = round(max(0.0, (float) $meta['unit_damage_charge']), 2);
+                } else {
+                    [$unit] = CheckoutInspectionPenaltyAmount::resolveForAsset($invItemId, $penKey, $penalties);
+                }
+                $qty = max(1.0, (float) ($line->qty ?? 1));
+                $total = round($unit * $qty, 2);
+            }
+
+            $description = null;
+            if ($ledgerHasDescription && $line->description !== null && trim((string) $line->description) !== '') {
+                $description = (string) $line->description;
+            } elseif (isset($meta['asset_status'])) {
+                $description = 'Status: ' . (string) $meta['asset_status'];
+            }
+
+            return [
+                'id' => (int) $line->id,
+                'source' => (string) $line->source,
+                'kind' => (string) $line->kind,
+                'label' => (string) $line->label,
+                'description' => $description,
+                'qty' => round((float) ($line->qty ?? 1), 2),
+                'unit_amount' => $unit,
+                'amount' => $total,
+                'posted_at' => $line->created_at?->toIso8601String(),
+                'meta' => $line->meta,
+            ];
+        })->values()->all();
+
+        $hasInspectionLedger = collect($ledgerItems)->contains(
+            fn(array $row) => ($row['source'] ?? '') === 'inspection' && (float) ($row['amount'] ?? 0) > 0.0001,
+        );
+        if (! $hasInspectionLedger) {
+            foreach (BookingInspectionChargeLines::snapshotFallbackLines($booking, $penalties) as $line) {
+                $ledgerItems[] = $this->ledgerItemFromInspectionChargeLine($line);
+            }
         }
 
         return response()->json([
             'extra_charges_total' => (float) ($booking->extra_charges ?? 0),
+            'folio_tax' => [
+                'cgst' => round($folioCgst, 2),
+                'sgst' => round($folioSgst, 2),
+                'igst' => round($folioIgst, 2),
+                'vat' => round($folioVat, 2),
+            ],
             'items' => $items,
+            'ledger_items' => $ledgerItems,
         ]);
+    }
+
+    /**
+     * Checkout inspection charges posted to the booking (minibar consumption + asset penalties).
+     */
+    public function inspectionCharges(Booking $booking)
+    {
+        $this->allowReservationRead();
+
+        $penalties = BookingInspectionChargeLines::penaltiesMap();
+
+        $lines = BookingExtraCharge::query()
+            ->where('booking_id', $booking->id)
+            ->where('source', 'inspection')
+            ->orderBy('id')
+            ->get(['id', 'kind', 'label', 'qty', 'unit_amount', 'total_amount', 'meta']);
+
+        if ($lines->isEmpty()) {
+            $lines = collect(BookingInspectionChargeLines::snapshotFallbackLines($booking, $penalties));
+        }
+
+        $linesOut = $lines->map(function ($line) use ($penalties) {
+            return BookingInspectionChargeLines::enrichLineForDisplay($line, $penalties);
+        })->values()->all();
+
+        $inspector = $this->checkoutInspectionInspectorForBooking($booking);
+
+        return response()->json([
+            'booking_id' => (int) $booking->id,
+            'lines' => $linesOut,
+            'inspector' => $inspector,
+        ]);
+    }
+
+    /**
+     * @return array{user_id: int|null, name: string|null}
+     */
+    private function checkoutInspectionInspectorForBooking(Booking $booking): array
+    {
+        $roomIds = array_values(array_unique(array_filter(array_merge(
+            [(int) $booking->room_id],
+            $booking->segments()->pluck('room_id')->map(fn($id) => (int) $id)->all()
+        ), static fn(int $id): bool => $id > 0)));
+
+        if ($roomIds === []) {
+            return ['user_id' => null, 'name' => null];
+        }
+
+        $blocks = RoomStatusBlock::query()
+            ->whereIn('room_id', $roomIds, 'and', false)
+            ->where('status', '=', 'inspected')
+            ->whereNotNull('inspection_snapshot')
+            ->orderByDesc('id')
+            ->get();
+
+        foreach ($blocks as $block) {
+            $snap = $block->inspection_snapshot;
+            if (! is_array($snap) || ! empty($snap['cleared'])) {
+                continue;
+            }
+            $snapBookingId = isset($snap['booking_id']) ? (int) $snap['booking_id'] : null;
+            if ($snapBookingId !== null && $snapBookingId === (int) $booking->id) {
+                $snap = CheckoutInspectionInspector::enrichSnapshot($snap) ?? $snap;
+                $uid = isset($snap['inspector_user_id']) ? (int) $snap['inspector_user_id'] : 0;
+                $name = CheckoutInspectionInspector::displayNameForUserId(
+                    $uid > 0 ? $uid : null,
+                    isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null,
+                );
+
+                return [
+                    'user_id' => $uid > 0 ? $uid : null,
+                    'name' => $name,
+                ];
+            }
+        }
+
+        if ($booking->status === 'checked_in') {
+            foreach ($blocks as $block) {
+                if (! $block->is_active || $block->status !== 'inspected') {
+                    continue;
+                }
+                $snap = $block->inspection_snapshot;
+                if (! is_array($snap) || ! empty($snap['cleared'])) {
+                    continue;
+                }
+                if (! in_array((int) $block->room_id, $roomIds, true)) {
+                    continue;
+                }
+                $snap = CheckoutInspectionInspector::enrichSnapshot($snap) ?? $snap;
+                $uid = isset($snap['inspector_user_id']) ? (int) $snap['inspector_user_id'] : 0;
+                $name = CheckoutInspectionInspector::displayNameForUserId(
+                    $uid > 0 ? $uid : null,
+                    isset($snap['inspector_name']) ? (string) $snap['inspector_name'] : null,
+                );
+
+                return [
+                    'user_id' => $uid > 0 ? $uid : null,
+                    'name' => $name,
+                ];
+            }
+        }
+
+        return ['user_id' => null, 'name' => null];
+    }
+
+    /**
+     * @param  array<string, mixed>  $line
+     * @return array<string, mixed>
+     */
+    private function ledgerItemFromInspectionChargeLine(array $line): array
+    {
+        $qty = max(1.0, (float) ($line['qty'] ?? 1));
+        $unit = round((float) ($line['resolved_unit_amount'] ?? $line['unit_amount'] ?? 0), 2);
+        $total = round((float) ($line['resolved_total_amount'] ?? $line['total_amount'] ?? ($unit * $qty)), 2);
+        $meta = is_array($line['meta'] ?? null) ? $line['meta'] : [];
+
+        return [
+            'id' => (int) ($line['id'] ?? 0),
+            'source' => 'inspection',
+            'kind' => (string) ($line['kind'] ?? 'asset_penalty'),
+            'label' => (string) ($line['label'] ?? 'Inspection charge'),
+            'description' => isset($meta['asset_status']) ? 'Status: ' . (string) $meta['asset_status'] : null,
+            'qty' => $qty,
+            'unit_amount' => $unit,
+            'amount' => $total,
+            'posted_at' => null,
+            'meta' => $meta,
+        ];
     }
 
     /**
@@ -1878,7 +2352,7 @@ class BookingController extends Controller
      */
     public function folioOrderDetail(Booking $booking, PosOrder $order)
     {
-        $this->checkPermission('view-rooms');
+        $this->allowReservationRead();
 
         if ((int) $order->booking_id !== (int) $booking->id) {
             abort(404, 'Order is not linked to this booking.');
@@ -1900,7 +2374,7 @@ class BookingController extends Controller
             $name = $i->combo_id
                 ? ($i->combo?->name ?? 'Combo')
                 : ($i->menu_item_variant_id
-                    ? trim(($i->menuItem?->name ?? 'Item').' — '.($i->variant?->size_label ?? ''))
+                    ? trim(($i->menuItem?->name ?? 'Item') . ' — ' . ($i->variant?->size_label ?? ''))
                     : ($i->menuItem?->name ?? 'Item'));
 
             return [
@@ -1927,18 +2401,35 @@ class BookingController extends Controller
         ]);
     }
 
+    /**
+     * @return list<string>
+     */
+    private function bookingExtraChargeSelectColumns(): array
+    {
+        $cols = ['id', 'source', 'kind', 'label', 'qty', 'unit_amount', 'total_amount', 'meta', 'created_at'];
+        if (Schema::hasColumn('booking_extra_charges', 'description')) {
+            $cols[] = 'description';
+        }
+
+        return $cols;
+    }
+
     public function destroy(Booking $booking)
     {
+        $this->allowReservationDelete();
+
         // For split stays, booking->room may not reflect all rooms used. Fall back safely.
         $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
-        Room::whereIn('id', $allRoomIds)->update(['status' => 'available']);
-        $booking->delete();
+        Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => 'available']);
+        Booking::destroy($booking->id);
 
         return response()->json(null, 204);
     }
 
     public function getAvailableRooms(Request $request)
     {
+        $this->allowAvailableRoomsLookup();
+
         $request->validate([
             'check_in' => 'required|date',
             // Do not use after:check_in — hourly bookings often share the same calendar date for
@@ -2000,5 +2491,58 @@ class BookingController extends Controller
             ->get();
 
         return response()->json($rooms);
+    }
+
+    public function listRoomTransfers(Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        return response()->json([
+            'items' => BookingRoomTransferService::historyPayload($booking),
+            'reasons' => array_map(
+                fn(string $code) => ['code' => $code, 'label' => \App\Models\BookingRoomTransfer::reasonLabel($code)],
+                \App\Models\BookingRoomTransfer::REASONS
+            ),
+        ]);
+    }
+
+    public function previewRoomTransfer(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+        $request->validate([
+            'new_room_id' => 'required|exists:rooms,id',
+            'transfer_reason' => 'required|string|max:64',
+            'internal_notes' => 'nullable|string|max:2000',
+            'rate_mode' => 'required|in:keep_existing,apply_new_category',
+        ]);
+
+        $result = BookingRoomTransferService::preview($booking, $request->all());
+        if (! ($result['ok'] ?? false)) {
+            return response()->json(['message' => $result['message'] ?? 'Preview failed.'], 422);
+        }
+
+        return response()->json($result['preview']);
+    }
+
+    public function roomTransfer(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+        $request->validate([
+            'new_room_id' => 'required|exists:rooms,id',
+            'transfer_reason' => 'required|string|max:64',
+            'internal_notes' => 'nullable|string|max:2000',
+            'rate_mode' => 'required|in:keep_existing,apply_new_category',
+        ]);
+
+        $result = BookingRoomTransferService::execute($booking, $request->all());
+        if (! ($result['ok'] ?? false)) {
+            return response()->json(['message' => $result['message'] ?? 'Room transfer failed.'], 422);
+        }
+
+        return response()->json([
+            'booking' => $result['booking'],
+            'transfer' => $result['transfer'],
+            'transfers' => BookingRoomTransferService::historyPayload($result['booking']),
+        ]);
     }
 }

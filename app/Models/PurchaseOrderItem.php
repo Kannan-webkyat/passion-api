@@ -7,8 +7,10 @@ use Illuminate\Database\Eloquent\Model;
 class PurchaseOrderItem extends Model
 {
     protected $fillable = [
-        'purchase_order_id', 'inventory_item_id', 'quantity_ordered', 'quantity_received', 'unit_price', 'tax_price_basis', 'subtotal',
-        'tax_rate', 'tax_amount', 'total_amount',
+        'purchase_order_id', 'inventory_item_id', 'quantity_ordered', 'quantity_received',
+        'quantity_damaged_transit', 'quantity_broken_transit',
+        'unit_price', 'tax_price_basis', 'subtotal',
+        'tax_rate', 'tax_amount', 'unit_cess', 'total_cess', 'total_amount',
     ];
 
     public function purchaseOrder()

@@ -34,6 +34,27 @@ class Setting extends Model
         ];
     }
 
+    /** Guest reservation invoice header settings (separate from receipt defaults). */
+    public static function getInvoiceProfile(): array
+    {
+        return [
+            'invoice_company_name' => trim((string) self::get('invoice_company_name', '')),
+        ];
+    }
+
+    /** Guest reservation invoice footer — bank block (separate from receipt defaults). */
+    public static function getInvoiceBankDetails(): array
+    {
+        return [
+            'invoice_bank_legal_name' => trim((string) self::get('invoice_bank_legal_name', '')),
+            'invoice_bank_name' => trim((string) self::get('invoice_bank_name', '')),
+            'invoice_bank_account_no' => trim((string) self::get('invoice_bank_account_no', '')),
+            'invoice_bank_ifsc' => trim((string) self::get('invoice_bank_ifsc', '')),
+            'invoice_bank_branch' => trim((string) self::get('invoice_bank_branch', '')),
+            'invoice_bank_swift' => trim((string) self::get('invoice_bank_swift', '')),
+        ];
+    }
+
     /**
      * Canonical property / company identity for slips, future accounts, and cross-module reports.
      * Display name falls back to app name when company_name is not set in settings.
