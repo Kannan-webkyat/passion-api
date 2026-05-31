@@ -61,13 +61,7 @@ class PurchaseOrderController extends Controller
             'order_date' => 'required|date',
             'expected_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-            'items' => 'required|array|min:1',
-            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
-            'items.*.quantity' => 'required|numeric|min:0.001',
-            'items.*.unit_price' => 'required|numeric|min:0',
-            'items.*.tax_rate' => 'nullable|numeric|min:0',
-            'items.*.tax_price_basis' => 'nullable|string|in:' . PurchaseOrderLineAmounts::BASIS_EXCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_INCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
-        ]);
+        ], $this->poHeaderChargeRules(), $this->poLineRules()));
 
         try {
             $po = app(PurchaseOrderService::class)->createFromValidatedData($validated);
@@ -96,13 +90,7 @@ class PurchaseOrderController extends Controller
             'order_date' => 'required|date',
             'expected_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-            'items' => 'required|array|min:1',
-            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
-            'items.*.quantity' => 'required|numeric|min:0.001',
-            'items.*.unit_price' => 'required|numeric|min:0',
-            'items.*.tax_rate' => 'nullable|numeric|min:0',
-            'items.*.tax_price_basis' => 'nullable|string|in:' . PurchaseOrderLineAmounts::BASIS_EXCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_INCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
-        ]);
+        ], $this->poHeaderChargeRules(), $this->poLineRules()));
 
         DB::beginTransaction();
         try {
