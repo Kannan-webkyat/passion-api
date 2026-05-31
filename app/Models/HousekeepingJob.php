@@ -31,4 +31,14 @@ class HousekeepingJob extends Model
     {
         return $this->hasMany(HousekeepingJobLine::class);
     }
+
+    public function startedByUser()
+    {
+        return $this->belongsTo(User::class, 'started_by');
+    }
+
+    public function finishedByUser()
+    {
+        return $this->belongsTo(User::class, 'finished_by');
+    }
 }

@@ -61,7 +61,13 @@ class PurchaseOrderController extends Controller
             'order_date' => 'required|date',
             'expected_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-        ], $this->poLineRules(), $this->poHeaderChargeRules()));
+            'items' => 'required|array|min:1',
+            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'items.*.quantity' => 'required|numeric|min:0.001',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.tax_rate' => 'nullable|numeric|min:0',
+            'items.*.tax_price_basis' => 'nullable|string|in:' . PurchaseOrderLineAmounts::BASIS_EXCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_INCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
+        ]);
 
         try {
             $po = app(PurchaseOrderService::class)->createFromValidatedData($validated);
@@ -90,7 +96,13 @@ class PurchaseOrderController extends Controller
             'order_date' => 'required|date',
             'expected_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-        ], $this->poLineRules(), $this->poHeaderChargeRules()));
+            'items' => 'required|array|min:1',
+            'items.*.inventory_item_id' => 'required|exists:inventory_items,id',
+            'items.*.quantity' => 'required|numeric|min:0.001',
+            'items.*.unit_price' => 'required|numeric|min:0',
+            'items.*.tax_rate' => 'nullable|numeric|min:0',
+            'items.*.tax_price_basis' => 'nullable|string|in:' . PurchaseOrderLineAmounts::BASIS_EXCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_INCLUSIVE . ',' . PurchaseOrderLineAmounts::BASIS_NON_TAXABLE,
+        ]);
 
         DB::beginTransaction();
         try {
@@ -194,7 +206,7 @@ class PurchaseOrderController extends Controller
 
         $reason = trim((string) ($validated['reason'] ?? ''));
         if ($reason !== '') {
-            $purchaseOrder->notes = trim((string) ($purchaseOrder->notes ?? '')."\nCancelled: ".$reason);
+            $purchaseOrder->notes = trim((string) ($purchaseOrder->notes ?? '') . "\nCancelled: " . $reason);
         }
 
         $purchaseOrder->status = 'cancelled';
@@ -224,158 +236,22 @@ class PurchaseOrderController extends Controller
             return response()->json(['message' => 'No target location available'], 422);
         }
 
-        $receiveByLineId = collect($validated['items'])->keyBy('purchase_order_item_id');
-
-        DB::beginTransaction();
         try {
-            $lockedPo = PurchaseOrder::lockForUpdate()->findOrFail($purchaseOrder->id);
-            if ($lockedPo->status === 'received') {
-                throw new \Exception('PO already received');
-            }
-            if ($lockedPo->status !== 'sent') {
-                return response()->json(['message' => 'Send the PO before receiving stock'], 422);
-            }
-
-            $lockedPo->load('items.inventoryItem');
-            $allFullyAccounted = true;
-            $hasAnyAccounted = false;
-
-            foreach ($lockedPo->items as $poItem) {
-                $payload = $receiveByLineId->get($poItem->id);
-                if (! $payload) {
-                    throw new \Exception('Missing receipt quantities for line #'.$poItem->id);
-                }
-
-                $qtyGood = (int) $payload['quantity_received'];
-                $qtyDamaged = (int) ($payload['quantity_damaged_transit'] ?? 0);
-                $qtyBroken = (int) ($payload['quantity_broken_transit'] ?? 0);
-                $qtyOrdered = (int) $poItem->quantity_ordered;
-                $qtyAccounted = $qtyGood + $qtyDamaged + $qtyBroken;
-
-                if ($qtyAccounted > $qtyOrdered) {
-                    throw new \Exception(
-                        'Received + damaged + broken cannot exceed ordered quantity for '.
-                        ($poItem->inventoryItem->name ?? 'item')
-                    );
-                }
-
-                if ($qtyAccounted < $qtyOrdered) {
-                    $allFullyAccounted = false;
-                }
-                if ($qtyAccounted > 0) {
-                    $hasAnyAccounted = true;
-                }
-
-                $poItem->update([
-                    'quantity_received' => $qtyGood,
-                    'quantity_damaged_transit' => $qtyDamaged,
-                    'quantity_broken_transit' => $qtyBroken,
-                ]);
-
-                /** @var InventoryItem|null $item */
-                $item = InventoryItem::lockForUpdate()->find($poItem->inventory_item_id);
-                if (! $item) {
-                    continue;
-                }
-
-                $conversionFactor = floatval($item->conversion_factor ?? 1);
-                $landedPerPurchaseUom = PurchaseOrderService::landedUnitCostPerPurchaseUom($poItem);
-                $locationName = InventoryLocation::find($locationId)?->name ?? 'Store';
-
-                if ($qtyGood > 0) {
-                    $convertedGoodQty = $qtyGood * $conversionFactor;
-                    $lineExclusiveForGood = $qtyOrdered > 0
-                        ? ((float) ($poItem->subtotal ?? 0) + (float) ($poItem->total_cess ?? 0)) * ($qtyGood / $qtyOrdered)
-                        : 0.0;
-                    $lineExclusiveForGood = round($lineExclusiveForGood, 2);
-                    $exclusiveUnitInPurchaseUom = $qtyGood > 0 ? $lineExclusiveForGood / $qtyGood : 0.0;
-                    $unitCostPerIssue = $conversionFactor > 0
-                        ? $exclusiveUnitInPurchaseUom / $conversionFactor
-                        : $exclusiveUnitInPurchaseUom;
-
-                    $stockBeforeIssue = InventoryItem::sumQuantityAcrossLocations($item->id);
-                    $onHandForWacIssue = max(0, $stockBeforeIssue);
-                    $onHandForWacPurchase = $onHandForWacIssue / ($conversionFactor ?: 1);
-                    $currentPurchasePrice = (float) ($item->cost_price ?? 0);
-                    $denominatorPurchase = $onHandForWacPurchase + $qtyGood;
-                    $newPurchaseCost = $denominatorPurchase > 0
-                        ? (($onHandForWacPurchase * $currentPurchasePrice) + ($qtyGood * $exclusiveUnitInPurchaseUom)) / $denominatorPurchase
-                        : $exclusiveUnitInPurchaseUom;
-
-                    DB::table('inventory_item_locations')->updateOrInsert(
-                        ['inventory_item_id' => $item->id, 'inventory_location_id' => $locationId],
-                        ['updated_at' => now(), 'created_at' => now()]
-                    );
-                    DB::table('inventory_item_locations')
-                        ->where('inventory_item_id', $item->id)
-                        ->where('inventory_location_id', $locationId)
-                        ->increment('quantity', $convertedGoodQty);
-
-                    $item->update(['cost_price' => round($newPurchaseCost, 4)]);
-                    InventoryItem::syncStoredCurrentStockFromLocations($item->id);
-
-                    InventoryTransaction::create([
-                        'inventory_item_id' => $item->id,
-                        'inventory_location_id' => $locationId,
-                        'type' => 'in',
-                        'quantity' => $convertedGoodQty,
-                        'unit_cost' => round($unitCostPerIssue, 4),
-                        'total_cost' => $lineExclusiveForGood,
-                        'reason' => 'Purchase Receipt',
-                        'notes' => 'From PO: '.$lockedPo->po_number.' at '.$locationName.' (Good: '.$qtyGood.' '.($item->purchaseUom->short_name ?? '').')',
-                        'user_id' => auth()->id(),
-                        'reference_type' => 'purchase_order',
-                        'reference_id' => (string) $lockedPo->id,
-                    ]);
-                }
-
-                $lossQty = $qtyDamaged + $qtyBroken;
-                if ($lossQty > 0) {
-                    $lossTotal = round($landedPerPurchaseUom * $lossQty, 2);
-                    $lossConvertedQty = $lossQty * $conversionFactor;
-                    $lossUnitIssue = $conversionFactor > 0
-                        ? $landedPerPurchaseUom / $conversionFactor
-                        : $landedPerPurchaseUom;
-
-                    InventoryTransaction::create([
-                        'inventory_item_id' => $item->id,
-                        'inventory_location_id' => $locationId,
-                        'type' => 'loss',
-                        'quantity' => $lossConvertedQty,
-                        'unit_cost' => round($lossUnitIssue, 4),
-                        'total_cost' => $lossTotal,
-                        'reason' => 'Transit loss',
-                        'notes' => 'PO: '.$lockedPo->po_number.' — Damaged: '.$qtyDamaged.', Broken: '.$qtyBroken,
-                        'user_id' => auth()->id(),
-                        'reference_type' => 'purchase_order',
-                        'reference_id' => (string) $lockedPo->id,
-                    ]);
-                }
-            }
-
-            PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($lockedPo);
-
-            $updateData = [
-                'status' => $allFullyAccounted ? 'received' : 'partial',
-                'received_at' => now(),
-            ];
+            $po = app(PurchaseOrderService::class)->receivePurchaseOrder(
+                $purchaseOrder,
+                (int) $locationId,
+                auth()->id()
+            );
 
             if ($request->hasFile('document')) {
-                $updateData['received_document_path'] = $request->file('document')->store('po_documents', 'public');
+                $path = $request->file('document')->store('po_documents', 'public');
+                $po->update(['received_document_path' => $path]);
             }
 
-            $lockedPo->update($updateData);
-
-            if (! $hasAnyAccounted) {
-                throw new \Exception('At least one line must have received, damaged, or broken quantity');
-            }
-
-            DB::commit();
-
-            return response()->json($lockedPo->fresh()->load('vendor', 'items.inventoryItem', 'creator'));
+            return response()->json($po->load('vendor', 'items.inventoryItem', 'creator'));
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
         } catch (\Exception $e) {
-            DB::rollBack();
-
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }

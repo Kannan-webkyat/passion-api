@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Events\RoomParStockUpdated;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
@@ -27,7 +28,7 @@ class StoreRequestController extends Controller
     private function reconcileRequestStatus(StoreRequest $storeRequest): void
     {
         $storeRequest->load('items');
-        $hasPending = $storeRequest->items->contains(fn ($i) => (float) $i->quantity_pending_acceptance > 0);
+        $hasPending = $storeRequest->items->contains(fn($i) => (float) $i->quantity_pending_acceptance > 0);
         if ($hasPending) {
             $storeRequest->status = 'awaiting_acceptance';
             $storeRequest->save();
@@ -36,7 +37,7 @@ class StoreRequestController extends Controller
         }
 
         $allComplete = $storeRequest->items->every(
-            fn ($i) => (float) $i->quantity_issued >= (float) $i->quantity_requested
+            fn($i) => (float) $i->quantity_issued >= (float) $i->quantity_requested
         );
         if ($allComplete) {
             $storeRequest->status = 'issued';
@@ -48,7 +49,7 @@ class StoreRequestController extends Controller
             return;
         }
 
-        $anyReceived = $storeRequest->items->contains(fn ($i) => (float) $i->quantity_issued > 0);
+        $anyReceived = $storeRequest->items->contains(fn($i) => (float) $i->quantity_issued > 0);
         $storeRequest->status = $anyReceived ? 'partially_issued' : 'approved';
         $storeRequest->save();
     }
@@ -122,7 +123,7 @@ class StoreRequestController extends Controller
             }
 
             $storeRequest = StoreRequest::create([
-                'request_number' => 'REQ-'.date('Ymd').'-'.strtoupper(uniqid()),
+                'request_number' => 'REQ-' . date('Ymd') . '-' . strtoupper(uniqid()),
                 'from_location_id' => $validated['from_location_id'],
                 'to_location_id' => $validated['to_location_id'],
                 'department_id' => $location->department_id,
@@ -188,12 +189,12 @@ class StoreRequestController extends Controller
 
         $rejector = auth()->user()->name;
         $reasonLine = trim($validated['reason']);
-        $notesSuffix = ' (Rejected by '.$rejector.'. Reason: '.$reasonLine.')';
+        $notesSuffix = ' (Rejected by ' . $rejector . '. Reason: ' . $reasonLine . ')';
 
         $storeRequest->update([
             'status' => 'rejected',
             'rejection_reason' => $reasonLine,
-            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').$notesSuffix,
+            'notes' => ($storeRequest->notes ? $storeRequest->notes . ' ' : '') . $notesSuffix,
         ]);
 
         return response()->json($storeRequest->load(['department', 'fromLocation', 'toLocation', 'requester', 'items.item']));
@@ -239,7 +240,7 @@ class StoreRequestController extends Controller
 
                 $remaining = (float) $requestItem->quantity_requested - (float) $requestItem->quantity_issued;
                 if ($qtyToCommit > $remaining + 0.00001) {
-                    throw new \Exception('Cannot commit more than remaining requested quantity for '.$requestItem->item->name);
+                    throw new \Exception('Cannot commit more than remaining requested quantity for ' . $requestItem->item->name);
                 }
 
                 /** @var object|null $sourceStock */
@@ -250,7 +251,7 @@ class StoreRequestController extends Controller
                     ->first();
 
                 if (! $sourceStock || (float) $sourceStock->quantity < $qtyToCommit) {
-                    throw new \Exception('Insufficient stock in source location for item '.$requestItem->item->name);
+                    throw new \Exception('Insufficient stock in source location for item ' . $requestItem->item->name);
                 }
 
                 $requestItem->increment('quantity_pending_acceptance', $qtyToCommit);
@@ -285,7 +286,7 @@ class StoreRequestController extends Controller
 
         $storeRequest->load(['department', 'fromLocation', 'toLocation', 'items.item']);
 
-        $hasPending = $storeRequest->items->contains(fn ($i) => (float) $i->quantity_pending_acceptance > 0);
+        $hasPending = $storeRequest->items->contains(fn($i) => (float) $i->quantity_pending_acceptance > 0);
         if (! $hasPending) {
             return response()->json(['message' => 'Nothing pending acceptance'], 422);
         }
@@ -306,7 +307,7 @@ class StoreRequestController extends Controller
                     ->first();
 
                 if (! $sourceStock || (float) $sourceStock->quantity < $qtyToMove) {
-                    throw new \Exception('Insufficient stock in source location for item '.$requestItem->item->name);
+                    throw new \Exception('Insufficient stock in source location for item ' . $requestItem->item->name);
                 }
 
                 DB::table('inventory_item_locations')
@@ -341,7 +342,7 @@ class StoreRequestController extends Controller
                     'unit_cost' => round($unitCost, 4),
                     'total_cost' => round($qtyToMove * $unitCost, 2),
                     'reason' => 'Store Issue',
-                    'notes' => 'Issued to '.$storeRequest->fromLocation->name.' (Req: '.$storeRequest->request_number.')',
+                    'notes' => 'Issued to ' . $storeRequest->fromLocation->name . ' (Req: ' . $storeRequest->request_number . ')',
                     'user_id' => auth()->id(),
                     'department' => $storeRequest->department?->name,
                     'reference_id' => $refId,
@@ -357,7 +358,7 @@ class StoreRequestController extends Controller
                     'unit_cost' => round($unitCost, 4),
                     'total_cost' => round($qtyToMove * $unitCost, 2),
                     'reason' => 'Store Receipt',
-                    'notes' => 'Received from '.$storeRequest->toLocation->name.' (Req: '.$storeRequest->request_number.')',
+                    'notes' => 'Received from ' . $storeRequest->toLocation->name . ' (Req: ' . $storeRequest->request_number . ')',
                     'user_id' => auth()->id(),
                     'department' => $storeRequest->department?->name,
                     'reference_id' => $refId,
@@ -372,6 +373,12 @@ class StoreRequestController extends Controller
             $this->reconcileRequestStatus($storeRequest);
 
             DB::commit();
+
+            $storeRequest->loadMissing(['fromLocation']);
+            $roomId = (int) ($storeRequest->fromLocation?->room_id ?? 0);
+            if ($roomId > 0) {
+                RoomParStockUpdated::dispatchIfEnabled([$roomId], 'store_request_accept');
+            }
 
             return response()->json($storeRequest->load('items.item'));
         } catch (\Exception $e) {
@@ -393,7 +400,7 @@ class StoreRequestController extends Controller
 
         $user = auth()->user();
         $storeRequest->update([
-            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Issuance recalled by '.$user->name.')',
+            'notes' => ($storeRequest->notes ? $storeRequest->notes . ' ' : '') . '(Issuance recalled by ' . $user->name . ')',
         ]);
         $storeRequest->load('items');
         $this->clearPendingIssuance($storeRequest);
@@ -423,7 +430,7 @@ class StoreRequestController extends Controller
 
         if ($storeRequest->status === 'awaiting_acceptance') {
             $storeRequest->update([
-                'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Pending issuance withdrawn by '.$user->name.')',
+                'notes' => ($storeRequest->notes ? $storeRequest->notes . ' ' : '') . '(Pending issuance withdrawn by ' . $user->name . ')',
             ]);
             $storeRequest->load('items');
             $this->clearPendingIssuance($storeRequest);
@@ -433,7 +440,7 @@ class StoreRequestController extends Controller
 
         $storeRequest->update([
             'status' => 'cancelled',
-            'notes' => ($storeRequest->notes ? $storeRequest->notes.' ' : '').'(Cancelled by '.$user->name.')',
+            'notes' => ($storeRequest->notes ? $storeRequest->notes . ' ' : '') . '(Cancelled by ' . $user->name . ')',
         ]);
 
         return response()->json($storeRequest);

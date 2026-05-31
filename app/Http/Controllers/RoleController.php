@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use Database\Seeders\RolePermissionSeeder;
 use Illuminate\Http\Request;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
@@ -24,7 +25,38 @@ class RoleController extends Controller
 
     public function permissions()
     {
-        return Permission::all();
+        $this->ensureCanonicalPermissionsExist();
+
+        // Roles use guard "web" only — ignore legacy rows created under other guards (e.g. sanctum).
+        return Permission::query()
+            ->where('guard_name', 'web')
+            ->orderBy('name')
+            ->get();
+    }
+
+    /**
+     * Create any permission rows defined in code but not yet in the DB (admin UI lists from GET /permissions).
+     */
+    private function ensureCanonicalPermissionsExist(): void
+    {
+        $registrar = app(PermissionRegistrar::class);
+        $created = false;
+        // Roles use guard "web"; permissions must use the same guard for syncPermissions().
+        $guardName = 'web';
+
+        foreach (RolePermissionSeeder::permissionNames() as $name) {
+            $permission = Permission::query()->firstOrCreate([
+                'name' => $name,
+                'guard_name' => $guardName,
+            ]);
+            if ($permission->wasRecentlyCreated) {
+                $created = true;
+            }
+        }
+
+        if ($created) {
+            $registrar->forgetCachedPermissions();
+        }
     }
 
     public function store(Request $request)
@@ -42,7 +74,8 @@ class RoleController extends Controller
         $role = Role::create(['name' => $validated['name'], 'guard_name' => 'web']);
 
         if (isset($validated['permissions'])) {
-            $role->syncPermissions($validated['permissions']);
+            $this->ensureCanonicalPermissionsExist();
+            $role->syncPermissions($this->resolvePermissionNamesForGuard($validated['permissions'], $role->guard_name));
             app(PermissionRegistrar::class)->forgetCachedPermissions();
         }
 
@@ -61,7 +94,7 @@ class RoleController extends Controller
             abort(403, 'Only Admins can modify the Admin role.');
         }
         $validated = $request->validate([
-            'name' => 'string|unique:roles,name,'.$role->id,
+            'name' => 'string|unique:roles,name,' . $role->id,
             'permissions' => 'nullable|array',
         ]);
 
@@ -71,11 +104,29 @@ class RoleController extends Controller
         }
 
         if (isset($validated['permissions'])) {
-            $role->syncPermissions($validated['permissions']);
+            $this->ensureCanonicalPermissionsExist();
+            $role->syncPermissions($this->resolvePermissionNamesForGuard($validated['permissions'], $role->guard_name));
             app(PermissionRegistrar::class)->forgetCachedPermissions();
         }
 
         return response()->json($role->load('permissions'));
+    }
+
+    /**
+     * Keep only permission names that exist for the role guard (after canonical seed).
+     *
+     * @param  array<int, string>  $names
+     * @return array<int, string>
+     */
+    private function resolvePermissionNamesForGuard(array $names, string $guardName): array
+    {
+        $existing = Permission::query()
+            ->where('guard_name', $guardName)
+            ->whereIn('name', $names)
+            ->pluck('name')
+            ->all();
+
+        return array_values(array_intersect($names, $existing));
     }
 
     public function destroy(Role $role)

@@ -25,7 +25,9 @@ class DatabaseSeeder extends Seeder
             BarSeeder::class,
             RoomTypeRoomSeeder::class,
             HotelInventoryCatalogSeeder::class,
-            HotelInventoryOpeningStockSeeder::class,
+            RoomParTestTemplatesSeeder::class,
+            RoomParProcurementStockSeeder::class,
+            // HousekeepingStoreRoomParStockSeeder::class, // optional: move PAR buffer Main Store -> Housekeeping Store
             HotelMinibarMenuItemsSeeder::class,
             RbacTestUsersSeeder::class,
             // BookingSeeder::class,

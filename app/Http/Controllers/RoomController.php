@@ -2,26 +2,28 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Models\InventoryLocation;
 use App\Models\Room;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class RoomController extends Controller
 {
-    private function checkPermission(string $permission)
-    {
-        $user = Auth::user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
-    }
+    use AuthorizesSpatiePermissions;
 
     public function index(Request $request)
     {
-        $query = Room::with(['roomType', 'connectedRoom']);
+        // Read: Rooms master, room chart, bookings, housekeeping (not a substitute for create/edit/delete).
+        $this->authorizePermissions([
+            'rooms-view',
+            'view-rooms',
+            'reservation-view',
+            'reservation',
+        ]);
+
+        $query = Room::with(['roomType', 'connectedRoom', 'parTemplate']);
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
@@ -31,7 +33,7 @@ class RoomController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['rooms-create']);
         $validated = $request->validate([
             'room_number' => 'required|string|unique:rooms,room_number',
             'room_type_id' => 'required|exists:room_types,id',
@@ -55,12 +57,19 @@ class RoomController extends Controller
 
     public function show(Room $room)
     {
+        $this->authorizePermissions([
+            'rooms-view',
+            'view-rooms',
+            'reservation-view',
+            'reservation',
+        ]);
+
         return $room->load('roomType');
     }
 
     public function update(Request $request, Room $room)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['rooms-edit']);
         $validated = $request->validate([
             'room_number' => 'string|unique:rooms,room_number,' . $room->id,
             'room_type_id' => 'exists:room_types,id',
@@ -84,7 +93,7 @@ class RoomController extends Controller
 
     public function destroy(Room $room)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['rooms-delete']);
         try {
             Room::destroy($room->id);
 
@@ -102,7 +111,7 @@ class RoomController extends Controller
      */
     public function syncInventoryLocations(Request $request)
     {
-        $this->checkPermission('manage-rooms');
+        $this->authorizePermissions(['rooms-create', 'rooms-edit']);
 
         $validated = $request->validate([
             'room_ids' => 'nullable|array',
