@@ -23,7 +23,7 @@ class DatabaseSeeder extends Seeder
             // RestaurantTableSeeder::class,
             // FreshBiryaniTeaCoffeeSeeder::class,
             // BarSeeder::class,
-            // BarInventoryOrganizedSeeder::class,
+            BarInventoryOrganizedSeeder::class,
             BarMenuConfigurationSeeder::class,
             // RoomTypeRoomSeeder::class,
             // HotelInventoryCatalogSeeder::class,
