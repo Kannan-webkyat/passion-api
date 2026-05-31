@@ -19,6 +19,7 @@ class InventoryUomSeeder extends Seeder
             ['name' => 'Pair', 'short_name' => 'PAIR'],
             ['name' => 'Bag', 'short_name' => 'BAG'],
             ['name' => 'Unit', 'short_name' => 'UNIT'],
+            ['name' => 'Millilitre', 'short_name' => 'ML'],
         ];
 
         foreach ($uoms as $uom) {

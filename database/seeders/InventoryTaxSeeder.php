@@ -15,6 +15,7 @@ class InventoryTaxSeeder extends Seeder
             ['name' => 'GST 18% (Local)', 'rate' => 18, 'type' => 'local'],
             ['name' => 'IGST 18%', 'rate' => 18, 'type' => 'inter-state'],
             ['name' => 'Liquor VAT', 'rate' => 22, 'type' => 'vat'],
+            ['name' => 'Liquor VAT 10%', 'rate' => 10, 'type' => 'vat'],
         ];
 
         foreach ($taxes as $tax) {

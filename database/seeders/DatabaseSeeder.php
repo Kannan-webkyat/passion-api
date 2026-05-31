@@ -23,6 +23,7 @@ class DatabaseSeeder extends Seeder
             // RestaurantTableSeeder::class,
             // FreshBiryaniTeaCoffeeSeeder::class,
             // BarSeeder::class,
+            BarInventoryOrganizedSeeder::class,
             // RoomTypeRoomSeeder::class,
             // HotelInventoryCatalogSeeder::class,
             // RoomParTestTemplatesSeeder::class,
