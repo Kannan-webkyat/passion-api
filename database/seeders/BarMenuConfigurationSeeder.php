@@ -18,7 +18,7 @@ use Illuminate\Database\Seeder;
  *
  * Main category: Alcohols · Sub: Brandy…Beer · Tax: Liquor VAT 10% · Direct sale · No KOT
  * Largest SKU per brand (top): 30 / 60 / 90 ml + Full Bottle variants
- * Smaller spirits, wine, beer: whole bottle only · Outlets: OTTAAL + BAR
+ * Smaller spirits, wine, beer: whole bottle only · Outlets: all active outlets
  */
 class BarMenuConfigurationSeeder extends Seeder
 {
@@ -53,9 +53,9 @@ class BarMenuConfigurationSeeder extends Seeder
             )->id;
         }
 
-        $outlets = RestaurantMaster::whereIn('name', ['OTTAAL', 'BAR'])->get();
+        $outlets = RestaurantMaster::where('is_active', true)->orderBy('name')->get();
         if ($outlets->isEmpty()) {
-            $this->command?->error('No outlets found (OTTAAL / BAR). Run RestaurantTableSeeder first.');
+            $this->command?->error('No active outlets found. Create outlets before seeding bar menu.');
 
             return;
         }
