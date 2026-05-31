@@ -9,8 +9,8 @@ use App\Models\InventoryTax;
 use App\Models\InventoryUom;
 use App\Models\RestaurantMaster;
 use App\Models\Vendor;
+use Database\Seeders\Support\BarOrganizedCatalog;
 use Illuminate\Database\Seeder;
-use Illuminate\Support\Str;
 
 /**
  * Bar inventory catalog from BEVCO-style organized list (VAT 10%, cess by category).
@@ -23,15 +23,7 @@ class BarInventoryOrganizedSeeder extends Seeder
     private const REORDER_LEVEL = 10;
 
     /** @var array<string, string> */
-    private const CAT_CODES = [
-        'Brandy' => 'BRD',
-        'Whisky' => 'WSK',
-        'Rum' => 'RUM',
-        'Vodka' => 'VDK',
-        'Wine' => 'WIN',
-        'Gin' => 'GIN',
-        'Beer' => 'BER',
-    ];
+    private const CAT_CODES = BarOrganizedCatalog::CAT_CODES;
 
     public function run(): void
     {
@@ -91,7 +83,7 @@ class BarInventoryOrganizedSeeder extends Seeder
                 ? "{$itemName} {$size}ml"
                 : "{$itemName} {$size}ml";
 
-            $sku = $this->sku($cat, $itemName, $size);
+            $sku = BarOrganizedCatalog::inventorySku($cat, $itemName, $size);
             $meta = $this->liquorMeta($cat);
 
             $payload = [
@@ -142,15 +134,6 @@ class BarInventoryOrganizedSeeder extends Seeder
             'short_name' => $short,
             'name' => $name,
         ])->id;
-    }
-
-    private function sku(string $category, string $item, int $size): string
-    {
-        $code = self::CAT_CODES[$category] ?? 'BAR';
-        $slug = Str::upper(Str::slug(Str::limit($item, 24, ''), '_'));
-        $slug = $slug !== '' ? $slug : 'ITEM';
-
-        return "BAR-{$code}-{$slug}-{$size}";
     }
 
     /** @return array{liquor_category: ?string, is_cess_applicable: bool} */
