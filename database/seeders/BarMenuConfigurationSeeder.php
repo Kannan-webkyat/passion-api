@@ -11,7 +11,6 @@ use App\Models\MenuSubCategory;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
 use App\Models\RestaurantMenuItemVariant;
-use Database\Seeders\Support\BarOrganizedCatalog;
 use Illuminate\Database\Seeder;
 
 /**

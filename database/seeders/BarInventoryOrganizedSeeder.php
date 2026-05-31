@@ -9,7 +9,6 @@ use App\Models\InventoryTax;
 use App\Models\InventoryUom;
 use App\Models\RestaurantMaster;
 use App\Models\Vendor;
-use Database\Seeders\Support\BarOrganizedCatalog;
 use Illuminate\Database\Seeder;
 
 /**
