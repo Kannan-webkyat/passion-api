@@ -267,6 +267,381 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * Operational snapshot for the admin housekeeping control center.
+     */
+    public function dashboardSummary()
+    {
+        $this->allowHousekeepingNav();
+
+        $today = Carbon::today();
+        $todayStr = $today->toDateString();
+
+        $totalRooms = (int) Room::query()
+            ->where('is_active', '=', true, 'and')
+            ->count();
+
+        $statusCounts = Room::query()
+            ->where('is_active', '=', true, 'and')
+            ->selectRaw('status, COUNT(*) as total')
+            ->groupBy('status')
+            ->pluck('total', 'status');
+
+        $dirty = (int) ($statusCounts['dirty'] ?? 0);
+        $cleaning = (int) ($statusCounts['cleaning'] ?? 0);
+        $inspectionPending = (int) ($statusCounts['pending_inspection'] ?? 0);
+        $maintenance = (int) ($statusCounts['maintenance'] ?? 0);
+        $ready = (int) (($statusCounts['available'] ?? 0) + ($statusCounts['inspected'] ?? 0));
+        $readyPct = $totalRooms > 0 ? (int) round(($ready / $totalRooms) * 100) : 0;
+
+        $roomStockShortfall = 0;
+        $roomRows = Room::query()
+            ->where('is_active', '=', true, 'and')
+            ->whereNotNull('par_template_id')
+            ->get(['id']);
+        foreach ($roomRows as $room) {
+            $ctx = RoomParInventoryContext::forRoomId((int) $room->id);
+            if (! $ctx) {
+                continue;
+            }
+            if ((bool) ($ctx['template_assigned'] ?? false) && (float) ($ctx['to_stock_total'] ?? 0) > 0.00001) {
+                $roomStockShortfall++;
+            }
+        }
+
+        $checkoutInspection = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'pending_inspection')
+            ->count();
+
+        $dailyCleaning = $this->dailyCleaningPendingCountForNav($today);
+
+        $laundryPendingPickup = (int) LaundryRequest::query()
+            ->where('status', '=', LaundryRequest::STATUS_PENDING_PICKUP)
+            ->count();
+
+        $laundryReady = (int) LaundryRequest::query()
+            ->where('status', '=', LaundryRequest::STATUS_READY)
+            ->count();
+
+        $laundryAwaitingPost = (int) LaundryRequest::query()
+            ->where('status', '=', LaundryRequest::STATUS_DELIVERED)
+            ->whereNull('posted_at')
+            ->count();
+
+        $laundryActionable = $laundryPendingPickup + $laundryReady + $laundryAwaitingPost;
+
+        $blockDirty = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'dirty')
+            ->count();
+
+        $blockCleaning = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'cleaning')
+            ->count();
+
+        $blockInspected = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'inspected')
+            ->count();
+
+        $lateCleaning = (int) RoomStatusBlock::query()
+            ->where('is_active', '=', true, 'and')
+            ->where('status', '=', 'cleaning')
+            ->where('updated_at', '<', now()->subHours(3))
+            ->count();
+
+        $activeCleanerIds = DailyRoomCleaning::query()
+            ->where('service_date', '=', $todayStr)
+            ->where('status', '=', 'in_progress')
+            ->whereNotNull('started_by')
+            ->pluck('started_by')
+            ->merge(
+                HousekeepingJob::query()
+                    ->where('status', '=', 'in_progress')
+                    ->whereNotNull('started_by')
+                    ->pluck('started_by')
+            )
+            ->unique()
+            ->filter()
+            ->values();
+
+        $roomsCleanedToday = (int) HousekeepingJob::query()
+            ->whereDate('updated_at', '=', $todayStr)
+            ->whereIn('status', ['inspected', 'completed'])
+            ->count()
+            + (int) DailyRoomCleaning::query()
+                ->where('service_date', '=', $todayStr)
+                ->where('status', '=', 'cleaned')
+                ->count();
+
+        $completedJobsToday = HousekeepingJob::query()
+            ->whereDate('updated_at', '=', $todayStr)
+            ->whereIn('status', ['inspected', 'completed'])
+            ->get(['created_at', 'updated_at']);
+
+        $avgCleaningMinutes = null;
+        if ($completedJobsToday->isNotEmpty()) {
+            $avgCleaningMinutes = (int) round(
+                $completedJobsToday->avg(
+                    fn(HousekeepingJob $job) => $job->created_at->diffInMinutes($job->updated_at)
+                )
+            );
+        }
+
+        $pendingAssignments = $blockDirty
+            + (int) DailyRoomCleaning::query()
+                ->where('service_date', '=', $todayStr)
+                ->where('status', '=', 'pending_cleaning')
+                ->whereNull('assigned_to')
+                ->count();
+
+        $priorityTasks = $this->buildHousekeepingPriorityTasks($today);
+        $alerts = $this->buildHousekeepingDashboardAlerts(
+            $today,
+            $lateCleaning,
+            $inspectionPending,
+            $maintenance,
+            $roomStockShortfall,
+            $priorityTasks
+        );
+
+        return response()->json([
+            'dirty' => $blockDirty,
+            'checkout_inspection' => $checkoutInspection,
+            'cleaning' => $blockCleaning,
+            'daily_cleaning' => $dailyCleaning,
+            'inspected' => $blockInspected,
+            'room_stock_shortfall' => $roomStockShortfall,
+            'laundry' => $laundryActionable,
+            'laundry_pending_pickup' => $laundryPendingPickup,
+            'laundry_ready' => $laundryReady,
+            'laundry_awaiting_post' => $laundryAwaitingPost,
+            'total_rooms' => $totalRooms,
+            'ready_count' => $ready,
+            'ready_pct' => $readyPct,
+            'maintenance' => $maintenance,
+            'inspection_pending' => $inspectionPending,
+            'room_status' => [
+                'ready' => $ready,
+                'dirty' => $dirty,
+                'cleaning' => $cleaning,
+                'inspection' => $inspectionPending,
+                'maintenance' => $maintenance,
+            ],
+            'priority_tasks' => $priorityTasks,
+            'staff' => [
+                'active_housekeepers' => $activeCleanerIds->count(),
+                'rooms_cleaned_today' => $roomsCleanedToday,
+                'avg_cleaning_minutes' => $avgCleaningMinutes,
+                'pending_assignments' => $pendingAssignments,
+            ],
+            'pipeline' => [
+                ['key' => 'checkout', 'label' => 'Checkout', 'count' => $blockDirty],
+                ['key' => 'cleaning', 'label' => 'Cleaning', 'count' => $blockCleaning],
+                ['key' => 'inspection', 'label' => 'Inspection', 'count' => $checkoutInspection],
+                ['key' => 'ready', 'label' => 'Ready', 'count' => $ready],
+            ],
+            'alerts' => $alerts,
+        ]);
+    }
+
+    /**
+     * @return array<int, array{room_number: string, room_id: int, reason: string, urgency: string, status: string, href: string, sort: int}>
+     */
+    private function buildHousekeepingPriorityTasks(Carbon $today): array
+    {
+        $todayStr = $today->toDateString();
+        $tasks = [];
+        $seenRoomIds = [];
+
+        $blocks = RoomStatusBlock::query()
+            ->with(['room:id,room_number'])
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', ['dirty', 'cleaning', 'pending_inspection'])
+            ->get();
+
+        $blockByRoomId = $blocks->keyBy('room_id');
+
+        $arrivals = Booking::query()
+            ->with(['room:id,room_number'])
+            ->whereDate('check_in', '=', $todayStr)
+            ->whereNotIn('status', ['cancelled', 'checked_out'])
+            ->whereNotNull('room_id')
+            ->get();
+
+        foreach ($arrivals as $booking) {
+            $roomId = (int) $booking->room_id;
+            $block = $blockByRoomId->get($roomId);
+            if (! $block) {
+                continue;
+            }
+
+            $roomNumber = (string) ($booking->room?->room_number ?? $block->room?->room_number ?? '?');
+            $notes = (string) ($booking->notes ?? '');
+            $isVip = stripos($notes, 'vip') !== false;
+            $hasEarly = ! empty($booking->early_checkin_time);
+
+            if ($isVip) {
+                $tasks[] = [
+                    'room_number' => $roomNumber,
+                    'room_id' => $roomId,
+                    'reason' => 'VIP arrival',
+                    'urgency' => 'high',
+                    'status' => (string) $block->status,
+                    'href' => $this->housekeepingBoardHrefForStatus((string) $block->status),
+                    'sort' => 10,
+                ];
+                $seenRoomIds[$roomId] = true;
+            } elseif ($hasEarly) {
+                $tasks[] = [
+                    'room_number' => $roomNumber,
+                    'room_id' => $roomId,
+                    'reason' => 'Early check-in',
+                    'urgency' => 'high',
+                    'status' => (string) $block->status,
+                    'href' => $this->housekeepingBoardHrefForStatus((string) $block->status),
+                    'sort' => 20,
+                ];
+                $seenRoomIds[$roomId] = true;
+            }
+        }
+
+        foreach ($blocks as $block) {
+            $roomId = (int) $block->room_id;
+            if (isset($seenRoomIds[$roomId])) {
+                continue;
+            }
+
+            $roomNumber = (string) ($block->room?->room_number ?? '?');
+            $status = (string) $block->status;
+
+            if ($status === 'pending_inspection') {
+                $tasks[] = [
+                    'room_number' => $roomNumber,
+                    'room_id' => $roomId,
+                    'reason' => 'Inspection pending',
+                    'urgency' => 'medium',
+                    'status' => $status,
+                    'href' => $this->housekeepingBoardHrefForStatus($status),
+                    'sort' => 30,
+                ];
+                $seenRoomIds[$roomId] = true;
+            } elseif ($status === 'dirty') {
+                $tasks[] = [
+                    'room_number' => $roomNumber,
+                    'room_id' => $roomId,
+                    'reason' => 'Awaiting cleaning',
+                    'urgency' => 'medium',
+                    'status' => $status,
+                    'href' => $this->housekeepingBoardHrefForStatus($status),
+                    'sort' => 40,
+                ];
+                $seenRoomIds[$roomId] = true;
+            } elseif ($status === 'cleaning') {
+                $tasks[] = [
+                    'room_number' => $roomNumber,
+                    'room_id' => $roomId,
+                    'reason' => 'Cleaning in progress',
+                    'urgency' => 'low',
+                    'status' => $status,
+                    'href' => $this->housekeepingBoardHrefForStatus($status),
+                    'sort' => 50,
+                ];
+                $seenRoomIds[$roomId] = true;
+            }
+        }
+
+        usort($tasks, fn(array $a, array $b) => $a['sort'] <=> $b['sort'] ?: strcmp($a['room_number'], $b['room_number']));
+
+        return array_map(
+            fn(array $task) => array_diff_key($task, ['sort' => true]),
+            array_slice($tasks, 0, 8)
+        );
+    }
+
+    /**
+     * @param  array<int, array{room_number: string, room_id: int, reason: string, urgency: string, status: string, href: string}>  $priorityTasks
+     * @return array<int, array{id: string, tone: string, message: string, href: string, count: int}>
+     */
+    private function buildHousekeepingDashboardAlerts(
+        Carbon $today,
+        int $lateCleaning,
+        int $inspectionPending,
+        int $maintenance,
+        int $roomStockShortfall,
+        array $priorityTasks
+    ): array {
+        $alerts = [];
+
+        if ($lateCleaning > 0) {
+            $alerts[] = [
+                'id' => 'late-cleaning',
+                'tone' => 'rose',
+                'message' => 'Late cleaning tasks',
+                'href' => '/reception/housekeeping/cleaning-tasks',
+                'count' => $lateCleaning,
+            ];
+        }
+
+        if ($inspectionPending > 0) {
+            $alerts[] = [
+                'id' => 'awaiting-inspection',
+                'tone' => 'amber',
+                'message' => 'Rooms awaiting inspection',
+                'href' => '/reception/housekeeping/checkout-inspection',
+                'count' => $inspectionPending,
+            ];
+        }
+
+        $vipNotReady = count(array_filter(
+            $priorityTasks,
+            fn(array $t) => $t['reason'] === 'VIP arrival' && $t['status'] !== 'inspected'
+        ));
+        if ($vipNotReady > 0) {
+            $alerts[] = [
+                'id' => 'vip-not-ready',
+                'tone' => 'rose',
+                'message' => 'VIP rooms not ready',
+                'href' => '/reception/housekeeping/dirty-rooms',
+                'count' => $vipNotReady,
+            ];
+        }
+
+        if ($maintenance > 0) {
+            $alerts[] = [
+                'id' => 'maintenance',
+                'tone' => 'slate',
+                'message' => 'Maintenance blocks',
+                'href' => '/admin/maintenance',
+                'count' => $maintenance,
+            ];
+        }
+
+        if ($roomStockShortfall > 0) {
+            $alerts[] = [
+                'id' => 'stock-shortfall',
+                'tone' => 'sky',
+                'message' => 'Room stock shortfall',
+                'href' => '/reception/housekeeping/room-stock',
+                'count' => $roomStockShortfall,
+            ];
+        }
+
+        return array_slice($alerts, 0, 5);
+    }
+
+    private function housekeepingBoardHrefForStatus(string $status): string
+    {
+        return match ($status) {
+            'cleaning' => '/reception/housekeeping/cleaning-tasks',
+            'pending_inspection' => '/reception/housekeeping/checkout-inspection',
+            'inspected' => '/reception/housekeeping/clean-rooms',
+            default => '/reception/housekeeping/dirty-rooms',
+        };
+    }
+
+    /**
      * @return array<int, array{key: string, label: string}>
      */
     private function housekeepingChecklistTemplate(): array

@@ -563,7 +563,7 @@ class BookingController extends Controller
 
     /**
      * Reception: request a pre-checkout inspection (moves room to pending_inspection).
-     * This is intentionally independent from booking checkout; billing remains open until checkout is confirmed.
+     * Creates one scoped block per active booking segment (supports room transfers / split stays).
      */
     public function requestInspection(Request $request, Booking $booking)
     {
@@ -575,49 +575,92 @@ class BookingController extends Controller
             ], 422);
         }
 
-        $roomId = (int) $booking->room_id;
-        if ($roomId <= 0) {
-            return response()->json(['message' => 'Booking has no room assigned.'], 422);
+        $booking->load(['segments']);
+
+        $segments = $booking->segments
+            ->filter(fn(BookingSegment $s) => ! in_array($s->status, ['cancelled', 'checked_out'], true));
+
+        if ($segments->isEmpty()) {
+            if ((int) $booking->room_id <= 0) {
+                return response()->json(['message' => 'Booking has no room assigned.'], 422);
+            }
+            $segments = collect([
+                new BookingSegment([
+                    'booking_id' => $booking->id,
+                    'room_id' => $booking->room_id,
+                    'check_in' => $booking->check_in,
+                    'check_out' => $booking->check_out,
+                    'check_in_at' => $booking->check_in_at,
+                    'check_out_at' => $booking->check_out_at,
+                    'status' => 'checked_in',
+                ]),
+            ]);
         }
 
-        // Span the whole remaining stay on the room chart (same overlap rule as `cellInfo`):
-        // active when `dayStart >= start_date && dayStart < end_date`.
-        $checkInAt = $booking->check_in_at
-            ? Carbon::parse($booking->check_in_at)
-            : Carbon::parse($booking->check_in)->startOfDay();
-        $checkOutAt = $booking->check_out_at
-            ? Carbon::parse($booking->check_out_at)
-            : Carbon::parse($booking->check_out)->startOfDay();
-
-        $startDate = $checkInAt->copy()->startOfDay()->toDateString();
-        $endExclusive = $this->dateEndExclusiveFromDateTime($checkOutAt);
-
-        // Ensure this room shows as pending inspection (override chart visuals).
-        // Deactivate any overlapping housekeeping blocks so there is a single, deterministic status block.
-        RoomStatusBlock::where('room_id', '=', $roomId, 'and')
-            ->where('is_active', '=', true, 'and')
-            ->whereIn('status', ['dirty', 'cleaning', 'inspected', 'pending_inspection'], 'and', false)
-            ->where('start_date', '<', $endExclusive)
-            ->where('end_date', '>', $startDate)
+        // Drop prior pending-inspection handoff for this booking only.
+        RoomStatusBlock::where('is_active', '=', true, 'and')
+            ->where('status', '=', 'pending_inspection', 'and')
+            ->where('inspection_snapshot->booking_id', '=', $booking->id)
             ->update(['is_active' => false]);
 
-        $block = RoomStatusBlock::create([
-            'room_id' => $roomId,
-            'status' => 'pending_inspection',
-            'start_date' => $startDate,
-            'end_date' => $endExclusive,
-            'note' => 'Reception: requested checkout inspection',
-            'is_active' => true,
-            'created_by' => Auth::id(),
-        ]);
+        $createdBlocks = [];
+        $affectedRoomIds = [];
 
-        Room::where('id', '=', $roomId, 'and')->update(['status' => 'pending_inspection']);
+        foreach ($segments as $segment) {
+            $roomId = (int) $segment->room_id;
+            if ($roomId <= 0) {
+                continue;
+            }
 
-        HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'request_inspection');
+            $checkInAt = $segment->check_in_at
+                ? Carbon::parse($segment->check_in_at)
+                : Carbon::parse($segment->check_in)->startOfDay();
+            $checkOutAt = $segment->check_out_at
+                ? Carbon::parse($segment->check_out_at)
+                : Carbon::parse($segment->check_out)->startOfDay();
+
+            $startDate = $checkInAt->copy()->startOfDay()->toDateString();
+            $endExclusive = $this->dateEndExclusiveFromDateTime($checkOutAt);
+
+            RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+                ->where('is_active', '=', true, 'and')
+                ->whereIn('status', ['dirty', 'cleaning', 'inspected', 'pending_inspection'], 'and', false)
+                ->where('start_date', '<', $endExclusive)
+                ->where('end_date', '>', $startDate)
+                ->update(['is_active' => false]);
+
+            $createdBlocks[] = RoomStatusBlock::create([
+                'room_id' => $roomId,
+                'status' => 'pending_inspection',
+                'start_date' => $startDate,
+                'end_date' => $endExclusive,
+                'note' => 'Reception: requested checkout inspection',
+                'is_active' => true,
+                'created_by' => Auth::id(),
+                'inspection_snapshot' => [
+                    'booking_id' => $booking->id,
+                    'room_id' => $roomId,
+                    'segment_id' => $segment->id ?? null,
+                ],
+            ]);
+
+            $affectedRoomIds[$roomId] = true;
+        }
+
+        if ($createdBlocks === []) {
+            return response()->json(['message' => 'No active room segments to inspect.'], 422);
+        }
+
+        foreach (array_keys($affectedRoomIds) as $rid) {
+            Room::where('id', '=', $rid, 'and')->update(['status' => 'pending_inspection']);
+        }
+
+        HousekeepingStateUpdated::dispatchIfEnabled(array_keys($affectedRoomIds), 'request_inspection');
 
         return response()->json([
             'message' => 'Inspection requested.',
-            'block' => $block->fresh()->load('room.roomType'),
+            'blocks' => collect($createdBlocks)->map(fn($b) => $b->fresh()->load('room.roomType'))->values(),
+            'block' => $createdBlocks[0]->fresh()->load('room.roomType'),
         ]);
     }
 

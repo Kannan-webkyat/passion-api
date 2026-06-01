@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AdminDashboardController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\ComboController;
@@ -71,6 +72,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);
+    Route::get('dashboard/financial-summary', [AdminDashboardController::class, 'financialSummary']);
+    Route::get('dashboard/admin-summary', [AdminDashboardController::class, 'adminSummary']);
     Route::apiResource('roles', RoleController::class);
     Route::apiResource('departments', DepartmentController::class);
     Route::get('permissions', [RoleController::class, 'permissions']);
@@ -78,6 +81,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // Bookings & Room Chart
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
     Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
+    Route::get('housekeeping/dashboard-summary', [HousekeepingController::class, 'dashboardSummary']);
     Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
     Route::get('housekeeping/rooms/{room}/cleaning-history/detail', [HousekeepingController::class, 'roomCleaningHistoryDetail']);
     Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
@@ -191,6 +195,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('orders/{order}/void', [PosController::class, 'void']);
         Route::post('orders/{order}/refund', [PosController::class, 'refund']);
         Route::get('reports/sales', [PosController::class, 'salesReport']);
+        Route::get('reports/dashboard-summary', [PosController::class, 'salesDashboardSummary']);
         Route::get('reports/sales/export', [PosController::class, 'salesReportExport']);
         Route::get('reports/sales/orders', [PosController::class, 'salesReportOrders']);
         Route::get('reports/liquor-sales', [PosController::class, 'liquorSalesReport']);

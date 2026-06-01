@@ -97,7 +97,7 @@ class SettingController extends Controller
         }
 
         if ($request->hasFile('logo')) {
-            $request->validate(['logo' => 'image|mimes:png,jpg,jpeg|max:512']);
+            $request->validate(['logo' => 'image|mimes:png,jpg,jpeg,webp|max:2048']);
             $old = Setting::get('receipt_logo_path');
             if ($old && Storage::disk('public')->exists($old)) {
                 Storage::disk('public')->delete($old);

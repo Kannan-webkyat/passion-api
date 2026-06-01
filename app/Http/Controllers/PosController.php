@@ -619,6 +619,298 @@ class PosController extends Controller
     }
 
     /**
+     * Aggregated F&B financials for admin dashboard (all accessible outlets).
+     *
+     * Query params:
+     * - from (Y-m-d) required
+     * - to (Y-m-d) required
+     */
+    public function salesDashboardSummary(Request $request)
+    {
+        $this->checkPermission('report-sales');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+        ]);
+
+        $from = $validated['from'];
+        $to = $validated['to'];
+        $outletIds = $this->resolveAccessibleOutletIds();
+
+        if ($outletIds === []) {
+            return response()->json([
+                'from' => $from,
+                'to' => $to,
+                'outlet_count' => 0,
+                'orders_count' => 0,
+                'total_sales' => 0.0,
+                'revenue' => 0.0,
+                'food_cost' => 0.0,
+                'profit' => 0.0,
+                'profit_margin_pct' => 0.0,
+                'total_refunded' => 0.0,
+                'average_bill_value' => 0.0,
+                'active_tables' => 0,
+                'order_activity' => ['completed' => 0, 'pending' => 0, 'cancelled' => 0],
+                'top_selling_items' => [],
+                'revenue_breakdown' => [],
+                'top_outlet_id' => null,
+                'by_outlet' => [],
+            ]);
+        }
+
+        $baseOrdersQ = DB::table('pos_orders')
+            ->whereIn('status', ['paid', 'refunded'])
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to);
+
+        $agg = (clone $baseOrdersQ)->select(
+            DB::raw('COUNT(*) as orders_count'),
+            DB::raw('SUM(total_amount) as total_amount'),
+            DB::raw('SUM(subtotal) as subtotal'),
+            DB::raw('SUM(tax_amount) as tax_amount'),
+        )->first();
+
+        $refundsQ = DB::table('pos_order_refunds')
+            ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
+            ->whereIn('pos_orders.restaurant_id', $outletIds)
+            ->whereDate('pos_order_refunds.business_date', '>=', $from)
+            ->whereDate('pos_order_refunds.business_date', '<=', $to);
+
+        $totalRefunded = (float) $refundsQ->sum('pos_order_refunds.amount');
+        $totalSales = (float) ($agg->total_amount ?? 0);
+        $revenue = round($totalSales - $totalRefunded, 2);
+        $foodCost = $this->estimateFoodCostForOutlets($outletIds, $from, $to);
+        $profit = round($revenue - $foodCost, 2);
+        $marginBase = $revenue > 0 ? $revenue : 0;
+        $profitMarginPct = $marginBase > 0 ? round(($profit / $marginBase) * 100, 1) : 0.0;
+
+        $outletNames = RestaurantMaster::query()
+            ->whereIn('id', $outletIds)
+            ->pluck('name', 'id');
+
+        $byOutlet = [];
+        foreach ($outletIds as $outletId) {
+            $outletAgg = DB::table('pos_orders')
+                ->whereIn('status', ['paid', 'refunded'])
+                ->where('restaurant_id', $outletId)
+                ->whereDate('business_date', '>=', $from)
+                ->whereDate('business_date', '<=', $to)
+                ->select(
+                    DB::raw('COUNT(*) as orders_count'),
+                    DB::raw('SUM(total_amount) as total_amount'),
+                )
+                ->first();
+
+            $outletRefund = (float) DB::table('pos_order_refunds')
+                ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
+                ->where('pos_orders.restaurant_id', $outletId)
+                ->whereDate('pos_order_refunds.business_date', '>=', $from)
+                ->whereDate('pos_order_refunds.business_date', '<=', $to)
+                ->sum('pos_order_refunds.amount');
+
+            $outletGross = (float) ($outletAgg->total_amount ?? 0);
+            $outletRevenue = round($outletGross - $outletRefund, 2);
+
+            $byOutlet[] = [
+                'id' => $outletId,
+                'name' => trim((string) ($outletNames[$outletId] ?? '')) ?: "Outlet {$outletId}",
+                'orders_count' => (int) ($outletAgg->orders_count ?? 0),
+                'total_sales' => round($outletGross, 2),
+                'revenue' => $outletRevenue,
+            ];
+        }
+
+        usort($byOutlet, fn($a, $b) => $b['revenue'] <=> $a['revenue']);
+
+        $ordersCount = (int) ($agg->orders_count ?? 0);
+        $avgBillValue = $ordersCount > 0 ? round($revenue / $ordersCount, 2) : 0.0;
+
+        $activeTables = (int) DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereIn('status', ['open', 'billed'])
+            ->whereNotNull('table_id')
+            ->distinct('table_id')
+            ->count('table_id');
+
+        $orderActivity = $this->buildPosOrderActivity($outletIds, $from, $to);
+        $topSellingItems = $this->buildPosTopSellingItems($outletIds, $from, $to, $revenue);
+        $revenueBreakdown = $this->buildPosRevenueBreakdown($outletIds, $from, $to, $outletNames);
+
+        $topOutletId = $byOutlet[0]['id'] ?? null;
+
+        return response()->json([
+            'from' => $from,
+            'to' => $to,
+            'outlet_count' => count($outletIds),
+            'orders_count' => $ordersCount,
+            'total_sales' => round($totalSales, 2),
+            'revenue' => $revenue,
+            'food_cost' => $foodCost,
+            'profit' => $profit,
+            'profit_margin_pct' => $profitMarginPct,
+            'total_refunded' => round($totalRefunded, 2),
+            'average_bill_value' => $avgBillValue,
+            'active_tables' => $activeTables,
+            'order_activity' => $orderActivity,
+            'top_selling_items' => $topSellingItems,
+            'revenue_breakdown' => $revenueBreakdown,
+            'top_outlet_id' => $topOutletId,
+            'by_outlet' => array_map(function (array $outlet) use ($topOutletId, $revenue) {
+                $share = $revenue > 0 ? round(($outlet['revenue'] / $revenue) * 100, 1) : 0.0;
+
+                return array_merge($outlet, [
+                    'revenue_share_pct' => $share,
+                    'is_top' => $topOutletId !== null && (int) $outlet['id'] === (int) $topOutletId,
+                ]);
+            }, $byOutlet),
+        ]);
+    }
+
+    /**
+     * @param  array<int, int|string>  $outletIds
+     * @return array{completed: int, pending: int, cancelled: int}
+     */
+    private function buildPosOrderActivity(array $outletIds, string $from, string $to): array
+    {
+        $completed = (int) DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereIn('status', ['paid', 'refunded'])
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to)
+            ->count();
+
+        $pending = (int) DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereIn('status', ['open', 'billed'])
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to)
+            ->count();
+
+        $cancelled = (int) DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->where('status', '=', 'void')
+            ->where(function ($q) use ($from, $to) {
+                $q->where(function ($sq) use ($from, $to) {
+                    $sq->whereNotNull('voided_at')
+                        ->whereDate('voided_at', '>=', $from)
+                        ->whereDate('voided_at', '<=', $to);
+                })->orWhere(function ($sq) use ($from, $to) {
+                    $sq->whereNull('voided_at')
+                        ->whereDate('business_date', '>=', $from)
+                        ->whereDate('business_date', '<=', $to);
+                });
+            })
+            ->count();
+
+        return [
+            'completed' => $completed,
+            'pending' => $pending,
+            'cancelled' => $cancelled,
+        ];
+    }
+
+    /**
+     * @param  array<int, int|string>  $outletIds
+     * @return array<int, array{id: int, name: string, quantity: float, revenue: float, share_pct: float}>
+     */
+    private function buildPosTopSellingItems(array $outletIds, string $from, string $to, float $periodRevenue): array
+    {
+        $rows = DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->leftJoin('menu_items', 'pos_order_items.menu_item_id', '=', 'menu_items.id')
+            ->whereIn('pos_orders.restaurant_id', $outletIds)
+            ->whereIn('pos_orders.status', ['paid', 'refunded'])
+            ->whereIn('pos_order_items.status', ['active'])
+            ->whereDate('pos_orders.business_date', '>=', $from)
+            ->whereDate('pos_orders.business_date', '<=', $to)
+            ->whereNotNull('pos_order_items.menu_item_id')
+            ->groupBy('pos_order_items.menu_item_id', 'menu_items.name')
+            ->select(
+                'pos_order_items.menu_item_id as id',
+                DB::raw('COALESCE(menu_items.name, CONCAT("Item #", pos_order_items.menu_item_id)) as name'),
+                DB::raw('SUM(pos_order_items.quantity) as quantity'),
+                DB::raw('SUM(pos_order_items.line_total) as revenue'),
+            )
+            ->orderByDesc('quantity')
+            ->limit(5)
+            ->get();
+
+        $totalItemRevenue = (float) $rows->sum(fn($r) => (float) $r->revenue);
+        $denom = $totalItemRevenue > 0 ? $totalItemRevenue : ($periodRevenue > 0 ? $periodRevenue : 1);
+
+        return $rows->map(function ($row) use ($denom) {
+            $itemRevenue = round((float) $row->revenue, 2);
+
+            return [
+                'id' => (int) $row->id,
+                'name' => (string) $row->name,
+                'quantity' => round((float) $row->quantity, 2),
+                'revenue' => $itemRevenue,
+                'share_pct' => round(($itemRevenue / $denom) * 100, 1),
+            ];
+        })->values()->all();
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, string>  $outletNames
+     * @return array<int, array{key: string, label: string, revenue: float, orders: int}>
+     */
+    private function buildPosRevenueBreakdown(array $outletIds, string $from, string $to, $outletNames): array
+    {
+        $orders = DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereIn('status', ['paid', 'refunded'])
+            ->whereDate('business_date', '>=', $from)
+            ->whereDate('business_date', '<=', $to)
+            ->get(['id', 'restaurant_id', 'order_type', 'total_amount']);
+
+        $refundsByOrder = DB::table('pos_order_refunds')
+            ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
+            ->whereIn('pos_orders.restaurant_id', $outletIds)
+            ->whereDate('pos_order_refunds.business_date', '>=', $from)
+            ->whereDate('pos_order_refunds.business_date', '<=', $to)
+            ->groupBy('pos_order_refunds.order_id')
+            ->select('pos_order_refunds.order_id', DB::raw('SUM(pos_order_refunds.amount) as refunded'))
+            ->pluck('refunded', 'order_id');
+
+        $buckets = [
+            'restaurant' => ['key' => 'restaurant', 'label' => 'Restaurant', 'revenue' => 0.0, 'orders' => 0],
+            'bar' => ['key' => 'bar', 'label' => 'Bar', 'revenue' => 0.0, 'orders' => 0],
+            'room_service' => ['key' => 'room_service', 'label' => 'Room service', 'revenue' => 0.0, 'orders' => 0],
+            'other' => ['key' => 'other', 'label' => 'Other outlets', 'revenue' => 0.0, 'orders' => 0],
+        ];
+
+        foreach ($orders as $order) {
+            $net = round((float) $order->total_amount - (float) ($refundsByOrder[$order->id] ?? 0), 2);
+            $orderType = (string) ($order->order_type ?? 'dine_in');
+            $outletName = (string) ($outletNames[$order->restaurant_id] ?? '');
+            $isBar = stripos($outletName, 'bar') !== false;
+
+            if ($orderType === 'room_service') {
+                $key = 'room_service';
+            } elseif ($isBar) {
+                $key = 'bar';
+            } elseif (in_array($orderType, ['dine_in', 'takeaway', 'walk_in'], true)) {
+                $key = 'restaurant';
+            } else {
+                $key = 'other';
+            }
+
+            $buckets[$key]['revenue'] += $net;
+            $buckets[$key]['orders']++;
+        }
+
+        return array_values(array_map(function (array $bucket) {
+            $bucket['revenue'] = round($bucket['revenue'], 2);
+
+            return $bucket;
+        }, $buckets));
+    }
+
+    /**
      * Liquor (state VAT) line register: same structure as food/GST report, filtered to liquor VAT lines only.
      */
     public function liquorSalesReport(Request $request)
@@ -8254,6 +8546,87 @@ class PosController extends Controller
             ->get();
 
         return $menuRows->concat($comboRows)->sortByDesc(fn($r) => (float) $r->revenue)->values();
+    }
+
+    /**
+     * @return array<int, int>
+     */
+    private function resolveAccessibleOutletIds(): array
+    {
+        $user = auth()->user();
+        if (! $user) {
+            return [];
+        }
+
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return RestaurantMaster::query()
+                ->where('is_active', true)
+                ->orderBy('id')
+                ->pluck('id')
+                ->map(fn($id) => (int) $id)
+                ->all();
+        }
+
+        $assigned = $user->restaurants()->pluck('restaurant_masters.id')->map(fn($id) => (int) $id)->all();
+        if (count($assigned) > 0) {
+            return $assigned;
+        }
+
+        $deptIds = $user->departments()->pluck('departments.id')->map(fn($id) => (int) $id)->all();
+        if (count($deptIds) > 0) {
+            return RestaurantMaster::query()
+                ->where('is_active', true)
+                ->where(function ($q) use ($deptIds) {
+                    $q->whereIn('department_id', $deptIds)->orWhereNull('department_id');
+                })
+                ->orderBy('id')
+                ->pluck('id')
+                ->map(fn($id) => (int) $id)
+                ->all();
+        }
+
+        return [];
+    }
+
+    /**
+     * Estimated COGS from active recipe costs × quantities sold (menu items only).
+     */
+    private function estimateFoodCostForOutlets(array $outletIds, string $from, string $to): float
+    {
+        if ($outletIds === []) {
+            return 0.0;
+        }
+
+        $costByMenuItemId = Recipe::query()
+            ->with(['ingredients.inventoryItem'])
+            ->where('is_active', true)
+            ->get()
+            ->mapWithKeys(fn(Recipe $recipe) => [(int) $recipe->menu_item_id => (float) $recipe->cost_per_portion]);
+
+        if ($costByMenuItemId->isEmpty()) {
+            return 0.0;
+        }
+
+        $soldRows = DB::table('pos_order_items as poi')
+            ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
+            ->whereIn('po.status', ['paid', 'refunded'])
+            ->whereIn('po.restaurant_id', $outletIds)
+            ->whereDate('po.business_date', '>=', $from)
+            ->whereDate('po.business_date', '<=', $to)
+            ->where('poi.status', 'active')
+            ->whereNotNull('poi.menu_item_id')
+            ->groupBy('poi.menu_item_id')
+            ->select('poi.menu_item_id', DB::raw('SUM(poi.quantity) as qty'))
+            ->get();
+
+        $total = 0.0;
+        foreach ($soldRows as $row) {
+            $menuItemId = (int) $row->menu_item_id;
+            $qty = (float) $row->qty;
+            $total += $qty * (float) ($costByMenuItemId[$menuItemId] ?? 0.0);
+        }
+
+        return round($total, 2);
     }
 
     /**

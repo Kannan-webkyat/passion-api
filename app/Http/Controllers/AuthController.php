@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\LoginAttempt;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -19,8 +20,17 @@ class AuthController extends Controller
         ]);
 
         $user = User::where('email', $request->email)->first();
+        $successful = $user && Hash::check($request->password, $user->password);
 
-        if (! $user || ! Hash::check($request->password, $user->password)) {
+        LoginAttempt::create([
+            'email' => strtolower(trim((string) $request->email)),
+            'successful' => $successful,
+            'ip_address' => $request->ip(),
+            'user_agent' => substr((string) $request->userAgent(), 0, 500),
+            'created_at' => now(),
+        ]);
+
+        if (! $successful) {
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials are incorrect.'],
             ]);
