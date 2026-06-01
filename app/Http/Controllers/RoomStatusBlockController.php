@@ -142,10 +142,63 @@ class RoomStatusBlockController extends Controller
     public function update(Request $request, RoomStatusBlock $roomStatusBlock)
     {
         $this->authorizeStatusBlockMutation($roomStatusBlock);
+
+        $nextStatus = $request->input('status', $roomStatusBlock->status);
         $validated = $request->validate([
             'is_active' => 'nullable|boolean',
-            'note' => 'nullable|string|max:255',
+            'note' => in_array($nextStatus, ['on_hold', 'maintenance'], true)
+                ? 'sometimes|required|string|max:255'
+                : 'nullable|string|max:255',
+            'status' => 'sometimes|in:maintenance,dirty,cleaning,on_hold',
+            'start_date' => 'sometimes|date',
+            'end_date' => 'sometimes|date',
         ]);
+
+        if (
+            isset($validated['start_date'], $validated['end_date'])
+            && Carbon::parse($validated['end_date'])->lte(Carbon::parse($validated['start_date']))
+        ) {
+            return response()->json(['message' => 'End date must be after start date.'], 422);
+        }
+
+        $startDate = $validated['start_date'] ?? $roomStatusBlock->start_date;
+        $endDate = $validated['end_date'] ?? $roomStatusBlock->end_date;
+
+        if ($request->hasAny(['start_date', 'end_date']) && ($roomStatusBlock->is_active ?? true)) {
+            $startAt = Carbon::parse($startDate)->startOfDay();
+            $endAt = Carbon::parse($endDate)->startOfDay();
+
+            $hasReservation = BookingSegment::where('room_id', '=', $roomStatusBlock->room_id, 'and')
+                ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+                ->where('check_in_at', '<', $endAt, 'and')
+                ->where('check_out_at', '>', $startAt, 'and')
+                ->exists();
+
+            if ($hasReservation) {
+                $room = Room::find($roomStatusBlock->room_id, ['room_number']);
+
+                return response()->json([
+                    'message' => "Cannot update block for Room #{$room?->room_number} — a reservation overlaps this date range.",
+                ], 422);
+            }
+
+            $overlap = RoomStatusBlock::where('room_id', '=', $roomStatusBlock->room_id, 'and')
+                ->where('id', '!=', $roomStatusBlock->id, 'and')
+                ->where('is_active', '=', true, 'and')
+                ->where('start_date', '<', $endDate, 'and')
+                ->where('end_date', '>', $startDate, 'and')
+                ->exists();
+
+            if ($overlap) {
+                return response()->json([
+                    'message' => 'Room already has an active status block in this period.',
+                ], 422);
+            }
+        }
+
+        if (isset($validated['status']) && $validated['status'] !== $roomStatusBlock->status) {
+            $this->authorizeStatusBlockStore($validated['status']);
+        }
 
         $roomStatusBlock->update($validated);
 
@@ -158,7 +211,7 @@ class RoomStatusBlockController extends Controller
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'room_status_block_update');
 
-        return response()->json($roomStatusBlock->load('room'));
+        return response()->json($roomStatusBlock->load(['room.roomType', 'creator:id,name']));
     }
 
     public function destroy(RoomStatusBlock $roomStatusBlock)
