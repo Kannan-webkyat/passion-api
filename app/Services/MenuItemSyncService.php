@@ -38,9 +38,7 @@ class MenuItemSyncService
                 ? MenuItemVariant::where('menu_item_id', $menuItem->id)->where('id', $row['id'])->first()
                 : null;
 
-            $basePrice = array_key_exists('price', $row)
-                ? (float) $row['price']
-                : (float) ($existingVariant->price ?? 0);
+            $basePrice = $this->resolveVariantBasePrice($row, $existingVariant);
 
             $mlQuantity = array_key_exists('ml_quantity', $row)
                 ? (isset($row['ml_quantity']) && $row['ml_quantity'] !== '' ? (float) $row['ml_quantity'] : null)
@@ -142,5 +140,26 @@ class MenuItemSyncService
                 $data
             );
         }
+    }
+
+    /**
+     * Stored on menu_item_variants for legacy/fallback; POS uses per-outlet variant price when set.
+     */
+    private function resolveVariantBasePrice(array $row, ?MenuItemVariant $existingVariant): float
+    {
+        if (array_key_exists('price', $row) && $row['price'] !== '' && $row['price'] !== null) {
+            return (float) $row['price'];
+        }
+
+        $outletPrices = collect($row['restaurant_prices'] ?? [])
+            ->filter(fn ($rp) => is_array($rp))
+            ->map(fn ($rp) => (float) ($rp['price'] ?? 0))
+            ->filter(fn ($p) => $p > 0);
+
+        if ($outletPrices->isNotEmpty()) {
+            return (float) $outletPrices->first();
+        }
+
+        return (float) ($existingVariant->price ?? 0);
     }
 }

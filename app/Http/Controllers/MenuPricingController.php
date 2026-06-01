@@ -82,10 +82,18 @@ class MenuPricingController extends Controller
     {
         $this->checkPermission('manage-menu');
 
+        $menuItem->loadMissing('variants');
+        $hasVariants = $menuItem->variants->isNotEmpty()
+            || collect($request->input('variants', []))->contains(
+                fn ($v) => is_array($v) && trim($v['size_label'] ?? '') !== ''
+            );
+
         $validated = $request->validate([
             'restaurant_links' => 'required|array|min:1',
             'restaurant_links.*.restaurant_master_id' => 'required|exists:restaurant_masters,id',
-            'restaurant_links.*.price' => 'required|numeric|gt:0',
+            'restaurant_links.*.price' => $hasVariants
+                ? 'nullable|numeric|min:0'
+                : 'required|numeric|gt:0',
             'restaurant_links.*.fixed_ept' => 'nullable|integer|min:0',
             'restaurant_links.*.is_active' => 'boolean',
         ]);
@@ -96,8 +104,9 @@ class MenuPricingController extends Controller
         if ($request->has('variants')) {
             $request->validate([
                 'variants' => 'present|array',
-                'variants.*.price' => 'required|numeric|gt:0',
-                'variants.*.restaurant_prices' => 'sometimes|array',
+                'variants.*.price' => 'nullable|numeric|min:0',
+                'variants.*.restaurant_prices' => 'required|array|min:1',
+                'variants.*.restaurant_prices.*.restaurant_master_id' => 'required|exists:restaurant_masters,id',
                 'variants.*.restaurant_prices.*.price' => 'required|numeric|gt:0',
             ]);
             $this->menuItemSync->syncVariants($menuItem, $request->input('variants'));
