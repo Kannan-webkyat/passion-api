@@ -13,26 +13,26 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $this->call([
-            // InventoryTaxSeeder::class,
-            // InventoryUomSeeder::class,
-            // CessSlabSeeder::class,
-            // RolePermissionSeeder::class,
-            // DepartmentSeeder::class,
-            // LocationSeeder::class,
-            // PaymentMethodSeeder::class,
-            // RestaurantTableSeeder::class,
-            // FreshBiryaniTeaCoffeeSeeder::class,
-            // BarSeeder::class,
+            InventoryTaxSeeder::class,
+            InventoryUomSeeder::class,
+            CessSlabSeeder::class,
+            RolePermissionSeeder::class,
+            DepartmentSeeder::class,
+            LocationSeeder::class,
+            PaymentMethodSeeder::class,
+            RestaurantTableSeeder::class,
+            FreshBiryaniTeaCoffeeSeeder::class,
+            BarSeeder::class,
             // BarInventoryOrganizedSeeder::class,
             // BarMenuConfigurationSeeder::class,
-            // RoomTypeRoomSeeder::class,
-            // HotelInventoryCatalogSeeder::class,
-            // RoomParTestTemplatesSeeder::class,
-            // RoomParProcurementStockSeeder::class,
-            // HousekeepingStoreRoomParStockSeeder::class, // optional: move PAR buffer Main Store -> Housekeeping Store
-            // HotelMinibarMenuItemsSeeder::class,
-            // RbacTestUsersSeeder::class,
-            // BookingSeeder::class,
+            RoomTypeRoomSeeder::class,
+            HotelInventoryCatalogSeeder::class,
+            RoomParTestTemplatesSeeder::class,
+            RoomParProcurementStockSeeder::class,
+            HousekeepingStoreRoomParStockSeeder::class, // optional: move PAR buffer Main Store -> Housekeeping Store
+            HotelMinibarMenuItemsSeeder::class,
+            RbacTestUsersSeeder::class,
+            BookingSeeder::class,
         ]);
 
         User::firstOrCreate(
