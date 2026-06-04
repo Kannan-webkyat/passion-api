@@ -692,7 +692,11 @@ class HousekeepingController extends Controller
      */
     public function catalog()
     {
-        $this->allowHousekeepingNav();
+        if (request()->boolean('for_daily_cleaning')) {
+            $this->allowHousekeepingViewSection([self::HK_DAILY]);
+        } else {
+            $this->allowHousekeepingNav();
+        }
 
         $validated = request()->validate([
             'room_id' => 'nullable|integer|exists:rooms,id',
@@ -2348,6 +2352,7 @@ class HousekeepingController extends Controller
         return response()->json([
             'service_date' => $d,
             'rows' => $rows,
+            'checklist_template' => $this->housekeepingChecklistTemplate(),
         ]);
     }
 
@@ -2708,6 +2713,25 @@ class HousekeepingController extends Controller
     /**
      * @return array<string, mixed>
      */
+    private function cleaningHistoryDurationMinutes($start, $end): ?int
+    {
+        if (! $start || ! $end) {
+            return null;
+        }
+        try {
+            $s = $start instanceof Carbon ? $start : Carbon::parse($start);
+            $e = $end instanceof Carbon ? $end : Carbon::parse($end);
+            $mins = (int) round($s->diffInSeconds($e) / 60);
+
+            return $mins >= 0 ? $mins : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     private function dailyCleaningHistoryEntry(DailyRoomCleaning $r, bool $includeRoom = false): array
     {
         $dailyLabel = [
@@ -2721,10 +2745,8 @@ class HousekeepingController extends Controller
             ?? $r->startedByUser?->name
             ?? $r->assignedUser?->name;
 
-        $remarks = trim(implode("\n\n", array_filter([
-            $r->remarks ? (string) $r->remarks : null,
-            $r->maintenance_note ? 'Maintenance: ' . (string) $r->maintenance_note : null,
-        ])));
+        $maintenanceNote = trim((string) ($r->maintenance_note ?? ''));
+        $hkRemarks = trim((string) ($r->remarks ?? ''));
 
         $entry = [
             'source' => 'daily_service',
@@ -2735,8 +2757,14 @@ class HousekeepingController extends Controller
             'service_date' => $r->service_date instanceof Carbon ? $r->service_date->toDateString() : (string) $r->service_date,
             'cleaning_status' => $dailyLabel[$r->status] ?? $r->status,
             'staff_name' => $staff,
-            'remarks' => $remarks !== '' ? $remarks : null,
+            'remarks' => $hkRemarks !== '' ? $hkRemarks : null,
             'inspection_status' => null,
+            'started_at' => $r->started_at?->toIso8601String(),
+            'completed_at' => $r->completed_at?->toIso8601String(),
+            'duration_minutes' => $this->cleaningHistoryDurationMinutes($r->started_at, $r->completed_at),
+            'has_maintenance' => $maintenanceNote !== '',
+            'maintenance_note' => $maintenanceNote !== '' ? $maintenanceNote : null,
+            'has_issues' => false,
         ];
 
         if ($includeRoom && $r->relationLoaded('room') && $r->room) {
@@ -2809,10 +2837,9 @@ class HousekeepingController extends Controller
                 default => null,
             };
 
-            $remarks = trim(implode("\n\n", array_filter([
-                $job->remarks ? (string) $job->remarks : null,
-                $job->issues_summary ? 'Issues: ' . (string) $job->issues_summary : null,
-            ])));
+            $issuesSummary = trim((string) ($job->issues_summary ?? ''));
+            $jobStarted = $job->created_at;
+            $jobCompleted = in_array($job->status, ['completed', 'inspected'], true) ? $job->updated_at : null;
 
             return [
                 'source' => 'turnover',
@@ -2822,8 +2849,14 @@ class HousekeepingController extends Controller
                 'service_date' => $occ instanceof Carbon ? $occ->toDateString() : Carbon::parse($job->created_at)->toDateString(),
                 'cleaning_status' => $jobStatusLabel,
                 'staff_name' => $staff,
-                'remarks' => $remarks !== '' ? $remarks : null,
+                'remarks' => $job->remarks ? (string) $job->remarks : null,
                 'inspection_status' => $inspection,
+                'started_at' => $jobStarted instanceof Carbon ? $jobStarted->toIso8601String() : null,
+                'completed_at' => $jobCompleted instanceof Carbon ? $jobCompleted->toIso8601String() : null,
+                'duration_minutes' => $this->cleaningHistoryDurationMinutes($jobStarted, $jobCompleted),
+                'has_maintenance' => false,
+                'maintenance_note' => null,
+                'has_issues' => $issuesSummary !== '',
             ];
         })->all();
 

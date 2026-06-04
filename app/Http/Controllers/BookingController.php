@@ -8,6 +8,7 @@ use App\Models\Booking;
 use App\Models\BookingExtraCharge;
 use App\Models\BookingGroup;
 use App\Models\BookingSegment;
+use App\Models\DailyRoomCleaning;
 use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Room;
@@ -979,6 +980,7 @@ class BookingController extends Controller
 
             if (($validated['status'] ?? '') === 'checked_in') {
                 Room::findOrFail($roomId)->update(['status' => 'occupied']);
+                $this->syncDailyCleaningOnCheckIn($booking->fresh(['segments']));
             }
 
             $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
@@ -1399,10 +1401,71 @@ class BookingController extends Controller
                     }
                 }
                 HousekeepingStateUpdated::dispatchIfEnabled($checkoutNotifyRoomIds, 'booking_checkout');
+            } elseif ($validated['status'] === 'checked_in') {
+                $this->syncDailyCleaningOnCheckIn($booking->fresh(['segments']));
             }
         }
 
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
+    }
+
+    /**
+     * Checked-in guests appear on the daily cleaning board; notify HK UIs and seed today's row.
+     */
+    private function syncDailyCleaningOnCheckIn(Booking $booking): void
+    {
+        $today = Carbon::today()->toDateString();
+        $bookingId = (int) $booking->id;
+        $roomIds = [];
+
+        $segments = $booking->segments;
+        if ($segments->isEmpty()) {
+            $rid = (int) $booking->room_id;
+            if ($rid > 0) {
+                $roomIds[] = $rid;
+                $cleaning = DailyRoomCleaning::firstOrCreate(
+                    [
+                        'room_id' => $rid,
+                        'service_date' => $today,
+                    ],
+                    [
+                        'booking_id' => $bookingId,
+                        'status' => 'pending_cleaning',
+                    ]
+                );
+                if ($bookingId > 0 && (int) ($cleaning->booking_id ?? 0) !== $bookingId) {
+                    $cleaning->booking_id = $bookingId;
+                    $cleaning->save();
+                }
+            }
+        } else {
+            foreach ($segments as $seg) {
+                $rid = (int) $seg->room_id;
+                if ($rid <= 0) {
+                    continue;
+                }
+                $roomIds[] = $rid;
+                $cleaning = DailyRoomCleaning::firstOrCreate(
+                    [
+                        'room_id' => $rid,
+                        'service_date' => $today,
+                    ],
+                    [
+                        'booking_id' => $bookingId,
+                        'status' => 'pending_cleaning',
+                    ]
+                );
+                if ($bookingId > 0 && (int) ($cleaning->booking_id ?? 0) !== $bookingId) {
+                    $cleaning->booking_id = $bookingId;
+                    $cleaning->save();
+                }
+            }
+        }
+
+        $roomIds = array_values(array_unique(array_filter($roomIds)));
+        if ($roomIds !== []) {
+            HousekeepingStateUpdated::dispatchIfEnabled($roomIds, 'booking_checkin');
+        }
     }
 
     // ── Early Check-In ────────────────────────────────────────────────────────
