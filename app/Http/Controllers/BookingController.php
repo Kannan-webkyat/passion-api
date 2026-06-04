@@ -730,6 +730,17 @@ class BookingController extends Controller
             ], 422);
         }
 
+        if ($status === 'checked_in') {
+            $checkInDay = $bookingUnit === 'hour_package'
+                ? $checkInAt->toDateString()
+                : Carbon::parse($validated['check_in'])->startOfDay()->toDateString();
+            if ($checkInDay !== Carbon::today()->toDateString()) {
+                return response()->json([
+                    'message' => 'Check-in is only allowed on the guest\'s scheduled arrival date (today).',
+                ], 422);
+            }
+        }
+
         if ($bookingUnit === 'day') {
             if (! $checkOutAt) {
                 return response()->json(['message' => 'check_out is required for day bookings.'], 422);
@@ -990,6 +1001,19 @@ class BookingController extends Controller
     }
 
     /**
+     * Hotel calendar arrival day for check-in rules (day stays use check_in, not UTC slice of check_in_at).
+     */
+    private function bookingArrivalCalendarDay(Booking $booking): string
+    {
+        $unit = (string) ($booking->booking_unit ?? 'day');
+        if ($unit === 'hour_package' && $booking->check_in_at) {
+            return Carbon::parse($booking->check_in_at)->toDateString();
+        }
+
+        return Carbon::parse($booking->check_in)->toDateString();
+    }
+
+    /**
      * When creating a day booking, if estimated arrival is before property standard check-in time,
      * persist early_checkin_time (same rule as POST .../early-checkin) so reception sees early
      * check-in as already applied. Does not add extra_charges here — total_price from the client
@@ -1157,6 +1181,16 @@ class BookingController extends Controller
                     'child_breakfast_count' => $childB > $totalChildren ? ['Must be <= children count'] : [],
                 ],
             ], 422);
+        }
+
+        // Check-in only on the guest's scheduled arrival date (today).
+        if (isset($validated['status']) && $validated['status'] === 'checked_in' && $booking->status !== 'checked_in') {
+            $checkInDay = $this->bookingArrivalCalendarDay($booking);
+            if ($checkInDay !== Carbon::today()->toDateString()) {
+                return response()->json([
+                    'message' => 'Check-in is only allowed on the guest\'s scheduled arrival date (today).',
+                ], 422);
+            }
         }
 
         // Checkout validation: must be paid

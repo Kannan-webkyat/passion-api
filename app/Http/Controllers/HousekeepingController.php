@@ -192,6 +192,190 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * Enriched turnover pipeline for the dirty-rooms operational dashboard.
+     */
+    public function dirtyRoomsBoard(Request $request)
+    {
+        $this->allowHousekeepingNav();
+
+        $validated = $request->validate([
+            'floor' => 'nullable|string|max:50',
+            'room_type_id' => 'nullable|exists:room_types,id',
+        ]);
+
+        $d = Carbon::today()->toDateString();
+        $dNext = Carbon::tomorrow()->toDateString();
+
+        $query = RoomStatusBlock::query()
+            ->with(['room.roomType'])
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', ['dirty', 'cleaning', 'inspected']);
+
+        $this->applyHousekeepingListFilters($query, $validated, $d, $dNext, false);
+
+        $blocks = $query->orderBy('room_id')->orderBy('id')->get();
+        $roomIds = $blocks->pluck('room_id')->map(fn($id) => (int) $id)->unique()->filter()->values()->all();
+
+        $jobsByRoom = $roomIds === []
+            ? collect()
+            : HousekeepingJob::query()
+            ->whereIn('room_id', $roomIds, 'and', false)
+            ->where('status', '=', 'in_progress', 'and')
+            ->with('startedByUser:id,name')
+            ->orderByDesc('updated_at')
+            ->get()
+            ->unique('room_id')
+            ->keyBy('room_id');
+
+        $today = Carbon::today();
+        $now = now();
+
+        $nextArrivalByRoom = [];
+        if ($roomIds !== []) {
+            $segments = BookingSegment::query()
+                ->whereIn('room_id', $roomIds, 'and', false)
+                ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+                ->where('check_in_at', '>=', $today->copy()->startOfDay())
+                ->with('booking:id,first_name,last_name,notes,early_checkin_time')
+                ->orderBy('check_in_at')
+                ->get();
+
+            foreach ($segments as $seg) {
+                $rid = (int) $seg->room_id;
+                if (isset($nextArrivalByRoom[$rid])) {
+                    continue;
+                }
+                $nextArrivalByRoom[$rid] = $seg;
+            }
+
+            $bookings = Booking::query()
+                ->whereIn('room_id', $roomIds, 'and', false)
+                ->whereDate('check_in', '>=', $today)
+                ->whereNotIn('status', ['cancelled', 'checked_out'])
+                ->orderBy('check_in')
+                ->get(['id', 'room_id', 'first_name', 'last_name', 'check_in', 'notes', 'early_checkin_time']);
+
+            foreach ($bookings as $b) {
+                $rid = (int) $b->room_id;
+                if (isset($nextArrivalByRoom[$rid])) {
+                    continue;
+                }
+                $nextArrivalByRoom[$rid] = $b;
+            }
+        }
+
+        $checkoutByRoom = [];
+        if ($roomIds !== []) {
+            $departed = BookingSegment::query()
+                ->whereIn('room_id', $roomIds, 'and', false)
+                ->where(function ($q) {
+                    $q->where('status', '=', 'checked_out', 'or')
+                        ->orWhereHas('booking', fn($b) => $b->where('status', '=', 'checked_out'));
+                })
+                ->orderByDesc('check_out_at')
+                ->get();
+
+            foreach ($departed as $seg) {
+                $rid = (int) $seg->room_id;
+                if (! isset($checkoutByRoom[$rid])) {
+                    $checkoutByRoom[$rid] = $seg;
+                }
+            }
+        }
+
+        $payload = $blocks->map(function (RoomStatusBlock $block) use (
+            $jobsByRoom,
+            $nextArrivalByRoom,
+            $checkoutByRoom,
+            $now,
+            $today
+        ) {
+            $roomId = (int) $block->room_id;
+            $job = $jobsByRoom->get($roomId);
+            $checkoutSeg = $checkoutByRoom[$roomId] ?? null;
+            $next = $nextArrivalByRoom[$roomId] ?? null;
+
+            $waitingMinutes = $block->updated_at
+                ? (int) $block->updated_at->diffInMinutes($now)
+                : null;
+
+            $checkoutAt = $checkoutSeg?->check_out_at;
+            $nextArrivalAt = null;
+            $nextGuest = null;
+            $nextNotes = '';
+            $earlyCheckin = false;
+
+            if ($next instanceof BookingSegment) {
+                $nextArrivalAt = $next->check_in_at;
+                $b = $next->booking;
+                if ($b) {
+                    $nextGuest = trim(((string) ($b->first_name ?? '')) . ' ' . ((string) ($b->last_name ?? '')));
+                    $nextNotes = (string) ($b->notes ?? '');
+                    $earlyCheckin = ! empty($b->early_checkin_time);
+                }
+            } elseif ($next instanceof Booking) {
+                $nextArrivalAt = Carbon::parse($next->check_in)->startOfDay();
+                $nextGuest = trim(((string) ($next->first_name ?? '')) . ' ' . ((string) ($next->last_name ?? '')));
+                $nextNotes = (string) ($next->notes ?? '');
+                $earlyCheckin = ! empty($next->early_checkin_time);
+            }
+
+            $noteLower = strtolower((string) ($block->note ?? ''));
+            $isVip = stripos($nextNotes, 'vip') !== false || stripos($noteLower, 'vip') !== false;
+
+            $priority = 'normal';
+            if ($isVip || $earlyCheckin) {
+                $priority = 'urgent';
+            } elseif ($nextArrivalAt instanceof Carbon && $nextArrivalAt->isSameDay($today)) {
+                $hoursUntil = $now->diffInHours($nextArrivalAt, false);
+                if ($hoursUntil <= 4 || ($waitingMinutes !== null && $waitingMinutes >= 60)) {
+                    $priority = 'urgent';
+                } else {
+                    $priority = 'soon';
+                }
+            } elseif ($nextArrivalAt instanceof Carbon && $nextArrivalAt->isSameDay($today->copy()->addDay())) {
+                $priority = 'soon';
+            } elseif ($waitingMinutes !== null && $waitingMinutes >= 60 && $block->status === 'dirty') {
+                $priority = 'soon';
+            }
+
+            return [
+                'id' => (int) $block->id,
+                'room_id' => $roomId,
+                'status' => (string) $block->status,
+                'start_date' => $block->start_date?->toDateString(),
+                'end_date' => $block->end_date?->toDateString(),
+                'note' => $block->note,
+                'is_active' => (bool) $block->is_active,
+                'updated_at' => $block->updated_at?->toIso8601String(),
+                'room' => $block->room,
+                'waiting_minutes' => $waitingMinutes,
+                'checkout_at' => $checkoutAt instanceof Carbon ? $checkoutAt->toIso8601String() : null,
+                'next_arrival_at' => $nextArrivalAt instanceof Carbon ? $nextArrivalAt->toIso8601String() : null,
+                'next_arrival_guest' => $nextGuest !== '' ? $nextGuest : null,
+                'assigned_staff_name' => $job?->startedByUser?->name,
+                'priority' => $priority,
+                'is_vip' => $isVip,
+            ];
+        })->values();
+
+        $dirty = $payload->where('status', 'dirty')->count();
+        $cleaning = $payload->where('status', 'cleaning')->count();
+        $ready = $payload->where('status', 'inspected')->count();
+        $priority = $payload->whereIn('priority', ['urgent', 'soon'])->count();
+
+        return response()->json([
+            'blocks' => $payload->all(),
+            'stats' => [
+                'dirty' => $dirty,
+                'cleaning' => $cleaning,
+                'ready' => $ready,
+                'priority' => $priority,
+            ],
+        ]);
+    }
+
+    /**
      * Compact counts for housekeeping sub-navigation tabs (matches default workboard filters).
      */
     public function navCounts()
@@ -579,7 +763,7 @@ class HousekeepingController extends Controller
                 'id' => 'late-cleaning',
                 'tone' => 'rose',
                 'message' => 'Late cleaning tasks',
-                'href' => '/reception/housekeeping/cleaning-tasks',
+                'href' => '/reception/housekeeping/dirty-rooms',
                 'count' => $lateCleaning,
             ];
         }
@@ -634,7 +818,7 @@ class HousekeepingController extends Controller
     private function housekeepingBoardHrefForStatus(string $status): string
     {
         return match ($status) {
-            'cleaning' => '/reception/housekeeping/cleaning-tasks',
+            'cleaning' => '/reception/housekeeping/dirty-rooms',
             'pending_inspection' => '/reception/housekeeping/checkout-inspection',
             'inspected' => '/reception/housekeeping/clean-rooms',
             default => '/reception/housekeeping/dirty-rooms',
@@ -1258,7 +1442,7 @@ class HousekeepingController extends Controller
      */
     public function finish(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate([self::HK_CLEANING]);
+        $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1674,7 +1858,7 @@ class HousekeepingController extends Controller
      */
     public function markCleaned(RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate([self::HK_CLEANING]);
+        $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
