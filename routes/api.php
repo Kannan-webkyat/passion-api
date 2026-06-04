@@ -80,6 +80,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Bookings & Room Chart
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::get('housekeeping/dirty-rooms-board', [HousekeepingController::class, 'dirtyRoomsBoard']);
     Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
     Route::get('housekeeping/dashboard-summary', [HousekeepingController::class, 'dashboardSummary']);
     Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
