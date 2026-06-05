@@ -1228,6 +1228,23 @@ class BookingController extends Controller
                     'message' => 'Check-in is only allowed on the guest\'s scheduled arrival date (today).',
                 ], 422);
             }
+
+            $roomId = (int) $booking->room_id;
+            $today = Carbon::today()->toDateString();
+            $tomorrow = Carbon::today()->addDay()->toDateString();
+            $blocking = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+                ->where('is_active', true)
+                ->where('start_date', '<', $tomorrow)
+                ->where('end_date', '>', $today)
+                ->get();
+
+            if ($blocking->contains(fn($b) => in_array($b->status, ['dirty', 'cleaning'], true))) {
+                $room = Room::find($roomId, ['room_number']);
+
+                return response()->json([
+                    'message' => "Room #{$room?->room_number} is currently marked Dirty. Complete housekeeping service or assign another clean room before check-in.",
+                ], 422);
+            }
         }
 
         // Checkout validation: must be paid
