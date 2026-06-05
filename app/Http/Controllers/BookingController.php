@@ -1877,6 +1877,305 @@ class BookingController extends Controller
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']));
     }
 
+    /**
+     * @return array{nights: int, room_subtotal: float, meal_subtotal: float, tax: float, total: float}
+     */
+    private function computeDayStayChargesForRange(
+        Booking $booking,
+        Room $room,
+        string $checkInYmd,
+        string $checkOutYmd,
+        bool $includeMeals = true,
+        bool $includeTax = true,
+    ): array {
+        $nights = (int) Carbon::parse($checkInYmd)->diffInDays(Carbon::parse($checkOutYmd));
+        if ($nights <= 0) {
+            return [
+                'nights' => 0,
+                'room_subtotal' => 0.0,
+                'meal_subtotal' => 0.0,
+                'tax' => 0.0,
+                'total' => 0.0,
+            ];
+        }
+
+        $rt = $room->roomType;
+        if (! $rt) {
+            return [
+                'nights' => $nights,
+                'room_subtotal' => 0.0,
+                'meal_subtotal' => 0.0,
+                'tax' => 0.0,
+                'total' => 0.0,
+            ];
+        }
+
+        $ratePlan = null;
+        if ($booking->rate_plan_id) {
+            $ratePlan = $rt->ratePlans->find($booking->rate_plan_id);
+        }
+        if (! $ratePlan) {
+            $ratePlan = $rt->ratePlans->first();
+        }
+
+        $basePrice = $ratePlan ? (float) $ratePlan->base_price : (float) ($rt->base_price ?? 0);
+        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
+        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
+        $nightlyRoom = $basePrice + ($extraBedCost * $extraBeds);
+
+        $mealSubtotal = 0.0;
+        if ($includeMeals && $ratePlan && $ratePlan->includes_breakfast) {
+            $adults = (int) ($booking->adults_count ?? 1);
+            $children = (int) ($booking->children_count ?? 0);
+            $nightlyMeal = ((float) ($rt->breakfast_price ?? 0) * $adults)
+                + ((float) ($rt->child_breakfast_price ?? 0) * $children);
+            $mealSubtotal = round($nightlyMeal * $nights, 2);
+        }
+
+        $roomSubtotal = round($nightlyRoom * $nights, 2);
+        $taxable = $roomSubtotal + $mealSubtotal;
+        $tax = 0.0;
+        if ($includeTax && $rt->tax) {
+            $tax = round($taxable * ((float) $rt->tax->rate / 100), 2);
+        }
+
+        return [
+            'nights' => $nights,
+            'room_subtotal' => $roomSubtotal,
+            'meal_subtotal' => $mealSubtotal,
+            'tax' => $tax,
+            'total' => round($taxable + $tax, 2),
+        ];
+    }
+
+    private function resolveLastBookingSegment(Booking $booking): BookingSegment
+    {
+        $lastSegment = $booking->segments()->orderBy('check_out', 'desc')->first();
+        if ($lastSegment) {
+            return $lastSegment;
+        }
+
+        return $booking->segments()->create([
+            'room_id' => $booking->room_id,
+            'check_in' => $booking->check_in,
+            'check_out' => $booking->check_out,
+            'check_in_at' => $booking->check_in_at ?? Carbon::parse($booking->check_in)->startOfDay(),
+            'check_out_at' => $booking->check_out_at ?? Carbon::parse($booking->check_out)->startOfDay(),
+            'rate_plan_id' => $booking->rate_plan_id,
+            'adults_count' => $booking->adults_count,
+            'children_count' => $booking->children_count,
+            'extra_beds_count' => $booking->extra_beds_count,
+            'total_price' => $booking->total_price,
+            'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
+        ]);
+    }
+
+    /**
+     * Preview financial impact of shortening a day stay before the scheduled checkout.
+     */
+    public function previewEarlyCheckout(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return response()->json(['message' => 'Early checkout is not available for hourly package stays.'], 422);
+        }
+
+        if (in_array($booking->status, ['checked_out', 'cancelled'], true)) {
+            return response()->json(['message' => 'Cannot modify a cancelled or checked-out reservation.'], 422);
+        }
+
+        $validated = $request->validate([
+            'new_check_out' => 'required|date',
+            'recalculate_room_charges' => 'nullable|boolean',
+            'recalculate_meal_charges' => 'nullable|boolean',
+            'recalculate_taxes' => 'nullable|boolean',
+        ]);
+
+        $lastSegment = $this->resolveLastBookingSegment($booking);
+        $checkInYmd = Carbon::parse($lastSegment->check_in ?? $booking->check_in)->toDateString();
+        $oldCheckOut = (string) ($lastSegment->check_out ?? $booking->check_out);
+        $newCheckOut = Carbon::parse($validated['new_check_out'])->toDateString();
+
+        if ($newCheckOut <= $checkInYmd) {
+            return response()->json(['message' => 'New checkout must be after the check-in date.'], 422);
+        }
+        if ($newCheckOut >= $oldCheckOut) {
+            return response()->json(['message' => 'New checkout must be before the scheduled checkout date.'], 422);
+        }
+
+        if ($booking->status === 'checked_in') {
+            $today = Carbon::today()->toDateString();
+            if ($newCheckOut < $today) {
+                return response()->json(['message' => 'For in-house guests, early checkout cannot be before today.'], 422);
+            }
+        }
+
+        $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->findOrFail((int) $lastSegment->room_id);
+        $recalcRoom = $request->boolean('recalculate_room_charges', true);
+        $recalcMeals = $request->boolean('recalculate_meal_charges', true);
+        $recalcTax = $request->boolean('recalculate_taxes', true);
+
+        $originalBreakdown = $this->computeDayStayChargesForRange(
+            $booking,
+            $room,
+            $checkInYmd,
+            $oldCheckOut,
+            $recalcMeals,
+            $recalcTax,
+        );
+        $updatedBreakdown = $this->computeDayStayChargesForRange(
+            $booking,
+            $room,
+            $checkInYmd,
+            $newCheckOut,
+            $recalcMeals,
+            $recalcTax,
+        );
+
+        $originalRoomCharges = $recalcRoom
+            ? $originalBreakdown['total']
+            : (float) ($booking->total_price ?? 0);
+        $updatedRoomCharges = $recalcRoom
+            ? $updatedBreakdown['total']
+            : (float) ($booking->total_price ?? 0);
+
+        $taxAdjustment = round($updatedBreakdown['tax'] - $originalBreakdown['tax'], 2);
+        $mealAdjustment = round($updatedBreakdown['meal_subtotal'] - $originalBreakdown['meal_subtotal'], 2);
+        $chargeDelta = round($updatedRoomCharges - $originalRoomCharges, 2);
+
+        $deposit = (float) ($booking->deposit_amount ?? 0);
+        $additionalDue = max(0.0, round($updatedRoomCharges - $deposit, 2));
+        $creditBalance = max(0.0, round($deposit - $updatedRoomCharges, 2));
+        $refundAmount = $creditBalance;
+
+        return response()->json([
+            'check_in' => $checkInYmd,
+            'original_check_out' => $oldCheckOut,
+            'new_check_out' => $newCheckOut,
+            'original_nights' => $originalBreakdown['nights'],
+            'new_nights' => $updatedBreakdown['nights'],
+            'original_room_charges' => round($originalRoomCharges, 2),
+            'updated_room_charges' => round($updatedRoomCharges, 2),
+            'tax_adjustment' => $taxAdjustment,
+            'meal_adjustment' => $mealAdjustment,
+            'charge_delta' => $chargeDelta,
+            'refund_amount' => round($refundAmount, 2),
+            'additional_due' => round($additionalDue, 2),
+            'credit_balance' => round($creditBalance, 2),
+            'deposit_amount' => round($deposit, 2),
+            'original_breakdown' => $originalBreakdown,
+            'updated_breakdown' => $updatedBreakdown,
+        ]);
+    }
+
+    /**
+     * Shorten a day stay, recalculate charges, release inventory, and audit the change.
+     */
+    public function applyEarlyCheckout(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return response()->json(['message' => 'Early checkout is not available for hourly package stays.'], 422);
+        }
+
+        if (in_array($booking->status, ['checked_out', 'cancelled'], true)) {
+            return response()->json(['message' => 'Cannot modify a cancelled or checked-out reservation.'], 422);
+        }
+
+        $validated = $request->validate([
+            'new_check_out' => 'required|date',
+            'reason' => 'required|string|in:guest_changed_plans,emergency_departure,dissatisfied,business_travel_change,other',
+            'reason_notes' => 'nullable|string|max:500',
+            'release_inventory' => 'nullable|boolean',
+            'recalculate_room_charges' => 'nullable|boolean',
+            'recalculate_meal_charges' => 'nullable|boolean',
+            'recalculate_taxes' => 'nullable|boolean',
+        ]);
+
+        $previewRequest = Request::create('', 'POST', [
+            'new_check_out' => $validated['new_check_out'],
+            'recalculate_room_charges' => $validated['recalculate_room_charges'] ?? true,
+            'recalculate_meal_charges' => $validated['recalculate_meal_charges'] ?? true,
+            'recalculate_taxes' => $validated['recalculate_taxes'] ?? true,
+        ]);
+        $previewResponse = $this->previewEarlyCheckout($previewRequest, $booking);
+        if ($previewResponse->getStatusCode() !== 200) {
+            return $previewResponse;
+        }
+        $preview = $previewResponse->getData(true);
+
+        $lastSegment = $this->resolveLastBookingSegment($booking);
+        $oldCheckOut = (string) ($lastSegment->check_out ?? $booking->check_out);
+        $newCheckOut = (string) $preview['new_check_out'];
+        $newTotal = (float) $preview['updated_room_charges'];
+        $credit = (float) ($preview['credit_balance'] ?? 0);
+
+        $reasonLabels = [
+            'guest_changed_plans' => 'Guest changed plans',
+            'emergency_departure' => 'Emergency departure',
+            'dissatisfied' => 'Dissatisfied with stay',
+            'business_travel_change' => 'Business travel change',
+            'other' => 'Other',
+        ];
+        $reasonLabel = $reasonLabels[$validated['reason']] ?? $validated['reason'];
+        if ($validated['reason'] === 'other' && ! empty($validated['reason_notes'])) {
+            $reasonLabel .= ' — ' . trim((string) $validated['reason_notes']);
+        }
+
+        $user = Auth::user();
+        $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
+        $timestamp = now()->format('Y-m-d H:i:s');
+        $creditLine = $credit > 0.004 ? ' | Credit generated: ₹' . number_format($credit, 2) : '';
+        $auditMsg = "[Early Checkout: {$oldCheckOut} → {$newCheckOut} | Reason: {$reasonLabel}{$creditLine}"
+            . ($userName ? " by {$userName}" : '')
+            . " on {$timestamp}]";
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+        $newCheckOutAt = Carbon::parse($newCheckOut)->startOfDay();
+        $wasCheckedIn = $booking->status === 'checked_in';
+
+        $booking->update([
+            'check_out' => $newCheckOut,
+            'check_out_at' => $newCheckOutAt,
+            'total_price' => $newTotal,
+            'notes' => $notes,
+        ]);
+
+        $segmentTotal = $newTotal;
+        if ($booking->segments()->count() > 1) {
+            $segmentTotal = round(
+                (float) $lastSegment->total_price * ($preview['new_nights'] / max(1, $preview['original_nights'])),
+                2,
+            );
+        }
+
+        $lastSegment->update([
+            'check_out' => $newCheckOut,
+            'check_out_at' => $newCheckOutAt,
+            'total_price' => $segmentTotal,
+        ]);
+
+        if ($request->boolean('release_inventory', true)) {
+            RoomStatusBlock::where('room_id', '=', (int) $lastSegment->room_id, 'and')
+                ->where('is_active', true)
+                ->where('status', 'on_hold')
+                ->where('start_date', '>=', $newCheckOut)
+                ->where('start_date', '<', $oldCheckOut)
+                ->update(['is_active' => false]);
+        }
+
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $lastSegment->room_id], 'early_checkout');
+
+        return response()->json([
+            'message' => 'Early checkout applied.',
+            'booking' => $booking->fresh()->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']),
+            'preview' => $preview,
+            'suggest_settle_folio' => $wasCheckedIn,
+        ]);
+    }
+
     // ── Hourly Reservation Extension (supports +1h, +2h, etc.) ─────────────────
     public function extendHourlyReservation(Request $request, Booking $booking)
     {
