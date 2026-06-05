@@ -24,6 +24,7 @@ use App\Support\SeasonalRoomPricing;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
 
@@ -761,9 +762,9 @@ class BookingController extends Controller
 
         // New reservations only from today onward (hotel calendar day in app timezone).
         if ($checkInAt->copy()->startOfDay()->lt(Carbon::today())) {
-            return response()->json([
-                'message' => 'Check-in cannot be in the past. New reservations must start on or after today.',
-            ], 422);
+            throw ValidationException::withMessages([
+                'check_in' => 'Reservations cannot be created for past dates.',
+            ]);
         }
 
         if ($status === 'checked_in') {

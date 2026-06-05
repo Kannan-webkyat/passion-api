@@ -9,6 +9,7 @@ use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 
 class RoomStatusBlockController extends Controller
 {
@@ -79,6 +80,27 @@ class RoomStatusBlockController extends Controller
         }
     }
 
+    /**
+     * Holds and maintenance blocks may only start today or in the future.
+     */
+    private function assertBlockStartNotInPast(string $startDate, string $status): void
+    {
+        if (! in_array($status, ['on_hold', 'maintenance'], true)) {
+            return;
+        }
+
+        if (Carbon::parse($startDate)->startOfDay()->lt(Carbon::today())) {
+            $field = $status === 'on_hold' ? 'start_date' : 'start_date';
+            $message = $status === 'on_hold'
+                ? 'Room holds cannot be created for past dates.'
+                : 'Maintenance blocks can only start today or in the future.';
+
+            throw ValidationException::withMessages([
+                $field => $message,
+            ]);
+        }
+    }
+
     public function store(Request $request)
     {
         $validated = $request->validate([
@@ -92,6 +114,7 @@ class RoomStatusBlockController extends Controller
         ]);
 
         $this->authorizeStatusBlockStore($validated['status']);
+        $this->assertBlockStartNotInPast($validated['start_date'], $validated['status']);
         // Do not allow blocking a room if it already has a reservation segment in this period.
         // Overlap uses the same convention as stays: [start_date, end_date)
         $startAt = Carbon::parse($validated['start_date'])->startOfDay();
@@ -163,6 +186,11 @@ class RoomStatusBlockController extends Controller
 
         $startDate = $validated['start_date'] ?? $roomStatusBlock->start_date;
         $endDate = $validated['end_date'] ?? $roomStatusBlock->end_date;
+        $effectiveStatus = (string) ($validated['status'] ?? $roomStatusBlock->status);
+
+        if ($request->has('start_date')) {
+            $this->assertBlockStartNotInPast($startDate, $effectiveStatus);
+        }
 
         if ($request->hasAny(['start_date', 'end_date']) && ($roomStatusBlock->is_active ?? true)) {
             $startAt = Carbon::parse($startDate)->startOfDay();
