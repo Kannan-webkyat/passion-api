@@ -563,6 +563,31 @@ class BookingController extends Controller
     }
 
     /**
+     * Hotel calendar checkout day for inspection rules (day stays use check_out, not UTC slice of check_out_at).
+     */
+    private function bookingCheckoutCalendarDay(Booking $booking, ?BookingSegment $segment = null): string
+    {
+        if ($segment) {
+            if ($segment->check_out_at) {
+                return Carbon::parse($segment->check_out_at)->toDateString();
+            }
+
+            return Carbon::parse($segment->check_out ?? $booking->check_out)->toDateString();
+        }
+
+        $unit = (string) ($booking->booking_unit ?? 'day');
+        if ($unit !== 'hour_package') {
+            return Carbon::parse($booking->check_out)->toDateString();
+        }
+
+        if ($booking->check_out_at) {
+            return Carbon::parse($booking->check_out_at)->toDateString();
+        }
+
+        return Carbon::parse($booking->check_out)->toDateString();
+    }
+
+    /**
      * Reception: request a pre-checkout inspection (moves room to pending_inspection).
      * Creates one scoped block per active booking segment (supports room transfers / split stays).
      */
@@ -596,6 +621,17 @@ class BookingController extends Controller
                     'status' => 'checked_in',
                 ]),
             ]);
+        }
+
+        $today = now()->toDateString();
+        foreach ($segments as $segment) {
+            $checkoutDay = $this->bookingCheckoutCalendarDay($booking, $segment);
+            if ($checkoutDay !== $today) {
+                return response()->json([
+                    'message' => 'Checkout inspection can only be requested on the guest\'s checkout date.',
+                    'checkout_date' => $checkoutDay,
+                ], 422);
+            }
         }
 
         // Drop prior pending-inspection handoff for this booking only.
