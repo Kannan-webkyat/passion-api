@@ -2601,6 +2601,11 @@ class HousekeepingController extends Controller
             if (array_key_exists('maintenance_note', $validated)) {
                 $cleaning->maintenance_note = $validated['maintenance_note'];
             }
+            if (array_key_exists('checklist_done', $validated) && $newStatus === 'pending_cleaning') {
+                return response()->json([
+                    'message' => 'Checklist updates are only allowed after cleaning has started.',
+                ], 422);
+            }
             if (array_key_exists('checklist_done', $validated)) {
                 $cleaning->checklist_done = $this->sanitizeHousekeepingChecklistDone($validated['checklist_done'] ?? null);
             }
@@ -2725,6 +2730,14 @@ class HousekeepingController extends Controller
                 $cleaning->save();
             }
 
+            if (($cleaning->status ?? 'pending_cleaning') === 'pending_cleaning') {
+                DB::rollBack();
+
+                return response()->json([
+                    'message' => 'Start cleaning before recording consumables.',
+                ], 422);
+            }
+
             $onHand = [];
             $locRows = DB::table('inventory_item_locations')
                 ->where('inventory_location_id', '=', $roomLoc->id, 'and')
@@ -2788,6 +2801,13 @@ class HousekeepingController extends Controller
             }
 
             if (array_key_exists('checklist_done', $validated)) {
+                if (($cleaning->status ?? 'pending_cleaning') === 'pending_cleaning') {
+                    DB::rollBack();
+
+                    return response()->json([
+                        'message' => 'Checklist updates are only allowed after cleaning has started.',
+                    ], 422);
+                }
                 $cleaning->checklist_done = $this->sanitizeHousekeepingChecklistDone($validated['checklist_done'] ?? null);
                 $cleaning->save();
             }
