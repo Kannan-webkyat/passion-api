@@ -40,8 +40,11 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-cleaning-tasks',
             'housekeeping-daily-room-cleaning',
             'housekeeping-clean-rooms',
+            'housekeeping-supervisor-inspection',
             'housekeeping-laundry',
             'housekeeping-room-stock',
+            'housekeeping-checklist-master',
+            'housekeeping-cleaning-availability',
             'manage-inventory',
             // Inventory report permissions (granular)
             'inventory-report-summary',
@@ -114,6 +117,7 @@ class RolePermissionSeeder extends Seeder
             'reservation-delete',
             'reservation-hold-room',
             'reservation-maintenance-room',
+            'housekeeping-cleaning-availability',
             'create-requisition',
         ]);
 
@@ -145,8 +149,10 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-cleaning-tasks',
             'housekeeping-daily-room-cleaning',
             'housekeeping-clean-rooms',
+            'housekeeping-supervisor-inspection',
             'housekeeping-laundry',
             'housekeeping-room-stock',
+            'housekeeping-checklist-master',
         ]);
     }
 }

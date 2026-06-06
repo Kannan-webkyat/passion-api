@@ -12,6 +12,7 @@ use App\Models\DailyRoomCleaning;
 use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Room;
+use App\Models\RoomCleaningRelease;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
 use App\Support\BookingInspectionChargeLines;
@@ -442,6 +443,20 @@ class BookingController extends Controller
                                 ->whereNotNull('inspection_snapshot');
                         });
                 });
+        }, 'cleaningReleases' => function ($q) use ($start, $end) {
+            $q->whereDate('release_date', '>=', $start->toDateString())
+                ->whereDate('release_date', '<=', $end->toDateString())
+                ->where(function ($w) {
+                    $w->where(function ($active) {
+                        $active->where('is_active', true)
+                            ->where('status', '!=', RoomCleaningRelease::STATUS_CANCELLED);
+                    })->orWhere(function ($done) {
+                        $done->where('is_active', false)
+                            ->where('status', RoomCleaningRelease::STATUS_READY);
+                    });
+                })
+                ->orderByDesc('id')
+                ->with(['assignedUser:id,name', 'startedByUser:id,name', 'completedByUser:id,name']);
         }, 'segments' => function ($q) use ($rangeStartAt, $rangeEndAt) {
             // Include checked_out segments so the chart can tell departure day (dirty) vs completed inspection.
             $q->where('check_in_at', '<', $rangeEndAt)
@@ -1028,7 +1043,6 @@ class BookingController extends Controller
 
             if (($validated['status'] ?? '') === 'checked_in') {
                 Room::findOrFail($roomId)->update(['status' => 'occupied']);
-                $this->syncDailyCleaningOnCheckIn($booking->fresh(['segments']));
             }
 
             $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
@@ -1490,7 +1504,7 @@ class BookingController extends Controller
                 }
                 HousekeepingStateUpdated::dispatchIfEnabled($checkoutNotifyRoomIds, 'booking_checkout');
             } elseif ($validated['status'] === 'checked_in') {
-                $this->syncDailyCleaningOnCheckIn($booking->fresh(['segments']));
+                // Daily cleaning tasks are created when front office releases the room for cleaning.
             }
         }
 

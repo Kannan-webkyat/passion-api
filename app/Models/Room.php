@@ -54,6 +54,11 @@ class Room extends Model
         return $this->hasMany(RoomStatusBlock::class);
     }
 
+    public function cleaningReleases()
+    {
+        return $this->hasMany(RoomCleaningRelease::class);
+    }
+
     public function connectedRoom()
     {
         return $this->belongsTo(Room::class, 'connected_room_id');

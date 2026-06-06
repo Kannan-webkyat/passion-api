@@ -28,6 +28,7 @@ class DatabaseSeeder extends Seeder
             RoomParProcurementStockSeeder::class,
             // HousekeepingStoreRoomParStockSeeder::class, // optional: move PAR buffer Main Store -> Housekeeping Store
             HotelMinibarMenuItemsSeeder::class,
+            HousekeepingChecklistSeeder::class,
             RbacTestUsersSeeder::class,
             // BookingSeeder::class,
         ]);

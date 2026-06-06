@@ -7,6 +7,7 @@ use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\HousekeepingChecklistController;
 use App\Http\Controllers\HousekeepingController;
 use App\Http\Controllers\HousekeepingRoomStockController;
 use App\Http\Controllers\InventoryCategoryController;
@@ -27,6 +28,7 @@ use App\Http\Controllers\PurchaseOrderController;
 use App\Http\Controllers\QzSignController;
 use App\Http\Controllers\RecipeController;
 use App\Http\Controllers\RestaurantMasterController;
+use App\Http\Controllers\RoomCleaningReleaseController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\RoomController;
 use App\Http\Controllers\RoomParController;
@@ -79,6 +81,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('permissions', [RoleController::class, 'permissions']);
 
     // Bookings & Room Chart
+    Route::get('housekeeping/checklist-master/meta', [HousekeepingChecklistController::class, 'meta']);
+    Route::post('housekeeping/checklist-master/reorder', [HousekeepingChecklistController::class, 'reorder']);
+    Route::apiResource('housekeeping/checklist-master', HousekeepingChecklistController::class)
+        ->parameters(['checklist-master' => 'housekeepingChecklistItem']);
+
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
     Route::get('housekeeping/dirty-rooms-board', [HousekeepingController::class, 'dirtyRoomsBoard']);
     Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
@@ -107,6 +114,15 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('housekeeping/daily-cleaning/consumption', [HousekeepingController::class, 'dailyCleaningRecordConsumption']);
     Route::get('housekeeping/daily-cleaning/history', [HousekeepingController::class, 'dailyCleaningHistory']);
     Route::get('housekeeping/daily-cleaning/history-board', [HousekeepingController::class, 'dailyCleaningHistoryBoard']);
+
+    Route::get('housekeeping/cleaning-availability/metrics', [RoomCleaningReleaseController::class, 'metrics']);
+    Route::get('housekeeping/rooms/{room}/cleaning-release-context', [RoomCleaningReleaseController::class, 'roomContext']);
+    Route::post('housekeeping/cleaning-releases', [RoomCleaningReleaseController::class, 'store']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/extend', [RoomCleaningReleaseController::class, 'extend']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/reschedule', [RoomCleaningReleaseController::class, 'reschedule']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/cancel', [RoomCleaningReleaseController::class, 'cancel']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/mark-inspected', [RoomCleaningReleaseController::class, 'markInspected']);
+    Route::get('housekeeping/cleaning-releases/{roomCleaningRelease}/audits', [RoomCleaningReleaseController::class, 'audits']);
 
     Route::get('housekeeping/laundry/prefill', [LaundryRequestController::class, 'prefill']);
     Route::get('housekeeping/laundry/checked-in-rooms', [LaundryRequestController::class, 'checkedInRooms']);
