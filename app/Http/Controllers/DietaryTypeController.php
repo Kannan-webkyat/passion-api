@@ -39,12 +39,12 @@ class DietaryTypeController extends Controller
         return response()->json($dietaryType, 201);
     }
 
-    public function show(DietaryType $dietaryType)
+    public function show(DietaryType $menuDietaryType)
     {
-        return response()->json($dietaryType);
+        return response()->json($menuDietaryType);
     }
 
-    public function update(Request $request, DietaryType $dietaryType)
+    public function update(Request $request, DietaryType $menuDietaryType)
     {
         $this->checkPermission('manage-menu');
         $validated = $request->validate([
@@ -52,15 +52,15 @@ class DietaryTypeController extends Controller
             'is_active' => 'boolean',
         ]);
 
-        $dietaryType->update($validated);
+        $menuDietaryType->update($validated);
 
-        return response()->json($dietaryType);
+        return response()->json($menuDietaryType);
     }
 
-    public function destroy(DietaryType $dietaryType)
+    public function destroy(DietaryType $menuDietaryType)
     {
         $this->checkPermission('manage-menu');
-        $dietaryType->delete();
+        $menuDietaryType->delete();
 
         return response()->json(null, 204);
     }
