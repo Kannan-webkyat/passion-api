@@ -2,6 +2,8 @@
 
 namespace Database\Seeders;
 
+use App\Models\RestaurantMaster;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Str;
 
 /** Shared SKU / menu-code helpers for bar inventory + menu seeders. */
@@ -30,5 +32,14 @@ final class BarOrganizedCatalog
     public static function menuItemCode(string $category, string $item, int $size): string
     {
         return 'MNU-'.substr(self::inventorySku($category, $item, $size), 4);
+    }
+
+    /** All active outlets — menu seeders assign items to every outlet. */
+    public static function activeOutlets(): Collection
+    {
+        return RestaurantMaster::query()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get();
     }
 }

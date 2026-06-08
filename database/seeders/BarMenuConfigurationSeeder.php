@@ -53,9 +53,9 @@ class BarMenuConfigurationSeeder extends Seeder
             )->id;
         }
 
-        $outlets = RestaurantMaster::where('is_active', true)->orderBy('name')->get();
+        $outlets = BarOrganizedCatalog::activeOutlets();
         if ($outlets->isEmpty()) {
-            $this->command?->error('No active outlets found. Create outlets before seeding bar menu.');
+            $this->command?->error('No active outlets found. Run BarOutletSeeder first.');
 
             return;
         }
@@ -225,4 +225,5 @@ class BarMenuConfigurationSeeder extends Seeder
         RestaurantMenuItemVariant::where('menu_item_variant_id', $variant->id)->delete();
         $variant->delete();
     }
+
 }

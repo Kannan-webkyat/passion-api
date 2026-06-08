@@ -13,27 +13,35 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $this->call([
-            InventoryTaxSeeder::class,
-            InventoryUomSeeder::class,
-            CessSlabSeeder::class,
-            RolePermissionSeeder::class,
-            DepartmentSeeder::class,
-            LocationSeeder::class,
-            PaymentMethodSeeder::class,
-            RestaurantTableSeeder::class,
-            FreshBiryaniTeaCoffeeSeeder::class,
-            BarSeeder::class,
+            // InventoryTaxSeeder::class,
+            // InventoryUomSeeder::class,
+            // ---
+            // CessSlabSeeder::class,
+            // RolePermissionSeeder::class,
+            // DepartmentSeeder::class,
+            // LocationSeeder::class,
+            // --
+            // PaymentMethodSeeder::class,
+            // RestaurantTableSeeder::class,
+            // FreshBiryaniTeaCoffeeSeeder::class,
+            // BarSeeder::class,
+            // --
             // BarInventoryOrganizedSeeder::class,
+            // RestaurantInventoryCatalogSeeder::class,
+            // BarOutletSeeder::class,
             // BarMenuConfigurationSeeder::class,
-            RoomTypeRoomSeeder::class,
-            HotelInventoryCatalogSeeder::class,
-            RoomParTestTemplatesSeeder::class,
-            RoomParProcurementStockSeeder::class,
-            HousekeepingStoreRoomParStockSeeder::class, // optional: move PAR buffer Main Store -> Housekeeping Store
-            HotelMinibarMenuItemsSeeder::class,
-            HousekeepingChecklistSeeder::class,
-            RbacTestUsersSeeder::class,
-            BookingSeeder::class,
+            // BarOrganizedItemPricingSeeder::class,
+            // RestaurantMenuCatalogSeeder::class,
+            // ----
+            // RoomTypeRoomSeeder::class,
+            // HotelInventoryCatalogSeeder::class,
+            // RoomParTestTemplatesSeeder::class,
+            // RoomParProcurementStockSeeder::class,
+            // HousekeepingStoreRoomParStockSeeder::class, 
+            // HotelMinibarMenuItemsSeeder::class,
+            // HousekeepingChecklistSeeder::class,
+            // RbacTestUsersSeeder::class,
+            // BookingSeeder::class,
         ]);
 
         User::firstOrCreate(
