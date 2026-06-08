@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AdminDashboardController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\CessSlabController;
@@ -7,6 +8,7 @@ use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\DietaryTypeController;
+use App\Http\Controllers\HousekeepingChecklistController;
 use App\Http\Controllers\HousekeepingController;
 use App\Http\Controllers\HousekeepingRoomStockController;
 use App\Http\Controllers\InventoryCategoryController;
@@ -27,6 +29,7 @@ use App\Http\Controllers\PurchaseOrderController;
 use App\Http\Controllers\QzSignController;
 use App\Http\Controllers\RecipeController;
 use App\Http\Controllers\RestaurantMasterController;
+use App\Http\Controllers\RoomCleaningReleaseController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\RoomController;
 use App\Http\Controllers\RoomParController;
@@ -72,13 +75,22 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Users, Roles & Departments
     Route::apiResource('users', UserController::class);
+    Route::get('dashboard/financial-summary', [AdminDashboardController::class, 'financialSummary']);
+    Route::get('dashboard/admin-summary', [AdminDashboardController::class, 'adminSummary']);
     Route::apiResource('roles', RoleController::class);
     Route::apiResource('departments', DepartmentController::class);
     Route::get('permissions', [RoleController::class, 'permissions']);
 
     // Bookings & Room Chart
+    Route::get('housekeeping/checklist-master/meta', [HousekeepingChecklistController::class, 'meta']);
+    Route::post('housekeeping/checklist-master/reorder', [HousekeepingChecklistController::class, 'reorder']);
+    Route::apiResource('housekeeping/checklist-master', HousekeepingChecklistController::class)
+        ->parameters(['checklist-master' => 'housekeepingChecklistItem']);
+
     Route::get('housekeeping', [HousekeepingController::class, 'index']);
+    Route::get('housekeeping/dirty-rooms-board', [HousekeepingController::class, 'dirtyRoomsBoard']);
     Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
+    Route::get('housekeeping/dashboard-summary', [HousekeepingController::class, 'dashboardSummary']);
     Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
     Route::get('housekeeping/rooms/{room}/cleaning-history/detail', [HousekeepingController::class, 'roomCleaningHistoryDetail']);
     Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
@@ -104,6 +116,15 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('housekeeping/daily-cleaning/history', [HousekeepingController::class, 'dailyCleaningHistory']);
     Route::get('housekeeping/daily-cleaning/history-board', [HousekeepingController::class, 'dailyCleaningHistoryBoard']);
 
+    Route::get('housekeeping/cleaning-availability/metrics', [RoomCleaningReleaseController::class, 'metrics']);
+    Route::get('housekeeping/rooms/{room}/cleaning-release-context', [RoomCleaningReleaseController::class, 'roomContext']);
+    Route::post('housekeeping/cleaning-releases', [RoomCleaningReleaseController::class, 'store']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/extend', [RoomCleaningReleaseController::class, 'extend']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/reschedule', [RoomCleaningReleaseController::class, 'reschedule']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/cancel', [RoomCleaningReleaseController::class, 'cancel']);
+    Route::post('housekeeping/cleaning-releases/{roomCleaningRelease}/mark-inspected', [RoomCleaningReleaseController::class, 'markInspected']);
+    Route::get('housekeeping/cleaning-releases/{roomCleaningRelease}/audits', [RoomCleaningReleaseController::class, 'audits']);
+
     Route::get('housekeeping/laundry/prefill', [LaundryRequestController::class, 'prefill']);
     Route::get('housekeeping/laundry/checked-in-rooms', [LaundryRequestController::class, 'checkedInRooms']);
     Route::get('housekeeping/laundry', [LaundryRequestController::class, 'index']);
@@ -122,6 +143,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
     Route::post('bookings/{booking}/late-checkout', [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
+    Route::post('bookings/{booking}/preview-early-checkout', [BookingController::class, 'previewEarlyCheckout']);
+    Route::post('bookings/{booking}/early-checkout', [BookingController::class, 'applyEarlyCheckout']);
     Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);
     Route::post('bookings/{booking}/preview-extend-hours', [BookingController::class, 'previewHourlyExtension']);
     Route::get('bookings/{booking}/voucher', [BookingController::class, 'reservationVoucher']);
@@ -192,6 +215,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('orders/{order}/void', [PosController::class, 'void']);
         Route::post('orders/{order}/refund', [PosController::class, 'refund']);
         Route::get('reports/sales', [PosController::class, 'salesReport']);
+        Route::get('reports/dashboard-summary', [PosController::class, 'salesDashboardSummary']);
         Route::get('reports/sales/export', [PosController::class, 'salesReportExport']);
         Route::get('reports/sales/orders', [PosController::class, 'salesReportOrders']);
         Route::get('reports/liquor-sales', [PosController::class, 'liquorSalesReport']);

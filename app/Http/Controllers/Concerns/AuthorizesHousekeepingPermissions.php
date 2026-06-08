@@ -14,9 +14,13 @@ trait AuthorizesHousekeepingPermissions
 
     public const HK_CLEAN = 'housekeeping-clean-rooms';
 
+    public const HK_SUPERVISOR_INSPECTION = 'housekeeping-supervisor-inspection';
+
     public const HK_LAUNDRY = 'housekeeping-laundry';
 
     public const HK_ROOM_STOCK = 'housekeeping-room-stock';
+
+    public const HK_CLEANING_AVAILABILITY = 'housekeeping-cleaning-availability';
 
     /** @return array<int, string> */
     private static function granularHousekeepingMenuPermissions(): array

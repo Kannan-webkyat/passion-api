@@ -85,7 +85,7 @@ class InventoryReportController extends Controller
                 $qty = (float) ($itemStocks->where('inventory_location_id', $loc->id)->first()?->quantity ?? 0);
                 $locationBreakdown[$loc->id] = $qty;
 
-                if (! $locationId || $locationId == $loc->id) {
+                if (!$locationId || $locationId == $loc->id) {
                     $totalQty += $qty;
                 }
             }
@@ -102,6 +102,8 @@ class InventoryReportController extends Controller
                 'uom' => $item->issueUom?->short_name ?? 'unit',
                 'unit_cost' => round($unitCost, 4),
                 'total_qty' => round($totalQty, 3),
+                'total_stock' => round($totalQty, 3),
+                'reorder_level' => (float) ($item->reorder_level ?? 0),
                 'valuation' => round($valuationValue, 2),
                 'is_low' => $totalQty <= ($item->reorder_level ?? 0),
                 'location_stock' => $locationBreakdown,
@@ -173,7 +175,7 @@ class InventoryReportController extends Controller
             'variant',
             'combo.menuItems.recipe.ingredients.inventoryItem',
             'combo.menuItems.variant',
-            'order.restaurant',
+            'order.restaurant'
         ])
             ->where('inventory_deducted', true)
             ->whereBetween('created_at', [$startDate.' 00:00:00', $endDate.' 23:59:59']);
@@ -220,9 +222,9 @@ class InventoryReportController extends Controller
                     $theoretical[$ing->inventory_item_id] = ($theoretical[$ing->inventory_item_id] ?? 0) + ($ing->raw_quantity * $multiplier);
                 }
             } elseif ($menuItem->inventory_item_id) {
-                $deductQty = (float) $qty;
-                if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                    $deductQty = $ml * (float) $qty;
+                $deductQty = (float)$qty;
+                if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                    $deductQty = $ml * (float)$qty;
                 }
                 $theoretical[$menuItem->inventory_item_id] = ($theoretical[$menuItem->inventory_item_id] ?? 0) + $deductQty;
             }
@@ -331,10 +333,15 @@ class InventoryReportController extends Controller
         $search = trim((string) $request->query('search', ''));
 
         $adjustmentReasons = [
-            'Wastage', 'Expired', 'Breakage', 'Theft', 'Staff meal',
-            'Manual Adjustment', 'Correction', 'Components Stored', 'Assembled from Storage',
-            'Recovery: source consumed',
-            'Recovery: returned to stock',
+            'Wastage',
+            'Expired',
+            'Breakage',
+            'Theft',
+            'Staff meal',
+            'Manual Adjustment',
+            'Correction',
+            'Components Stored',
+            'Assembled from Storage',
         ];
 
         $query = InventoryTransaction::with(['item.issueUom', 'user', 'location'])
@@ -351,7 +358,7 @@ class InventoryReportController extends Controller
             $query->whereDate('created_at', '<=', $endDate);
         }
         if ($search !== '') {
-            $term = '%'.addcslashes($search, '%_\\').'%';
+            $term = '%' . addcslashes($search, '%_\\') . '%';
             $query->where(function ($q) use ($term) {
                 $q->whereHas('item', function ($iq) use ($term) {
                     $iq->where('name', 'like', $term)
@@ -384,14 +391,14 @@ class InventoryReportController extends Controller
             ];
         });
 
-        $outRows = $data->filter(fn (array $r) => ($r['transaction_type'] ?? '') === 'out');
-        $inRows = $data->filter(fn (array $r) => ($r['transaction_type'] ?? '') === 'in');
+        $outRows = $data->filter(fn(array $r) => ($r['transaction_type'] ?? '') === 'out');
+        $inRows = $data->filter(fn(array $r) => ($r['transaction_type'] ?? '') === 'in');
 
         $summary = [
             'total_loss_value' => round((float) $outRows->sum('total_loss'), 2),
             'total_addition_value' => round((float) $inRows->sum('total_loss'), 2),
             'total_incidents' => $data->count(),
-            'by_reason' => $data->groupBy('reason')->map(fn ($group) => [
+            'by_reason' => $data->groupBy('reason')->map(fn($group) => [
                 'count' => $group->count(),
                 'value' => round((float) $group->sum('total_loss'), 2),
             ]),
@@ -816,7 +823,7 @@ class InventoryReportController extends Controller
             ];
         })->sortByDesc('excess_valuation')->values();
 
-        $withReorder = $report->filter(fn (array $r) => ($r['reorder_level'] ?? 0) > 0);
+        $withReorder = $report->filter(fn(array $r) => ($r['reorder_level'] ?? 0) > 0);
 
         return response()->json([
             'data' => $report,
@@ -825,7 +832,7 @@ class InventoryReportController extends Controller
                 'total_excess_valuation' => round((float) $report->sum('excess_valuation'), 2),
                 'avg_overstock_pct' => $withReorder->isNotEmpty()
                     ? round((float) $withReorder->avg(
-                        fn (array $r) => ($r['current_stock'] / $r['reorder_level']) * 100
+                        fn(array $r) => ($r['current_stock'] / $r['reorder_level']) * 100
                     ), 1)
                     : null,
             ],
@@ -1051,13 +1058,144 @@ class InventoryReportController extends Controller
         // Fetch recent pending POs
         $pendingPOs = PurchaseOrder::whereIn('status', ['Ordered', 'Pending'])->count();
 
+        $allItems = collect($statusResp->data ?? []);
+        $lowStockItems = $allItems->where('is_low', true)->values();
+        $totalItems = (int) ($statusResp->summary->total_items ?? 0);
+        $lowStock = (int) ($statusResp->summary->low_stock_count ?? 0);
+
+        $criticalShortages = (int) $lowStockItems
+            ->filter(fn($item) => (float) ($item->total_qty ?? $item->total_stock ?? 0) <= 0)
+            ->count();
+
+        $lowRatio = $totalItems > 0 ? $lowStock / $totalItems : 0;
+        $criticalRatio = $totalItems > 0 ? $criticalShortages / $totalItems : 0;
+        $healthScore = (int) max(
+            0,
+            min(
+                100,
+                round(100 - ($lowRatio * 45) - ($criticalRatio * 40) - min($pendingPOs * 3, 12))
+            )
+        );
+
+        $topReorders = $lowStockItems
+            ->map(function ($item) {
+                $stock = (float) ($item->total_qty ?? $item->total_stock ?? 0);
+                $reorder = (float) ($item->reorder_level ?? 0);
+                $shortfall = max(0.0, $reorder - $stock);
+
+                return [
+                    'id' => $item->id ?? null,
+                    'name' => $item->name ?? null,
+                    'sku' => $item->sku ?? null,
+                    'category' => $item->category ?? null,
+                    'total_stock' => $stock,
+                    'total_qty' => $stock,
+                    'reorder_level' => $reorder,
+                    'shortfall' => round($shortfall, 3),
+                    'severity' => $stock <= 0 ? 'critical' : 'low',
+                    'is_low' => true,
+                ];
+            })
+            ->sortByDesc('shortfall')
+            ->take(5)
+            ->values();
+
+        $periodDays = 7;
+        $periodStart = now()->subDays($periodDays)->startOfDay();
+
+        $topConsumedRows = InventoryTransaction::query()
+            ->where('type', '=', 'out')
+            ->where('created_at', '>=', $periodStart)
+            ->select('inventory_item_id', DB::raw('SUM(quantity) as total_qty'))
+            ->groupBy('inventory_item_id')
+            ->orderByDesc('total_qty')
+            ->limit(5)
+            ->get();
+
+        $consumedItemIds = $topConsumedRows->pluck('inventory_item_id')->filter()->all();
+        $consumedItems = InventoryItem::with('category')
+            ->whereIn('id', $consumedItemIds)
+            ->get()
+            ->keyBy('id');
+
+        $topConsumed = $topConsumedRows->map(function ($row) use ($consumedItems) {
+            $item = $consumedItems->get($row->inventory_item_id);
+
+            return [
+                'id' => (int) $row->inventory_item_id,
+                'name' => $item?->name ?? 'Unknown item',
+                'sku' => $item?->sku ?? null,
+                'category' => $item?->category?->name ?? 'Uncategorized',
+                'quantity' => round((float) $row->total_qty, 3),
+            ];
+        })->values();
+
+        $categories = $lowStockItems
+            ->groupBy(fn($item) => $item->category ?: 'Uncategorized')
+            ->map(function ($items, $category) {
+                return [
+                    'category' => (string) $category,
+                    'low_stock_count' => $items->count(),
+                    'critical_count' => $items
+                        ->filter(fn($item) => (float) ($item->total_qty ?? $item->total_stock ?? 0) <= 0)
+                        ->count(),
+                ];
+            })
+            ->sortByDesc('low_stock_count')
+            ->values()
+            ->take(6);
+
+        $totalOut = (float) InventoryTransaction::query()
+            ->where('type', '=', 'out')
+            ->where('created_at', '>=', $periodStart)
+            ->sum('quantity');
+
+        $totalIn = (float) InventoryTransaction::query()
+            ->where('type', '=', 'in')
+            ->where('created_at', '>=', $periodStart)
+            ->sum('quantity');
+
+        $recentActivity = InventoryTransaction::with(['item', 'location'])
+            ->latest()
+            ->limit(8)
+            ->get()
+            ->map(function (InventoryTransaction $tx) {
+                return [
+                    'id' => $tx->id,
+                    'type' => $tx->type,
+                    'quantity' => (float) $tx->quantity,
+                    'reason' => $tx->reason,
+                    'created_at' => $tx->created_at?->toIso8601String(),
+                    'item' => [
+                        'name' => $tx->item?->name,
+                        'sku' => $tx->item?->sku,
+                    ],
+                    'location' => [
+                        'name' => $tx->location?->name,
+                    ],
+                ];
+            })
+            ->values();
+
         return response()->json([
             'valuation' => $statusResp->summary->total_valuation,
-            'low_stock' => $statusResp->summary->low_stock_count,
-            'total_items' => $statusResp->summary->total_items,
+            'low_stock' => $lowStock,
+            'total_items' => $totalItems,
             'recent_loss' => $adjustResp->summary->total_loss_value,
             'pending_pos' => $pendingPOs,
-            'critical_items' => collect($statusResp->data)->where('is_low', true)->take(5)->values(),
+            'critical_items' => $lowStockItems->take(20)->values(),
+            'health_score' => $healthScore,
+            'critical_shortages' => $criticalShortages,
+            'top_reorders' => $topReorders,
+            'top_consumed' => $topConsumed,
+            'categories' => $categories,
+            'consumption_summary' => [
+                'period_days' => $periodDays,
+                'total_out' => round($totalOut, 3),
+                'total_in' => round($totalIn, 3),
+                'net_movement' => round($totalIn - $totalOut, 3),
+            ],
+            'recent_activity' => $recentActivity,
         ]);
     }
 }
