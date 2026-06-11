@@ -49,6 +49,17 @@ class InventoryController extends Controller
         }
     }
 
+    /** Empty or whitespace-only SKU is stored as null (multiple nulls allowed under unique). */
+    private function mergeNormalizedSku(Request $request): void
+    {
+        if (! $request->has('sku')) {
+            return;
+        }
+        $raw = $request->input('sku');
+        $normalized = (is_string($raw) && trim($raw) !== '') ? trim($raw) : null;
+        $request->merge(['sku' => $normalized]);
+    }
+
     public function index()
     {
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get();
