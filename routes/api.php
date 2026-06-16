@@ -264,7 +264,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // BOM / Recipe Module
     Route::get('recipes', [RecipeController::class, 'index']);
+    Route::get('recipes/production', [RecipeController::class, 'productionList']);
+    Route::get('recipes/inventory-item/{inventoryItemId}', [RecipeController::class, 'showInventoryRecipe']);
     Route::put('recipes/menu-item/{menuItemId}', [RecipeController::class, 'upsert']);
+    Route::put('recipes/inventory-item/{inventoryItemId}', [RecipeController::class, 'upsertInventoryRecipe']);
     Route::post('recipes/{recipe}/produce', [RecipeController::class, 'produce']);
     Route::get('production-logs', [RecipeController::class, 'productionLogs']);
     Route::get('production-logs/{log}/details', [RecipeController::class, 'productionLogDetails']);

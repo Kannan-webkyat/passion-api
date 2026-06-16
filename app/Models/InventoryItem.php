@@ -78,6 +78,12 @@ class InventoryItem extends Model
             ->withTimestamps();
     }
 
+    public function prepRecipe()
+    {
+        return $this->hasOne(Recipe::class, 'output_inventory_item_id')
+            ->where('recipe_kind', Recipe::KIND_SEMI_FINISHED);
+    }
+
     /**
      * Source of truth for on-hand quantity: sum of all location rows (Option B).
      */

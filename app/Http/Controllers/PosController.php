@@ -4989,7 +4989,7 @@ class PosController extends Controller
                     $item->requires_production = (bool) $item->requires_production;
                     if ($item->inventory_item_id) {
                         $stock = $physicalStock->get($item->inventory_item_id, 0);
-                        $targetStore = $this->resolveInventoryDeductionStore($item, $kitchenStoreForMenu, $barStoreForMenu);
+                        $targetStore = $this->resolveInventoryDeductionStore($item, $kitchenStoreForMenu, $barStoreForMenu, $restaurant);
                         if ($targetStore) {
                             $phys = (float) (DB::table('inventory_item_locations')
                                 ->where('inventory_location_id', $targetStore->id)
@@ -5762,7 +5762,7 @@ class PosController extends Controller
                     $kitchenStore = $this->getKitchenForOrder($order);
                     $barLocationId = $order->restaurant?->bar_location_id;
                     $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-                    $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
+                    $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
 
                     if ($item->inventory_deducted && $targetStore) {
                         $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_cancel', (string) $order->id);
@@ -5937,7 +5937,7 @@ class PosController extends Controller
                                 $kitchenStore = $this->getKitchenForOrder($order);
                                 $barLocationId = $order->restaurant?->bar_location_id;
                                 $barStore = $barLocationId ? InventoryLocation::find($barLocationId) : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-                                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
+                                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
 
                                 if ($item->inventory_deducted && $targetStore) {
                                     $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_reduce', (string) $order->id);
@@ -6628,7 +6628,7 @@ class PosController extends Controller
 
                     continue;
                 }
-                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
+                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
                 if ($item->inventory_deducted && $targetStore) {
                     $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_void', (string) $order->id);
                 }
@@ -6744,7 +6744,7 @@ class PosController extends Controller
                     // Already cooked/cooking - do not reverse inventory, it's wasted
                     continue;
                 }
-                $targetStore = $this->resolveInventoryDeductionStore($processItem->menuItem, $kitchenStore, $barStore);
+                $targetStore = $this->resolveInventoryDeductionStore($processItem->menuItem, $kitchenStore, $barStore, $order->restaurant);
                 if ($processItem->inventory_deducted && $targetStore) {
                     $this->reverseOrderItemInventory($processItem, $targetStore, 'pos_order_item_void', (string) $order->id);
                 }
@@ -7240,7 +7240,7 @@ class PosController extends Controller
                 : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
             if (! $item->inventory_deducted && $kitchenStore) {
-                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
+                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
                 $this->deductOrderItemInventory($item, $targetStore, 'pos_order_line_ready', (string) $item->id);
             }
 
@@ -7367,13 +7367,18 @@ class PosController extends Controller
     }
 
     /**
-     * Bar store is for finished-good SKUs (bottles, cans). Ingredient-based made-to-order
-     * recipes (tea, coffee, etc.) always use kitchen stock even when is_direct_sale is true.
+     * Resolve which store stock is consumed from.
+     *
+     * Kitchen → Transfer → Bar model:
+     * - Batch / direct-sale SKUs at bar → bar store
+     * - MTO food (tea, biryani ingredients) → kitchen store
+     * - MTO bar recipes (cocktails) → bar store (ingredients must be transferred there first)
      */
     private function resolveInventoryDeductionStore(
         ?MenuItem $menuItem,
         ?InventoryLocation $kitchenStore,
-        ?InventoryLocation $barStore
+        ?InventoryLocation $barStore,
+        ?RestaurantMaster $restaurant = null
     ): ?InventoryLocation {
         if (! $menuItem) {
             return $kitchenStore ?? $barStore;
@@ -7383,13 +7388,49 @@ class PosController extends Controller
             ->where('is_active', true)
             ->first();
         if ($recipe && ! ($recipe->requires_production ?? true)) {
-            return $kitchenStore;
+            if ($this->shouldDeductMtoFromBarStore($menuItem, $restaurant, $barStore, $kitchenStore)) {
+                return $barStore ?? $kitchenStore;
+            }
+
+            return $kitchenStore ?? $barStore;
         }
         if ($menuItem->is_direct_sale && $barStore) {
             return $barStore;
         }
 
-        return $kitchenStore;
+        return $kitchenStore ?? $barStore;
+    }
+
+    /**
+     * Bar POS / bar-menu MTO items consume bar-shelf stock only (post-transfer).
+     */
+    private function shouldDeductMtoFromBarStore(
+        MenuItem $menuItem,
+        ?RestaurantMaster $restaurant,
+        ?InventoryLocation $barStore,
+        ?InventoryLocation $kitchenStore
+    ): bool {
+        if (! $barStore || ! $restaurant?->bar_location_id) {
+            return false;
+        }
+        if ((int) $restaurant->bar_location_id !== (int) $barStore->id) {
+            return false;
+        }
+
+        // Dedicated bar outlet (no separate kitchen store configured).
+        if (! $restaurant->kitchen_location_id
+            || (int) $restaurant->kitchen_location_id === (int) $barStore->id) {
+            return true;
+        }
+
+        // Mixed outlet: alcohol / bar-menu cocktails use bar store; food MTO uses kitchen.
+        $menuItem->loadMissing('category', 'inventoryItem');
+        if ($menuItem->inventoryItem?->is_alcohol) {
+            return true;
+        }
+        $categoryName = strtolower($menuItem->category?->name ?? '');
+
+        return str_contains($categoryName, 'alcohol') || str_contains($categoryName, 'bar');
     }
 
     /**
@@ -7432,8 +7473,15 @@ class PosController extends Controller
                     continue;
                 }
 
-                // Ingredient MTO: stock is always at kitchen / prep location, not bar shelf.
-                $targetStore = $kitchenStore;
+                $targetStore = $this->resolveInventoryDeductionStore(
+                    $menuItem,
+                    $kitchenStore,
+                    $barStore,
+                    $order->restaurant
+                );
+                if (! $targetStore) {
+                    continue;
+                }
 
                 $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                 $scale = 1.0;
@@ -7502,7 +7550,7 @@ class PosController extends Controller
         $refId = (string) $order->id . '-' . $batch;
         $result = DB::transaction(function () use ($order, $batch, $batchItems, $kitchenStore, $barStore, $refId) {
             foreach ($batchItems as $orderItem) {
-                $targetStore = $this->resolveInventoryDeductionStore($orderItem->menuItem, $kitchenStore, $barStore);
+                $targetStore = $this->resolveInventoryDeductionStore($orderItem->menuItem, $kitchenStore, $barStore, $order->restaurant);
                 $this->deductOrderItemInventory($orderItem, $targetStore, 'pos_order_batch', $refId);
             }
 
@@ -7631,7 +7679,7 @@ class PosController extends Controller
                 continue;
             }
 
-            $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore);
+            $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
 
             if ($targetStore) {
                 $this->deductOrderItemInventory($item, $targetStore, 'pos_order', (string) $order->id);
