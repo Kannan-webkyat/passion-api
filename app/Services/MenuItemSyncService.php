@@ -148,7 +148,10 @@ class MenuItemSyncService
     private function resolveVariantBasePrice(array $row, ?MenuItemVariant $existingVariant): float
     {
         if (array_key_exists('price', $row) && $row['price'] !== '' && $row['price'] !== null) {
-            return (float) $row['price'];
+            $explicit = (float) $row['price'];
+            if ($explicit > 0) {
+                return $explicit;
+            }
         }
 
         $outletPrices = collect($row['restaurant_prices'] ?? [])
