@@ -9,6 +9,7 @@ use App\Models\InventoryTransaction;
 use App\Models\PosOrderItem;
 use App\Models\PurchaseOrder;
 use App\Models\Vendor;
+use App\Services\InventoryDeductionStoreResolver;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -200,12 +201,20 @@ class InventoryReportController extends Controller
             $qty = $parentQty ?? $orderItem->quantity;
             $recipe = $menuItem->recipe;
 
-            // Determine likely deduction location for this item
-            $itemLocationId = ($menuItem->is_direct_sale && $restaurant && $restaurant->bar_location_id)
-                ? $restaurant->bar_location_id
-                : ($restaurant ? $restaurant->kitchen_location_id : null);
+            $kitchenStore = $restaurant?->kitchen_location_id
+                ? InventoryLocation::find($restaurant->kitchen_location_id)
+                : null;
+            $barStore = $restaurant?->bar_location_id
+                ? InventoryLocation::find($restaurant->bar_location_id)
+                : null;
+            $targetStore = app(InventoryDeductionStoreResolver::class)->resolve(
+                $menuItem,
+                $kitchenStore,
+                $barStore,
+                $restaurant
+            );
+            $itemLocationId = $targetStore?->id;
 
-            // If we are filtering by a specific location, only count if it matches
             if ($locationId && $itemLocationId && $itemLocationId != $locationId) {
                 return;
             }

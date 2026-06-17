@@ -9,6 +9,7 @@ use App\Models\ProductionLog;
 use App\Models\Recipe;
 use App\Models\RecipeIngredient;
 use App\Services\InventoryCostService;
+use App\Services\RecipeBomValidator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -138,6 +139,9 @@ class RecipeController extends Controller
 
         $validated = $this->validateRecipePayload($request);
 
+        $ingredientIds = collect($validated['ingredients'])->pluck('inventory_item_id')->map(fn ($id) => (int) $id)->all();
+        app(RecipeBomValidator::class)->validateNoDoubleCounting($ingredientIds);
+
         $recipe = DB::transaction(function () use ($menuItemId, $validated) {
             $recipe = Recipe::updateOrCreate(
                 ['menu_item_id' => $menuItemId],
@@ -172,7 +176,9 @@ class RecipeController extends Controller
         $validated = $this->validateRecipePayload($request);
 
         $ingredientIds = collect($validated['ingredients'])->pluck('inventory_item_id')->map(fn ($id) => (int) $id)->all();
-        $this->validateNoCircularReference($inventoryItemId, $ingredientIds);
+        $bomValidator = app(RecipeBomValidator::class);
+        $bomValidator->validateNoCircularReference($inventoryItemId, $ingredientIds);
+        $bomValidator->validateNoDoubleCounting($ingredientIds);
 
         $recipe = DB::transaction(function () use ($inventoryItemId, $validated, $item) {
             if (! $item->is_prepared_item) {
@@ -493,23 +499,6 @@ class RecipeController extends Controller
                 'yield_percentage' => $ing['yield_percentage'] ?? 100,
                 'notes' => $ing['notes'] ?? null,
             ]);
-        }
-    }
-
-    private function validateNoCircularReference(int $outputItemId, array $ingredientItemIds): void
-    {
-        if (in_array($outputItemId, $ingredientItemIds, true)) {
-            abort(422, 'Recipe cannot include its own output item as an ingredient.');
-        }
-
-        foreach ($ingredientItemIds as $ingredientId) {
-            $subRecipe = Recipe::where('output_inventory_item_id', $ingredientId)
-                ->where('recipe_kind', Recipe::KIND_SEMI_FINISHED)
-                ->first();
-
-            if ($subRecipe && $subRecipe->ingredients()->where('inventory_item_id', $outputItemId)->exists()) {
-                abort(422, 'Circular BOM reference detected between prep items.');
-            }
         }
     }
 

@@ -26,6 +26,7 @@ use App\Models\RestaurantTable;
 use App\Models\Setting;
 use App\Models\User;
 use App\Services\BusinessDateService;
+use App\Services\InventoryDeductionStoreResolver;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\App;
@@ -4839,12 +4840,14 @@ class PosController extends Controller
                 ->get()
                 ->keyBy(fn($rvi) => $rvi->restaurant_menu_item_id . '_' . $rvi->menu_item_variant_id);
 
-            // Made-to-order Sold Out: items without inventory_item_id but with recipe (requires_production=false)
+            $kitchenStoreForMenu = $this->getKitchenLocationForRestaurant($restaurant);
+            $barStoreForMenu = $this->getBarLocationForRestaurant($restaurant);
+            $storeResolver = $this->storeResolver();
+
+            // Made-to-order sold-out: check ingredients at the store each item actually deducts from.
             $madeToOrderSoldOut = collect();
-            // Use kitchen_location_id, not kitchenStock->isNotEmpty(): when the kitchen has no
-            // inventory_item_locations rows yet (or all ingredients are at 0 with no rows), the map
-            // is empty but we must still treat recipe ingredients as 0 available → sold out.
-            if ($kitchenLocationId) {
+            $barLocationId = $restaurant?->bar_location_id;
+            if ($kitchenLocationId || $barLocationId) {
                 $noInvItemIds = MenuItem::whereIn('id', $rmiByItem->keys())
                     ->whereNull('inventory_item_id')
                     ->pluck('id')
@@ -4852,60 +4855,70 @@ class PosController extends Controller
                 $recipes = Recipe::whereIn('menu_item_id', $noInvItemIds)
                     ->where('requires_production', false)
                     ->where('is_active', true)
-                    ->with('ingredients')
+                    ->with(['ingredients', 'menuItem.category', 'menuItem.inventoryItem'])
                     ->get();
 
-                // Build a working copy of kitchen stock adjusted for ingredients already
-                // committed by other open/billed orders at this kitchen (not yet deducted).
-                $adjustedKitchenStock = $kitchenStock->toBase()->map(fn($v) => (float) $v);
+                $adjustedKitchenStock = collect($storeResolver->stockMapAtLocation($kitchenStoreForMenu));
+                $adjustedBarStock = collect($storeResolver->stockMapAtLocation($barStoreForMenu));
 
                 if ($recipes->isNotEmpty()) {
                     $committedPortions = DB::table('pos_order_items')
                         ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-                        ->join('restaurant_masters', 'pos_orders.restaurant_id', '=', 'restaurant_masters.id')
                         ->leftJoin('menu_item_variants', 'pos_order_items.menu_item_variant_id', '=', 'menu_item_variants.id')
                         ->whereIn('pos_orders.status', ['open', 'billed'])
                         ->where('pos_order_items.status', 'active')
                         ->where('pos_order_items.inventory_deducted', false)
                         ->whereIn('pos_order_items.menu_item_id', $noInvItemIds)
-                        ->where('restaurant_masters.kitchen_location_id', $kitchenLocationId)
+                        ->where('pos_orders.restaurant_id', $restaurantId)
                         ->select('pos_order_items.menu_item_id', DB::raw('SUM(pos_order_items.quantity * CASE WHEN menu_item_variants.ml_quantity > 0 AND menu_item_variants.ml_quantity <= 10 THEN menu_item_variants.ml_quantity ELSE 1 END) as total'))
                         ->groupBy('pos_order_items.menu_item_id')
                         ->pluck('total', 'menu_item_id');
 
                     foreach ($recipes as $recipe) {
+                        $menuItem = $recipe->menuItem ?? MenuItem::find($recipe->menu_item_id);
+                        if (! $menuItem) {
+                            continue;
+                        }
+                        $usesBar = $storeResolver->usesBarStore(
+                            $menuItem,
+                            $restaurant,
+                            $barStoreForMenu,
+                            $kitchenStoreForMenu
+                        );
                         $portions = (float) $committedPortions->get($recipe->menu_item_id, 0);
                         if ($portions <= 0) {
                             continue;
                         }
                         $multiplier = $portions / max(0.001, (float) $recipe->yield_quantity);
+                        $target = $usesBar ? $adjustedBarStock : $adjustedKitchenStock;
                         foreach ($recipe->ingredients as $ing) {
                             $used = round((float) $ing->raw_quantity * $multiplier, 3);
-                            $adjustedKitchenStock->put(
+                            $target->put(
                                 $ing->inventory_item_id,
-                                max(0, $adjustedKitchenStock->get($ing->inventory_item_id, 0) - $used)
+                                max(0, (float) $target->get($ing->inventory_item_id, 0) - $used)
                             );
                         }
                     }
                 }
 
                 foreach ($recipes as $recipe) {
-                    $multiplier = 1 / max(0.001, (float) $recipe->yield_quantity);
-                    $ings = $recipe->ingredients;
-                    if ($ings->isEmpty()) {
+                    $menuItem = $recipe->menuItem ?? MenuItem::find($recipe->menu_item_id);
+                    if (! $menuItem) {
                         $madeToOrderSoldOut->put($recipe->menu_item_id, true);
 
                         continue;
                     }
-                    $soldOut = false;
-                    foreach ($ings as $ing) {
-                        $needQty = (float) $ing->raw_quantity * $multiplier;
-                        if ($adjustedKitchenStock->get($ing->inventory_item_id, 0) < $needQty) {
-                            $soldOut = true;
-                            break;
-                        }
-                    }
-                    $madeToOrderSoldOut->put($recipe->menu_item_id, $soldOut);
+                    $usesBar = $storeResolver->usesBarStore(
+                        $menuItem,
+                        $restaurant,
+                        $barStoreForMenu,
+                        $kitchenStoreForMenu
+                    );
+                    $stockMap = ($usesBar ? $adjustedBarStock : $adjustedKitchenStock)->all();
+                    $madeToOrderSoldOut->put(
+                        $recipe->menu_item_id,
+                        $storeResolver->mtoRecipeIsSoldOut($recipe, $menuItem, $stockMap)
+                    );
                 }
             }
 
@@ -4961,10 +4974,7 @@ class PosController extends Controller
                 }
             }
 
-            $kitchenStoreForMenu = $this->getKitchenLocationForRestaurant($restaurant);
-            $barStoreForMenu = $this->getBarLocationForRestaurant($restaurant);
-
-            $categories->each(function ($cat) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut, $reservedByItem, $kitchenStoreForMenu, $barStoreForMenu, $batchProducedByMenuId, $batchCommittedByMenuId) {
+            $categories->each(function ($cat) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut, $reservedByItem, $kitchenStoreForMenu, $barStoreForMenu, $batchProducedByMenuId, $batchCommittedByMenuId, $restaurant) {
                 $cat->items->each(function ($item) use ($physicalStock, $rmiByItem, $rviByRmiAndVariant, $madeToOrderSoldOut, $reservedByItem, $kitchenStoreForMenu, $barStoreForMenu, $batchProducedByMenuId, $batchCommittedByMenuId) {
                     $rmi = $rmiByItem->get($item->id);
                     if ($rmi) {
@@ -7239,9 +7249,11 @@ class PosController extends Controller
                 ? InventoryLocation::find($barLocationId)
                 : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
-            if (! $item->inventory_deducted && $kitchenStore) {
+            if (! $item->inventory_deducted && ($kitchenStore || $barStore)) {
                 $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
-                $this->deductOrderItemInventory($item, $targetStore, 'pos_order_line_ready', (string) $item->id);
+                if ($targetStore) {
+                    $this->deductOrderItemInventory($item, $targetStore, 'pos_order_line_ready', (string) $item->id);
+                }
             }
 
             $itemUpdates = ['kitchen_ready_at' => now()];
@@ -7366,90 +7378,38 @@ class PosController extends Controller
         return $this->getKitchenLocationForRestaurant($order->restaurant);
     }
 
-    /**
-     * Resolve which store stock is consumed from.
-     *
-     * Kitchen → Transfer → Bar model:
-     * - Batch / direct-sale SKUs at bar → bar store
-     * - MTO food (tea, biryani ingredients) → kitchen store
-     * - MTO bar recipes (cocktails) → bar store (ingredients must be transferred there first)
-     */
+    private function storeResolver(): InventoryDeductionStoreResolver
+    {
+        return app(InventoryDeductionStoreResolver::class);
+    }
+
     private function resolveInventoryDeductionStore(
         ?MenuItem $menuItem,
         ?InventoryLocation $kitchenStore,
         ?InventoryLocation $barStore,
         ?RestaurantMaster $restaurant = null
     ): ?InventoryLocation {
-        if (! $menuItem) {
-            return $kitchenStore ?? $barStore;
-        }
-        $recipe = Recipe::query()
-            ->where('menu_item_id', $menuItem->id)
-            ->where('is_active', true)
-            ->first();
-        if ($recipe && ! ($recipe->requires_production ?? true)) {
-            if ($this->shouldDeductMtoFromBarStore($menuItem, $restaurant, $barStore, $kitchenStore)) {
-                return $barStore ?? $kitchenStore;
-            }
-
-            return $kitchenStore ?? $barStore;
-        }
-        if ($menuItem->is_direct_sale && $barStore) {
-            return $barStore;
-        }
-
-        return $kitchenStore ?? $barStore;
+        return $this->storeResolver()->resolve($menuItem, $kitchenStore, $barStore, $restaurant);
     }
 
     /**
-     * Bar POS / bar-menu MTO items consume bar-shelf stock only (post-transfer).
-     */
-    private function shouldDeductMtoFromBarStore(
-        MenuItem $menuItem,
-        ?RestaurantMaster $restaurant,
-        ?InventoryLocation $barStore,
-        ?InventoryLocation $kitchenStore
-    ): bool {
-        if (! $barStore || ! $restaurant?->bar_location_id) {
-            return false;
-        }
-        if ((int) $restaurant->bar_location_id !== (int) $barStore->id) {
-            return false;
-        }
-
-        // Dedicated bar outlet (no separate kitchen store configured).
-        if (! $restaurant->kitchen_location_id
-            || (int) $restaurant->kitchen_location_id === (int) $barStore->id) {
-            return true;
-        }
-
-        // Mixed outlet: alcohol / bar-menu cocktails use bar store; food MTO uses kitchen.
-        $menuItem->loadMissing('category', 'inventoryItem');
-        if ($menuItem->inventoryItem?->is_alcohol) {
-            return true;
-        }
-        $categoryName = strtolower($menuItem->category?->name ?? '');
-
-        return str_contains($categoryName, 'alcohol') || str_contains($categoryName, 'bar');
-    }
-
-    /**
-     * Check if kitchen has sufficient ingredients for made-to-order items.
+     * Check if kitchen/bar has sufficient ingredients for made-to-order items.
      * Returns array of insufficient items: [['menu_item' => 'Tea', 'ingredient' => 'Tea Leaves', 'required' => 3, 'available' => 0, 'uom' => 'Gm']]
      */
     private function checkMadeToOrderStock(PosOrder $order, $items): array
     {
-        $kitchenStore = $this->getKitchenForOrder($order);
-        if (! $kitchenStore) {
-            return [];
-        }
-
         $order->loadMissing('restaurant');
+        $kitchenStore = $this->getKitchenForOrder($order);
         $barLocationId = $order->restaurant?->bar_location_id;
         $barStore = $barLocationId
             ? InventoryLocation::find($barLocationId)
             : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
+        if (! $kitchenStore && ! $barStore) {
+            return [];
+        }
+
+        $storeResolver = $this->storeResolver();
         $insufficient = [];
         foreach ($items as $orderItem) {
             if ($orderItem instanceof PosOrderItem) {
@@ -7525,15 +7485,16 @@ class PosController extends Controller
     private function deductBatchIngredients(PosOrder $order, int $batch): ?array
     {
         $kitchenStore = $this->getKitchenForOrder($order);
-        if (! $kitchenStore) {
-            return null;
-        }
 
         $order->loadMissing('restaurant');
         $barLocationId = $order->restaurant?->bar_location_id;
         $barStore = $barLocationId
             ? InventoryLocation::find($barLocationId)
             : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
+
+        if (! $kitchenStore && ! $barStore) {
+            return null;
+        }
 
         $batchItems = $order->items()
             ->where('kot_sent', true)
