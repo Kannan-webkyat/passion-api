@@ -28,6 +28,7 @@ class DatabaseSeeder extends Seeder
             // --
             // BarInventoryOrganizedSeeder::class,
             // RestaurantInventoryCatalogSeeder::class,
+            ChickenBiryaniSeeder::class,
             // BarOutletSeeder::class,
             // BarMenuConfigurationSeeder::class,
             // BarOrganizedItemPricingSeeder::class,

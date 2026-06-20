@@ -7,6 +7,7 @@ use App\Http\Controllers\CessSlabController;
 use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
+use App\Http\Controllers\GrnController;
 use App\Http\Controllers\DietaryTypeController;
 use App\Http\Controllers\HousekeepingChecklistController;
 use App\Http\Controllers\HousekeepingController;
@@ -311,6 +312,15 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('purchase-orders/{purchaseOrder}/send', [PurchaseOrderController::class, 'send']);
         Route::post('purchase-orders/{purchaseOrder}/cancel', [PurchaseOrderController::class, 'cancel']);
         Route::post('purchase-orders/{purchaseOrder}/pay', [PurchaseOrderController::class, 'pay']);
+
+        Route::get('purchase-orders/{purchaseOrder}/grn-remaining', [GrnController::class, 'poRemaining']);
+        Route::get('grns/meta', [GrnController::class, 'meta']);
+        Route::apiResource('grns', GrnController::class)->except(['destroy']);
+        Route::post('grns/{grn}/submit', [GrnController::class, 'submit']);
+        Route::post('grns/{grn}/inspect', [GrnController::class, 'inspect']);
+        Route::post('grns/{grn}/approve', [GrnController::class, 'approve']);
+        Route::post('grns/{grn}/cancel', [GrnController::class, 'cancel']);
+        Route::post('grns/{grn}/attachments', [GrnController::class, 'storeAttachment']);
 
         Route::apiResource('procurement-requisitions', ProcurementRequisitionController::class);
         Route::post('procurement-requisitions/{procurement_requisition}/request-quotes', [ProcurementRequisitionController::class, 'requestQuotes']);

@@ -46,6 +46,7 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-checklist-master',
             'housekeeping-cleaning-availability',
             'manage-inventory',
+            'manage-grn',
             // Inventory report permissions (granular)
             'inventory-report-summary',
             'inventory-report-status',

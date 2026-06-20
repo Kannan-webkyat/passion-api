@@ -51,7 +51,7 @@ class StockMovementController extends Controller
             } elseif ($request->type === 'requisition') {
                 $query->where('reference_type', '=', 'requisition');
             } elseif ($request->type === 'purchase') {
-                $query->where('reference_type', '=', 'purchase_order');
+                $query->whereIn('reference_type', ['grn', 'purchase_order']);
             } elseif ($request->type === 'manual') {
                 $query->whereNull('reference_type');
             }

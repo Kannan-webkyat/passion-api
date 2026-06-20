@@ -2,11 +2,8 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\InventoryItem;
-use App\Models\InventoryLocation;
-use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
-use App\Models\PurchaseOrderItem;
+use App\Services\GrnService;
 use App\Services\PurchaseOrderLineAmounts;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\Request;
@@ -97,8 +94,6 @@ class PurchaseOrderController extends Controller
             $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items']);
             $financials = PurchaseOrderService::buildHeaderFinancials($lineTotals, $validated);
 
-            PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
-
             $purchaseOrder->update([
                 'vendor_id' => $validated['vendor_id'],
                 'location_id' => $validated['location_id'],
@@ -132,8 +127,6 @@ class PurchaseOrderController extends Controller
                 ]);
             }
 
-            PurchaseOrderService::addStockExpectedForPurchaseOrder($purchaseOrder->fresh(['items']));
-
             DB::commit();
 
             return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem', 'location', 'creator'));
@@ -152,7 +145,6 @@ class PurchaseOrderController extends Controller
         }
 
         $reqId = $purchaseOrder->procurement_requisition_id;
-        PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
         $purchaseOrder->delete();
         PurchaseOrderService::syncProcurementRequisitionStatus($reqId);
 
@@ -167,6 +159,7 @@ class PurchaseOrderController extends Controller
         }
 
         $purchaseOrder->update(['status' => 'sent']);
+        PurchaseOrderService::addStockExpectedForPurchaseOrder($purchaseOrder->fresh(['items']));
         PurchaseOrderService::syncProcurementRequisitionStatus($purchaseOrder->procurement_requisition_id);
 
         return response()->json($purchaseOrder->fresh()->load('vendor', 'items.inventoryItem', 'location', 'creator'));
@@ -188,7 +181,7 @@ class PurchaseOrderController extends Controller
             'reason' => 'nullable|string|max:500',
         ]);
 
-        if (in_array($purchaseOrder->status, ['draft', 'sent'], true)) {
+        if (in_array($purchaseOrder->status, ['sent', 'partial'], true)) {
             PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
         }
 
@@ -212,31 +205,43 @@ class PurchaseOrderController extends Controller
         $validated = $request->validate([
             'location_id' => 'nullable|exists:inventory_locations,id',
             'document' => 'nullable|file|max:4096',
-            'items' => 'required|array|min:1',
-            'items.*.purchase_order_item_id' => 'required|integer',
-            'items.*.quantity_received' => 'required|integer|min:0',
-            'items.*.quantity_damaged_transit' => 'nullable|integer|min:0',
-            'items.*.quantity_broken_transit' => 'nullable|integer|min:0',
+            'items' => 'nullable|array|min:1',
+            'items.*.purchase_order_item_id' => 'required_with:items|integer',
+            'items.*.quantity_received' => 'required_with:items|numeric|min:0',
+            'items.*.quantity_rejected' => 'nullable|numeric|min:0',
+            'items.*.rejection_reason' => 'nullable|string|max:255',
         ]);
 
-        $locationId = $validated['location_id'] ?? InventoryLocation::where('type', 'main_store')->first()?->id;
-        if (! $locationId) {
-            return response()->json(['message' => 'No target location available'], 422);
-        }
+        $locationId = GrnService::resolveMainStoreLocationId(
+            isset($validated['location_id']) ? (int) $validated['location_id'] : null
+        );
 
         try {
-            $po = app(PurchaseOrderService::class)->receivePurchaseOrder(
-                $purchaseOrder,
-                (int) $locationId,
-                auth()->id()
-            );
-
-            if ($request->hasFile('document')) {
-                $path = $request->file('document')->store('po_documents', 'public');
-                $po->update(['received_document_path' => $path]);
+            $lines = null;
+            if (! empty($validated['items'])) {
+                $lines = array_map(fn ($row) => [
+                    'purchase_order_item_id' => (int) $row['purchase_order_item_id'],
+                    'quantity_received' => (float) $row['quantity_received'],
+                    'quantity_rejected' => (float) ($row['quantity_rejected'] ?? 0),
+                    'rejection_reason' => $row['rejection_reason'] ?? null,
+                ], $validated['items']);
             }
 
-            return response()->json($po->load('vendor', 'items.inventoryItem', 'creator'));
+            $grn = app(GrnService::class)->receivePurchaseOrderLegacy(
+                $purchaseOrder,
+                (int) $locationId,
+                $lines,
+                auth()->id(),
+                $request->file('document')
+            );
+
+            $po = $purchaseOrder->fresh(['vendor', 'items.inventoryItem', 'location', 'creator', 'grns']);
+
+            return response()->json([
+                'purchase_order' => $po,
+                'grn' => $grn->load('items.inventoryItem'),
+                'message' => 'Goods received via '.$grn->grn_number,
+            ]);
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         } catch (\Exception $e) {

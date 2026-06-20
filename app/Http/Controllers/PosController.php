@@ -4728,30 +4728,33 @@ class PosController extends Controller
     {
         $this->checkPermission('pos-order');
         $restaurantId = $request->input('restaurant_id');
-        if ($restaurantId) {
-            $this->authorizeRestaurantId((int) $restaurantId);
+        if (! $restaurantId) {
+            return response()->json(['message' => 'restaurant_id is required for POS menu.'], 422);
         }
 
-        $restaurant = $restaurantId ? \App\Models\RestaurantMaster::find($restaurantId) : null;
-        $locIds = $restaurant
-            ? array_filter([$restaurant->kitchen_location_id, $restaurant->bar_location_id])
-            : [];
+        $this->authorizeRestaurantId((int) $restaurantId);
 
-        if (! empty($locIds)) {
-            $physicalStock = DB::table('inventory_item_locations')
-                ->whereIn('inventory_location_id', $locIds)
-                ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
-                ->groupBy('inventory_item_id')
-                ->pluck('total', 'inventory_item_id')
-                ->map(fn($v) => (float) $v);
-        } else {
-            // Legacy fallback if no location mapped
-            $physicalStock = DB::table('inventory_item_locations')
-                ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
-                ->groupBy('inventory_item_id')
-                ->pluck('total', 'inventory_item_id')
-                ->map(fn($v) => (float) $v);
+        $restaurant = \App\Models\RestaurantMaster::find((int) $restaurantId);
+        if (! $restaurant) {
+            return response()->json(['message' => 'Restaurant not found.'], 404);
         }
+
+        $kitchenId = $restaurant->kitchen_location_id;
+        $barId = $restaurant->bar_location_id;
+        if (! $kitchenId && ! $barId) {
+            return response()->json([
+                'message' => 'Kitchen/Bar store mapping required for this outlet. Configure kitchen and/or bar store on the restaurant.',
+            ], 422);
+        }
+
+        $locIds = array_filter([$kitchenId, $barId]);
+
+        $physicalStock = DB::table('inventory_item_locations')
+            ->whereIn('inventory_location_id', $locIds)
+            ->select('inventory_item_id', DB::raw('SUM(quantity) as total'))
+            ->groupBy('inventory_item_id')
+            ->pluck('total', 'inventory_item_id')
+            ->map(fn ($v) => (float) $v);
 
         $reservedByItem = collect();
         $openProducts = DB::table('pos_order_items')

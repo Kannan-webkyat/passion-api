@@ -166,7 +166,9 @@ class PurchaseOrderService
             ]);
         }
 
-        self::addStockExpectedForPurchaseOrder($po->fresh(['items']));
+        if ($initialStatus === 'sent') {
+            self::addStockExpectedForPurchaseOrder($po->fresh(['items']));
+        }
 
         return $po->load('vendor', 'items.inventoryItem', 'location', 'creator');
     }
@@ -184,14 +186,21 @@ class PurchaseOrderService
     {
         $po->loadMissing('items');
         foreach ($po->items as $line) {
-            $q = (float) $line->quantity_ordered;
-            DB::table('inventory_items')
-                ->where('id', $line->inventory_item_id)
-                ->update([
-                    'stock_expected' => DB::raw('GREATEST(0, COALESCE(stock_expected, 0) - ' . $q . ')'),
-                    'updated_at' => now(),
-                ]);
+            self::subtractStockExpectedForQuantity((int) $line->inventory_item_id, (float) $line->quantity_ordered);
         }
+    }
+
+    public static function subtractStockExpectedForQuantity(int $inventoryItemId, float $qty): void
+    {
+        if ($qty <= 0) {
+            return;
+        }
+        DB::table('inventory_items')
+            ->where('id', $inventoryItemId)
+            ->update([
+                'stock_expected' => DB::raw('GREATEST(0, COALESCE(stock_expected, 0) - '.$qty.')'),
+                'updated_at' => now(),
+            ]);
     }
 
     /**
@@ -238,91 +247,14 @@ class PurchaseOrderService
     }
 
     /**
-     * Receive a sent PO into a store location (production GRN / stock-in path).
+     * @deprecated Stock posts via GRN — delegates to GrnService for backward compatibility.
      *
      * @throws \RuntimeException
      */
     public function receivePurchaseOrder(PurchaseOrder $purchaseOrder, int $locationId, ?int $userId = null): PurchaseOrder
     {
-        return DB::transaction(function () use ($purchaseOrder, $locationId, $userId) {
-            $lockedPo = PurchaseOrder::lockForUpdate()->findOrFail($purchaseOrder->id);
-            if ($lockedPo->status === 'received') {
-                throw new \RuntimeException('PO already received');
-            }
-            if ($lockedPo->status !== 'sent') {
-                throw new \RuntimeException('Send the PO before receiving stock');
-            }
+        app(GrnService::class)->receivePurchaseOrderLegacy($purchaseOrder, $locationId, null, $userId);
 
-            $lockedPo->update([
-                'status' => 'received',
-                'received_at' => now(),
-            ]);
-
-            self::subtractStockExpectedForPurchaseOrderLines($lockedPo);
-            $lockedPo->load('items');
-
-            foreach ($lockedPo->items as $poItem) {
-                $poItem->update([
-                    'quantity_received' => (int) $poItem->quantity_ordered,
-                ]);
-
-                /** @var InventoryItem|null $item */
-                $item = InventoryItem::lockForUpdate()->find($poItem->inventory_item_id);
-                if (! $item) {
-                    continue;
-                }
-
-                $conversionFactor = floatval($item->conversion_factor ?? 1);
-                $convertedQuantity = $poItem->quantity_ordered * $conversionFactor;
-
-                $lineExclusiveTotal = (float) ($poItem->subtotal ?? 0);
-                $qtyOrdered = (float) $poItem->quantity_ordered;
-                $exclusiveUnitInPurchaseUom = $qtyOrdered > 0 ? $lineExclusiveTotal / $qtyOrdered : 0.0;
-
-                $unitCostPerIssue = $conversionFactor > 0 ? $exclusiveUnitInPurchaseUom / $conversionFactor : $exclusiveUnitInPurchaseUom;
-                $totalCost = round($lineExclusiveTotal, 2);
-
-                $stockBeforeIssue = InventoryItem::sumQuantityAcrossLocations($item->id);
-                $onHandForWacIssue = max(0, $stockBeforeIssue);
-                $onHandForWacPurchase = $onHandForWacIssue / ($conversionFactor ?: 1);
-                $currentPurchasePrice = (float) ($item->cost_price ?? 0);
-                $newPurchaseQty = (float) $poItem->quantity_ordered;
-
-                $denominatorPurchase = $onHandForWacPurchase + $newPurchaseQty;
-                $newPurchaseCost = $denominatorPurchase > 0
-                    ? (($onHandForWacPurchase * $currentPurchasePrice) + ($newPurchaseQty * $exclusiveUnitInPurchaseUom)) / $denominatorPurchase
-                    : $exclusiveUnitInPurchaseUom;
-
-                DB::table('inventory_item_locations')->updateOrInsert(
-                    ['inventory_item_id' => $item->id, 'inventory_location_id' => $locationId],
-                    ['updated_at' => now(), 'created_at' => now()]
-                );
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $item->id)
-                    ->where('inventory_location_id', $locationId)
-                    ->increment('quantity', $convertedQuantity);
-
-                $item->update(['cost_price' => round($newPurchaseCost, 4)]);
-                InventoryItem::syncStoredCurrentStockFromLocations($item->id);
-
-                $locationName = \App\Models\InventoryLocation::find($locationId)?->name ?? 'Store';
-
-                \App\Models\InventoryTransaction::create([
-                    'inventory_item_id' => $item->id,
-                    'inventory_location_id' => $locationId,
-                    'type' => 'in',
-                    'quantity' => $convertedQuantity,
-                    'unit_cost' => round($unitCostPerIssue, 4),
-                    'total_cost' => $totalCost,
-                    'reason' => 'Purchase Receipt',
-                    'notes' => 'From PO: ' . $lockedPo->po_number . ' at ' . $locationName . ' (Ordered: ' . $poItem->quantity_ordered . ' ' . ($item->purchaseUom->short_name ?? '') . ')',
-                    'user_id' => $userId,
-                    'reference_type' => 'purchase_order',
-                    'reference_id' => (string) $lockedPo->id,
-                ]);
-            }
-
-            return $lockedPo->fresh(['vendor', 'items.inventoryItem', 'location', 'creator']);
-        });
+        return $purchaseOrder->fresh(['vendor', 'items.inventoryItem', 'location', 'creator']);
     }
 }
