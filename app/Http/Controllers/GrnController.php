@@ -5,23 +5,23 @@ namespace App\Http\Controllers;
 use App\Models\GRN;
 use App\Models\InventoryLocation;
 use App\Models\PurchaseOrder;
+use App\Services\GrnApiPresenter;
 use App\Services\GrnService;
+use App\Services\InventoryAuthorization;
+use App\Services\InventoryCostingConfig;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 class GrnController extends Controller
 {
-    private function checkPermission(string $permission): void
+    private function grnResponse(GRN $grn, int $status = 200)
     {
-        $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission) && ! $user->can('manage-inventory')) {
-            abort(403, 'Unauthorized action.');
-        }
+        return response()->json(GrnApiPresenter::withCostSnapshots($grn), $status);
     }
 
     public function meta()
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertViewGrn();
 
         return response()->json([
             'statuses' => [
@@ -33,12 +33,13 @@ class GrnController extends Controller
             'rejection_reasons' => GRN::REJECTION_REASONS,
             'quality_statuses' => GRN::QUALITY_STATUSES,
             'document_types' => GRN::DOCUMENT_TYPES,
+            'inventory_costing' => InventoryCostingConfig::publicMeta(),
         ]);
     }
 
     public function index(Request $request)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertViewGrn();
 
         $query = GRN::with(['vendor', 'location', 'purchaseOrder', 'creator', 'approver', 'inspector'])
             ->withCount('items')
@@ -56,16 +57,15 @@ class GrnController extends Controller
 
     public function show(GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertViewGrn();
 
         return response()->json(
-            $grn->load([
+            GrnApiPresenter::withCostSnapshots($grn->load([
                 'items.inventoryItem.purchaseUom',
                 'items.inventoryItem.issueUom',
-                'items.purchaseOrderItem',
                 'vendor',
                 'location',
-                'purchaseOrder.items.inventoryItem',
+                'purchaseOrder',
                 'creator',
                 'submitter',
                 'receiver',
@@ -74,13 +74,13 @@ class GrnController extends Controller
                 'canceller',
                 'attachments.uploader',
                 'auditLogs.user',
-            ])
+            ]))
         );
     }
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
         $validated = $this->validatePayload($request);
 
         try {
@@ -110,6 +110,7 @@ class GrnController extends Controller
                 $grn = app(GrnService::class)->inspect($grn, $this->inspectLinesFromRequest($request, $grn), auth()->id());
             }
             if ($request->boolean('approve')) {
+                InventoryAuthorization::assertApproveGrn();
                 if ($grn->status === GRN::STATUS_DRAFT) {
                     $grn = app(GrnService::class)->submit($grn, auth()->id());
                 }
@@ -123,7 +124,7 @@ class GrnController extends Controller
                 $grn = app(GrnService::class)->approve($grn, auth()->id());
             }
 
-            return response()->json($grn, 201);
+            return $this->grnResponse($grn, 201);
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -131,7 +132,7 @@ class GrnController extends Controller
 
     public function update(Request $request, GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
 
         if ($grn->isImmutable()) {
             return response()->json([
@@ -159,7 +160,7 @@ class GrnController extends Controller
                 );
             }
 
-            return response()->json($grn);
+            return $this->grnResponse($grn);
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -167,9 +168,9 @@ class GrnController extends Controller
 
     public function submit(GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
         try {
-            return response()->json(app(GrnService::class)->submit($grn, auth()->id()));
+            return $this->grnResponse(app(GrnService::class)->submit($grn, auth()->id()));
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -177,7 +178,7 @@ class GrnController extends Controller
 
     public function inspect(Request $request, GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
         $validated = $request->validate([
             'lines' => 'required|array|min:1',
             'lines.*.id' => 'required|integer|exists:grn_items,id',
@@ -193,7 +194,7 @@ class GrnController extends Controller
         ]);
 
         try {
-            return response()->json(
+            return $this->grnResponse(
                 app(GrnService::class)->inspect($grn, $validated['lines'], auth()->id())
             );
         } catch (\RuntimeException $e) {
@@ -203,9 +204,9 @@ class GrnController extends Controller
 
     public function approve(GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertApproveGrn();
         try {
-            return response()->json(app(GrnService::class)->approve($grn, auth()->id()));
+            return $this->grnResponse(app(GrnService::class)->approve($grn, auth()->id()));
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -213,7 +214,7 @@ class GrnController extends Controller
 
     public function cancel(Request $request, GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
         $validated = $request->validate(['reason' => 'nullable|string|max:500']);
         try {
             return response()->json(
@@ -226,7 +227,7 @@ class GrnController extends Controller
 
     public function storeAttachment(Request $request, GRN $grn)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
         $validated = $request->validate([
             'document_type' => ['required', 'string', Rule::in(array_keys(GRN::DOCUMENT_TYPES))],
             'document' => 'required|file|max:10240',
@@ -242,7 +243,7 @@ class GrnController extends Controller
                 auth()->id()
             );
 
-            return response()->json($grn, 201);
+            return $this->grnResponse($grn, 201);
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
@@ -251,7 +252,7 @@ class GrnController extends Controller
     /** Prefill lines for a new GRN from PO remaining quantities. */
     public function poRemaining(PurchaseOrder $purchaseOrder)
     {
-        $this->checkPermission('manage-grn');
+        InventoryAuthorization::assertInspectGrn();
         $po = $purchaseOrder->load('items.inventoryItem.purchaseUom');
         $service = app(GrnService::class);
         $defaultLines = $service->defaultLinesForRemaining($po);

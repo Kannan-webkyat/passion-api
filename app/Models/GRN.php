@@ -66,6 +66,7 @@ class GRN extends Model
         'inspected_at',
         'approved_by',
         'approved_at',
+        'inventory_costing_mode',
         'cancelled_by',
         'cancelled_at',
         'cancel_reason',

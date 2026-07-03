@@ -5,11 +5,13 @@ namespace App\Http\Controllers;
 use App\Models\InventoryTransaction;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
+use App\Services\InventoryAuthorization;
 
 class StockMovementController extends Controller
 {
     public function index(\Illuminate\Http\Request $request)
     {
+        InventoryAuthorization::assertViewMovements();
         $query = InventoryTransaction::with(['item.issueUom', 'location', 'department']);
 
         // Smart Search (Item name, SKU, Reference, or Notes)

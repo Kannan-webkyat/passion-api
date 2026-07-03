@@ -63,9 +63,17 @@ class PropertyFinancialSummaryService
             ? $this->posTotals($from, $to, $user)
             : $this->emptyPosSlice();
 
+        $foodCostMeta = $canPos
+            ? $this->estimateFoodCostForOutlets(
+                $this->resolveAccessibleOutletIds($user),
+                $from,
+                $to,
+            )
+            : ['amount' => 0.0, 'source' => 'recipe_estimate'];
+
         $totalSales = round($rooms['revenue'] + $pos['direct']['total_sales'], 2);
         $revenue = round($rooms['revenue'] + $pos['direct']['revenue'], 2);
-        $foodCost = round($pos['food_cost'], 2);
+        $foodCost = round((float) ($foodCostMeta['amount'] ?? 0), 2);
         $profit = round($revenue - $foodCost, 2);
         $marginBase = $revenue > 0 ? $revenue : 0.0;
         $profitMarginPct = $marginBase > 0 ? round(($profit / $marginBase) * 100, 1) : 0.0;
@@ -76,6 +84,7 @@ class PropertyFinancialSummaryService
             'total_sales' => $totalSales,
             'revenue' => $revenue,
             'food_cost' => $foodCost,
+            'food_cost_source' => $foodCostMeta['source'] ?? 'recipe_estimate',
             'profit' => $profit,
             'profit_margin_pct' => $profitMarginPct,
             'breakdown' => [
@@ -492,7 +501,7 @@ class PropertyFinancialSummaryService
                 'total_sales' => round($roomChargeGross, 2),
                 'revenue' => $roomChargeNet,
             ],
-            'food_cost' => $this->estimateFoodCostForOutlets($outletIds, $from, $to),
+            'food_cost' => round((float) ($this->estimateFoodCostForOutlets($outletIds, $from, $to)['amount'] ?? 0), 2),
             'outlet_count' => count($outletIds),
             'tax_amount' => round((float) ($agg->tax_amount ?? 0) + (float) ($agg->vat_tax_amount ?? 0), 2),
             'discount_amount' => round((float) ($agg->discount_amount ?? 0), 2),
@@ -536,42 +545,12 @@ class PropertyFinancialSummaryService
         return [];
     }
 
-    private function estimateFoodCostForOutlets(array $outletIds, string $from, string $to): float
+    /**
+     * @return array{amount: float, source: 'actual_transactions'|'recipe_estimate'}
+     */
+    private function estimateFoodCostForOutlets(array $outletIds, string $from, string $to): array
     {
-        if ($outletIds === []) {
-            return 0.0;
-        }
-
-        $costByMenuItemId = Recipe::query()
-            ->with(['ingredients.inventoryItem'])
-            ->where('is_active', true)
-            ->get()
-            ->mapWithKeys(fn(Recipe $recipe) => [(int) $recipe->menu_item_id => (float) $recipe->cost_per_portion]);
-
-        if ($costByMenuItemId->isEmpty()) {
-            return 0.0;
-        }
-
-        $soldRows = DB::table('pos_order_items as poi')
-            ->join('pos_orders as po', 'poi.order_id', '=', 'po.id')
-            ->whereIn('po.status', ['paid', 'refunded'])
-            ->whereIn('po.restaurant_id', $outletIds)
-            ->whereDate('po.business_date', '>=', $from)
-            ->whereDate('po.business_date', '<=', $to)
-            ->where('poi.status', 'active')
-            ->whereNotNull('poi.menu_item_id')
-            ->groupBy('poi.menu_item_id')
-            ->select('poi.menu_item_id', DB::raw('SUM(poi.quantity) as qty'))
-            ->get();
-
-        $total = 0.0;
-        foreach ($soldRows as $row) {
-            $menuItemId = (int) $row->menu_item_id;
-            $qty = (float) $row->qty;
-            $total += $qty * (float) ($costByMenuItemId[$menuItemId] ?? 0.0);
-        }
-
-        return round($total, 2);
+        return app(PosFoodCostService::class)->forOutletsWithMeta($outletIds, $from, $to);
     }
 
     /**

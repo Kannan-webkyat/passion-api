@@ -54,6 +54,11 @@ class PurchaseOrder extends Model
         return $this->hasMany(GRN::class);
     }
 
+    public function vendorPayments(): HasMany
+    {
+        return $this->hasMany(VendorPayment::class);
+    }
+
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');

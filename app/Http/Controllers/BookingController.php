@@ -22,6 +22,7 @@ use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
 use App\Support\SeasonalRoomPricing;
+use App\Services\Accounting\BookingCheckoutPoster;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -1362,7 +1363,18 @@ class BookingController extends Controller
 
         $this->appendAuditNotesForBookingUpdate($booking, $validated, $request);
 
+        $isNewCheckout = isset($validated['status'])
+            && $validated['status'] === 'checked_out'
+            && $booking->status !== 'checked_out';
+
         $booking->update($validated);
+
+        if ($isNewCheckout) {
+            app(BookingCheckoutPoster::class)->post(
+                $booking->fresh(['room.roomType.tax']),
+                auth()->id(),
+            );
+        }
 
         // Room chart renders occupancy from `booking_segments` first (`segment.adults_count ?? booking.adults_count`).
         // Keep segments aligned whenever guest mix or segment-level pricing fields change on the booking.

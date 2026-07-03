@@ -23,6 +23,12 @@ final class PurchaseOrderLineAmounts
             : self::BASIS_EXCLUSIVE;
     }
 
+    /** Persisted PO line tax regime: gst (local / inter-state) or vat (liquor). */
+    public static function resolveTaxType(?string $inventoryTaxType): string
+    {
+        return strtolower(trim((string) $inventoryTaxType)) === 'vat' ? 'vat' : 'gst';
+    }
+
     /**
      * @return array{subtotal: float, tax_amount: float, total_amount: float, tax_rate: float, unit_cess: float, total_cess: float}
      *                                                                                         subtotal = exclusive line net (inventory / ITC base); total_amount = merchandise + GST (excludes cess)

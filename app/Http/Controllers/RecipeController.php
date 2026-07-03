@@ -3,13 +3,20 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryItem;
+use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\MenuItem;
 use App\Models\ProductionLog;
 use App\Models\Recipe;
 use App\Models\RecipeIngredient;
+use App\Models\RestaurantMaster;
+use App\Services\Accounting\ProductionPoster;
+use App\Services\BomDeductionConfig;
+use App\Services\BusinessDateService;
 use App\Services\InventoryCostService;
+use App\Services\PosOutletBroadcast;
 use App\Services\RecipeBomValidator;
+use App\Services\RecipeCostCalculator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -210,6 +217,35 @@ class RecipeController extends Controller
     }
 
     /**
+     * Preview BOM-aware food cost for an unsaved recipe payload (menu editor).
+     */
+    public function previewCost(Request $request)
+    {
+        $this->authorizeRecipeRead();
+        $validated = $this->validateRecipePayload($request);
+
+        $recipe = new Recipe([
+            'yield_quantity' => $validated['yield_quantity'],
+            'recipe_kind' => Recipe::KIND_MENU_ITEM,
+            'is_active' => true,
+        ]);
+
+        $ingredients = collect($validated['ingredients'])->map(fn (array $ing) => new RecipeIngredient([
+            'inventory_item_id' => $ing['inventory_item_id'],
+            'quantity' => $ing['quantity'],
+            'yield_percentage' => $ing['yield_percentage'] ?? 100,
+        ]));
+        $recipe->setRelation('ingredients', $ingredients);
+
+        $calculator = app(RecipeCostCalculator::class);
+
+        return response()->json([
+            'total_cost' => $calculator->totalBatchCost($recipe),
+            'cost_per_portion' => $calculator->costPerPortion($recipe),
+        ]);
+    }
+
+    /**
      * Trigger a production run — deducts ingredients from kitchen stock.
      */
     public function produce(Request $request, $recipeId)
@@ -222,15 +258,37 @@ class RecipeController extends Controller
         ]);
 
         $recipe = Recipe::with(['ingredients.inventoryItem', 'menuItem', 'outputInventoryItem'])->findOrFail($recipeId);
+
+        if ($recipe->isSemiFinished() && BomDeductionConfig::expandsNested()) {
+            throw new \Illuminate\Http\Exceptions\HttpResponseException(response()->json([
+                'message' => 'Kitchen prep production is disabled while BOM mode is “expand raw”. Switch to “deduct prep stock” in settings, or change BOM deduction mode before batch-producing semi-finished items.',
+            ], 422));
+        }
+
         $multiplier = $validated['quantity_produced'] / $recipe->yield_quantity;
         $refId = (string) Str::uuid();
         $displayName = $recipe->display_name;
 
+        $location = InventoryLocation::find($validated['inventory_location_id']);
+        $restaurant = $location
+            ? RestaurantMaster::query()
+                ->where(function ($q) use ($location) {
+                    $q->where('kitchen_location_id', $location->id)
+                        ->orWhere('bar_location_id', $location->id);
+                })
+                ->where('is_active', true)
+                ->first()
+            : null;
+        $businessDate = $restaurant
+            ? BusinessDateService::resolve($restaurant)
+            : now()->toDateString();
+
         $totalProductionCost = 0;
         $affectedItemIds = [];
+        $productionLog = null;
 
         try {
-            DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, $displayName, &$totalProductionCost, &$affectedItemIds) {
+            DB::transaction(function () use ($recipe, $multiplier, $validated, $refId, $displayName, $businessDate, &$totalProductionCost, &$affectedItemIds, &$productionLog) {
                 $shortfalls = [];
                 foreach ($recipe->ingredients as $ing) {
                     $item = $ing->inventoryItem;
@@ -331,7 +389,7 @@ class RecipeController extends Controller
                     );
                 }
 
-                ProductionLog::create([
+                $productionLog = ProductionLog::create([
                     'recipe_id' => $recipe->id,
                     'inventory_location_id' => $validated['inventory_location_id'],
                     'quantity_produced' => $validated['quantity_produced'],
@@ -341,9 +399,12 @@ class RecipeController extends Controller
                     'total_cost' => $totalProductionCost,
                     'produced_by' => auth()->id(),
                     'production_date' => now(),
+                    'business_date' => $businessDate,
                     'notes' => $validated['notes'] ?? null,
                     'reference_id' => $refId,
                 ]);
+
+                app(ProductionPoster::class)->post($productionLog, auth()->id());
             });
 
             foreach (array_unique($affectedItemIds) as $itemId) {
@@ -359,6 +420,8 @@ class RecipeController extends Controller
             }
             throw $e;
         }
+
+        PosOutletBroadcast::forLocation((int) $validated['inventory_location_id']);
 
         return response()->json(['message' => 'Production logged successfully.', 'reference_id' => $refId]);
     }

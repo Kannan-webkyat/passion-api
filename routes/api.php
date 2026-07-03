@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AdminDashboardController;
+use App\Http\Controllers\AccountingController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\CessSlabController;
@@ -78,6 +79,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('users', UserController::class);
     Route::get('dashboard/financial-summary', [AdminDashboardController::class, 'financialSummary']);
     Route::get('dashboard/admin-summary', [AdminDashboardController::class, 'adminSummary']);
+    Route::get('accounting/trial-balance', [AccountingController::class, 'trialBalance']);
     Route::apiResource('roles', RoleController::class);
     Route::apiResource('departments', DepartmentController::class);
     Route::get('permissions', [RoleController::class, 'permissions']);
@@ -181,6 +183,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::put('settings/invoice-profile', [SettingController::class, 'updateInvoiceProfile']);
     Route::get('settings/invoice-bank', [SettingController::class, 'invoiceBank']);
     Route::put('settings/invoice-bank', [SettingController::class, 'updateInvoiceBank']);
+    Route::get('settings/inventory-costing', [SettingController::class, 'inventoryCosting']);
+    Route::put('settings/inventory-costing', [SettingController::class, 'updateInventoryCosting']);
+    Route::get('settings/bom-deduction', [SettingController::class, 'bomDeduction']);
+    Route::put('settings/bom-deduction', [SettingController::class, 'updateBomDeduction']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);
@@ -269,6 +275,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('recipes/inventory-item/{inventoryItemId}', [RecipeController::class, 'showInventoryRecipe']);
     Route::put('recipes/menu-item/{menuItemId}', [RecipeController::class, 'upsert']);
     Route::put('recipes/inventory-item/{inventoryItemId}', [RecipeController::class, 'upsertInventoryRecipe']);
+    Route::post('recipes/preview-cost', [RecipeController::class, 'previewCost']);
     Route::post('recipes/{recipe}/produce', [RecipeController::class, 'produce']);
     Route::get('production-logs', [RecipeController::class, 'productionLogs']);
     Route::get('production-logs/{log}/details', [RecipeController::class, 'productionLogDetails']);

@@ -150,6 +150,10 @@ class RestaurantBarOpeningStockSeeder extends Seeder
 
     private function barOpeningQuantity(InventoryItem $item): float
     {
+        if ((float) ($item->cost_price ?? 0) <= 0) {
+            return 0;
+        }
+
         $issue = strtoupper($item->issueUom?->short_name ?? '');
 
         if (in_array($issue, ['BTL', 'PCS'], true)) {

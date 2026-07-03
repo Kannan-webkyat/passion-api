@@ -10,6 +10,9 @@ use App\Models\PosOrderItem;
 use App\Models\PurchaseOrder;
 use App\Models\Vendor;
 use App\Services\InventoryDeductionStoreResolver;
+use App\Services\ProcurementCostTerminology;
+use App\Services\ConsumptionActualsService;
+use App\Services\RecipeBomExpander;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
@@ -176,10 +179,18 @@ class InventoryReportController extends Controller
             'variant',
             'combo.menuItems.recipe.ingredients.inventoryItem',
             'combo.menuItems.variant',
-            'order.restaurant'
+            'order.restaurant',
         ])
             ->where('inventory_deducted', true)
-            ->whereBetween('created_at', [$startDate.' 00:00:00', $endDate.' 23:59:59']);
+            ->whereHas('order', function ($q) use ($startDate, $endDate) {
+                $q->where(function ($dated) use ($startDate, $endDate) {
+                    $dated->whereBetween('business_date', [$startDate, $endDate])
+                        ->orWhere(function ($legacy) use ($startDate, $endDate) {
+                            $legacy->whereNull('business_date')
+                                ->whereBetween('created_at', [$startDate.' 00:00:00', $endDate.' 23:59:59']);
+                        });
+                });
+            });
 
         if ($locationId) {
             $salesItems->whereHas('order.restaurant', function ($r) use ($locationId) {
@@ -227,8 +238,8 @@ class InventoryReportController extends Controller
                     $scale = $ml;
                 }
                 $multiplier = ($qty * $scale) / $yield;
-                foreach ($recipe->ingredients as $ing) {
-                    $theoretical[$ing->inventory_item_id] = ($theoretical[$ing->inventory_item_id] ?? 0) + ($ing->raw_quantity * $multiplier);
+                foreach (app(RecipeBomExpander::class)->flattenedRequirements($recipe, $multiplier) as $itemId => $rawQty) {
+                    $theoretical[$itemId] = ($theoretical[$itemId] ?? 0) + $rawQty;
                 }
             } elseif ($menuItem->inventory_item_id) {
                 $deductQty = (float)$qty;
@@ -256,42 +267,7 @@ class InventoryReportController extends Controller
             }
         }
 
-        $consumptionOutReasonsExcluded = ['Transfer', 'Internal Issue', 'Production', 'Finished Goods'];
-
-        $outsQuery = InventoryTransaction::whereDate('created_at', '>=', $startDate)
-            ->whereDate('created_at', '<=', $endDate)
-            ->where('type', 'out')
-            ->whereNotIn('reason', $consumptionOutReasonsExcluded);
-
-        if ($locationId) {
-            $outsQuery->where('inventory_location_id', $locationId);
-        }
-
-        $outsData = $outsQuery->select('inventory_item_id', DB::raw('SUM(quantity) as total_qty'))
-            ->groupBy('inventory_item_id')
-            ->get();
-
-        $reversalInsQuery = InventoryTransaction::whereDate('created_at', '>=', $startDate)
-            ->whereDate('created_at', '<=', $endDate)
-            ->where('type', 'in')
-            ->where('reason', 'Inventory Reversal');
-
-        if ($locationId) {
-            $reversalInsQuery->where('inventory_location_id', $locationId);
-        }
-
-        $reversalInsData = $reversalInsQuery->select('inventory_item_id', DB::raw('SUM(quantity) as total_qty'))
-            ->groupBy('inventory_item_id')
-            ->get();
-
-        $actuals = [];
-        foreach ($outsData as $row) {
-            $actuals[$row->inventory_item_id] = (float) $row->total_qty;
-        }
-        foreach ($reversalInsData as $row) {
-            $id = $row->inventory_item_id;
-            $actuals[$id] = ($actuals[$id] ?? 0) - (float) $row->total_qty;
-        }
+        $actuals = app(ConsumptionActualsService::class)->netUsageByItem($startDate, $endDate, $locationId ? (int) $locationId : null);
 
         $itemIds = collect($theoretical)->keys()->merge(collect($actuals)->keys())->unique();
         $items = InventoryItem::with(['issueUom', 'category'])->whereIn('id', $itemIds)->get();
@@ -515,7 +491,9 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * Purchase History & Price Trending (received PO lines; amounts prorated to quantity received).
+     * Vendor Spend report — PO agreed payables (NOT inventory WAC).
+     *
+     * @see ProcurementCostTerminology::VENDOR_SPEND
      */
     public function purchaseHistory(Request $request)
     {
@@ -527,7 +505,7 @@ class InventoryReportController extends Controller
         $search = trim((string) $request->query('search', ''));
 
         $query = PurchaseOrder::with(['vendor', 'items.inventoryItem.issueUom'])
-            ->where('status', 'received')
+            ->whereIn('status', ['received', 'partial'])
             ->orderBy('received_at', 'desc');
 
         if ($vendorId && $vendorId !== 'all') {
@@ -558,8 +536,10 @@ class InventoryReportController extends Controller
 
                 $qtyOrdered = (float) ($pi->quantity_ordered ?: 0);
                 $qtyReceived = (float) $pi->quantity_received;
-                // Vendor payable gross for received qty (supports partial receipts)
-                $totalCost = (float) ($qtyOrdered > 0
+                if ($qtyReceived <= 0) {
+                    continue;
+                }
+                $vendorSpendTotal = (float) ($qtyOrdered > 0
                     ? ((float) ($pi->total_amount ?? 0)) * ($qtyReceived / $qtyOrdered)
                     : 0);
 
@@ -572,8 +552,8 @@ class InventoryReportController extends Controller
                     'item_name' => $pi->inventoryItem?->name ?? '—',
                     'uom' => $pi->inventoryItem?->issueUom?->short_name ?? '—',
                     'qty' => $qtyReceived,
-                    'unit_cost' => (float) $pi->unit_price,
-                    'total_cost' => $totalCost,
+                    'vendor_unit_rate' => (float) $pi->unit_price,
+                    'vendor_spend_total' => $vendorSpendTotal,
                 ];
             }
         }
@@ -589,11 +569,12 @@ class InventoryReportController extends Controller
         $collection = collect($flatItems);
 
         return response()->json([
+            ...ProcurementCostTerminology::vendorSpendReportMeta(),
             'data' => $flatItems,
             'summary' => [
-                'total_spend' => round((float) $collection->sum('total_cost'), 2),
-                'avg_unit_price' => $collection->isNotEmpty()
-                    ? round((float) $collection->avg('unit_cost'), 4)
+                'total_vendor_spend' => round((float) $collection->sum('vendor_spend_total'), 2),
+                'avg_vendor_unit_rate' => $collection->isNotEmpty()
+                    ? round((float) $collection->avg('vendor_unit_rate'), 4)
                     : 0,
             ],
             'vendors' => Vendor::query()->orderBy('name')->get(['id', 'name']),
@@ -873,7 +854,8 @@ class InventoryReportController extends Controller
 
         $locationId = $request->query('location_id');
         if (! $locationId || $locationId === 'auto') {
-            $locationId = InventoryLocation::query()->where('type', 'bar_store')->orderBy('id')->value('id');
+            $locationId = InventoryLocation::query()->where('type', 'bar_store')->orderBy('id')->value('id')
+                ?? InventoryLocation::query()->where('name', 'Bar Store')->orderBy('id')->value('id');
         }
         if (! $locationId) {
             return response()->json(['message' => 'No bar store location found.'], 422);

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\RecipeCostCalculator;
 use Illuminate\Database\Eloquent\Model;
 
 class Recipe extends Model
@@ -84,10 +85,15 @@ class Recipe extends Model
 
     /**
      * Calculate total raw material cost for one batch (yield_quantity portions).
+     * Uses BOM-aware flattening aligned with POS deduction mode.
      */
     public function getTotalCostAttribute(): float
     {
-        return $this->ingredients->sum('line_cost');
+        if (! $this->relationLoaded('ingredients') || $this->ingredients->isEmpty()) {
+            return 0.0;
+        }
+
+        return app(RecipeCostCalculator::class)->totalBatchCost($this);
     }
 
     /**
@@ -95,8 +101,10 @@ class Recipe extends Model
      */
     public function getCostPerPortionAttribute(): float
     {
-        return $this->yield_quantity > 0
-            ? $this->total_cost / $this->yield_quantity
-            : 0;
+        if (! $this->relationLoaded('ingredients') || $this->ingredients->isEmpty()) {
+            return 0.0;
+        }
+
+        return app(RecipeCostCalculator::class)->costPerPortion($this);
     }
 }

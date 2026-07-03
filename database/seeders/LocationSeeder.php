@@ -25,10 +25,10 @@ class LocationSeeder extends Seeder
 
         // 3. Sub-stores (linked to Departments)
         $mappings = [
-            ['name' => 'Bar Store',      'code' => 'BAR'],
-            ['name' => 'Housekeeping Store', 'code' => 'HKP'],
-            ['name' => 'Engineering Hub', 'code' => 'ENG'],
-            ['name' => 'Reception Pantry', 'code' => 'FRO'],
+            ['name' => 'Bar Store',      'code' => 'BAR', 'type' => 'bar_store'],
+            ['name' => 'Housekeeping Store', 'code' => 'HKP', 'type' => 'housekeeping_store'],
+            ['name' => 'Engineering Hub', 'code' => 'ENG', 'type' => 'sub_store'],
+            ['name' => 'Reception Pantry', 'code' => 'FRO', 'type' => 'sub_store'],
         ];
 
         foreach ($mappings as $map) {
@@ -37,7 +37,7 @@ class LocationSeeder extends Seeder
                 InventoryLocation::updateOrCreate(
                     ['name' => $map['name']],
                     [
-                        'type' => $map['code'] === 'HKP' ? 'housekeeping_store' : 'sub_store',
+                        'type' => $map['type'],
                         'department_id' => $dept->id,
                         'is_active' => true,
                     ]

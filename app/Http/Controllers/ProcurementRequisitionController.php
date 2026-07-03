@@ -6,6 +6,8 @@ use App\Models\ProcurementRequisition;
 use App\Models\ProcurementRequisitionItem;
 use App\Models\Setting;
 use App\Models\Vendor;
+use App\Exceptions\LiquorTaxValidationException;
+use App\Services\InventoryAuthorization;
 use App\Services\PurchaseOrderLineAmounts;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\Request;
@@ -23,6 +25,8 @@ class ProcurementRequisitionController extends Controller
 
     public function index()
     {
+        InventoryAuthorization::assertViewProcurement();
+
         return response()->json(
             ProcurementRequisition::with([
                 'location',
@@ -94,6 +98,8 @@ class ProcurementRequisitionController extends Controller
 
     public function show(ProcurementRequisition $procurementRequisition)
     {
+        InventoryAuthorization::assertViewProcurement();
+
         return response()->json($procurementRequisition->load([
             'location',
             'items.inventoryItem.tax',
@@ -211,6 +217,7 @@ class ProcurementRequisitionController extends Controller
 
     public function quoteSlips(ProcurementRequisition $procurementRequisition)
     {
+        InventoryAuthorization::assertViewProcurement();
         $procurementRequisition->load([
             'location',
             'items.inventoryItem.purchaseUom',
@@ -336,7 +343,8 @@ class ProcurementRequisitionController extends Controller
 
         $service = app(PurchaseOrderService::class);
 
-        $created = DB::transaction(function () use ($procurementRequisition, $service) {
+        try {
+            $created = DB::transaction(function () use ($procurementRequisition, $service) {
             $byVendor = [];
             foreach ($procurementRequisition->items as $line) {
                 $vendorId = $line->vendors->first()->id;
@@ -380,9 +388,12 @@ class ProcurementRequisitionController extends Controller
             return $pos;
         });
 
-        return response()->json([
-            'message' => 'Purchase orders created',
-            'purchase_orders' => collect($created)->map(fn ($po) => $po->load('vendor', 'items.inventoryItem', 'creator')),
-        ], 201);
+            return response()->json([
+                'message' => 'Purchase orders created',
+                'purchase_orders' => collect($created)->map(fn ($po) => $po->load('vendor', 'items.inventoryItem', 'creator')),
+            ], 201);
+        } catch (LiquorTaxValidationException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
     }
 }

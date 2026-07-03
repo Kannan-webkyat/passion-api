@@ -10,6 +10,9 @@ use Illuminate\Support\Facades\DB;
 
 class InventoryDeductionStoreResolver
 {
+    public function __construct(
+        private readonly RecipeBomExpander $bomExpander,
+    ) {}
     /**
      * Which location stock is consumed from for a POS line (Kitchen → Transfer → Bar model).
      */
@@ -160,9 +163,7 @@ class InventoryDeductionStoreResolver
                 continue;
             }
             $multiplier = $portions / max(0.001, (float) $recipe->yield_quantity);
-            foreach ($recipe->ingredients as $ing) {
-                $used = round((float) $ing->raw_quantity * $multiplier, 3);
-                $id = $ing->inventory_item_id;
+            foreach ($this->bomExpander->flattenedRequirements($recipe, $multiplier) as $id => $used) {
                 $adjusted[$id] = max(0, ($adjusted[$id] ?? 0) - $used);
             }
         }
@@ -176,15 +177,14 @@ class InventoryDeductionStoreResolver
     public function mtoRecipeIsSoldOut(Recipe $recipe, MenuItem $menuItem, array $stockMap): bool
     {
         $multiplier = 1 / max(0.001, (float) $recipe->yield_quantity);
-        $ings = $recipe->ingredients;
+        $requirements = $this->bomExpander->flattenedRequirements($recipe, $multiplier);
 
-        if ($ings->isEmpty()) {
+        if ($requirements === []) {
             return true;
         }
 
-        foreach ($ings as $ing) {
-            $needQty = (float) $ing->raw_quantity * $multiplier;
-            if (($stockMap[$ing->inventory_item_id] ?? 0) < $needQty) {
+        foreach ($requirements as $itemId => $needQty) {
+            if (($stockMap[$itemId] ?? 0) < $needQty) {
                 return true;
             }
         }

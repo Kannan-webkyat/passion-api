@@ -7,6 +7,8 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
+use App\Services\BomDeductionConfig;
+use App\Services\InventoryCostingConfig;
 
 class SettingController extends Controller
 {
@@ -154,6 +156,48 @@ class SettingController extends Controller
                 'check_out_time' => $validated['check_out_time'],
                 'room_rates_include_gst' => filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN),
             ],
+        ]);
+    }
+
+    public function inventoryCosting()
+    {
+        return response()->json(InventoryCostingConfig::publicMeta());
+    }
+
+    public function updateInventoryCosting(Request $request)
+    {
+        $this->checkPermission('manage-settings');
+        $validated = $request->validate([
+            'inventory_costing_mode' => 'required|string|in:'.InventoryCostingConfig::MODE_EXCLUSIVE_ONLY.','.InventoryCostingConfig::MODE_LANDED_COST,
+        ]);
+
+        InventoryCostingConfig::setMode($validated['inventory_costing_mode']);
+
+        return response()->json([
+            'message' => 'Inventory costing mode updated.',
+            ...InventoryCostingConfig::publicMeta(),
+        ]);
+    }
+
+    public function bomDeduction()
+    {
+        return response()->json(BomDeductionConfig::publicMeta());
+    }
+
+    public function updateBomDeduction(Request $request)
+    {
+        $this->checkPermission('manage-settings');
+        $validated = $request->validate([
+            'bom_deduction_mode' => 'required|string|in:'
+                .BomDeductionConfig::MODE_PREP_STOCK.','
+                .BomDeductionConfig::MODE_EXPAND_RAW,
+        ]);
+
+        BomDeductionConfig::setMode($validated['bom_deduction_mode']);
+
+        return response()->json([
+            'message' => 'BOM deduction mode updated.',
+            ...BomDeductionConfig::publicMeta(),
         ]);
     }
 }

@@ -23,6 +23,8 @@ class InventoryTaxController extends Controller
 
     public function index()
     {
+        $this->checkPermission('manage-inventory');
+
         return response()->json(InventoryTax::all());
     }
 

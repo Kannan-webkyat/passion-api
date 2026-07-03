@@ -4,7 +4,6 @@ namespace Database\Seeders;
 
 use Illuminate\Database\Seeder;
 use Spatie\Permission\Models\Permission;
-use Spatie\Permission\Models\Role;
 
 class RolePermissionSeeder extends Seeder
 {
@@ -45,8 +44,11 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-room-stock',
             'housekeeping-checklist-master',
             'housekeeping-cleaning-availability',
+            'inventory-view',
             'manage-inventory',
             'manage-grn',
+            'grn-inspect',
+            'grn-approve',
             // Inventory report permissions (granular)
             'inventory-report-summary',
             'inventory-report-status',
@@ -80,15 +82,28 @@ class RolePermissionSeeder extends Seeder
             'pos-discount',
             'pos-reopen-order',
             'pos-day-closing',
+            'pos-day-closing-override',
+            'accounting-view-trial-balance',
+            'accounting-vendor-pay',
         ];
     }
 
     /**
-     * Run the database seeds.
+     * @return array<int, string>
+     */
+    public static function inventoryReportPermissionNames(): array
+    {
+        return array_values(array_filter(
+            self::permissionNames(),
+            fn (string $p) => str_starts_with($p, 'inventory-report-'),
+        ));
+    }
+
+    /**
+     * Seed permission rows only. Roles are seeded by DefaultHotelRolesSeeder.
      */
     public function run(): void
     {
-        // API users and Spatie roles both use the "web" guard (not sanctum).
         $guardName = 'web';
         foreach (self::permissionNames() as $permission) {
             Permission::firstOrCreate([
@@ -96,9 +111,5 @@ class RolePermissionSeeder extends Seeder
                 'guard_name' => $guardName,
             ]);
         }
-
-        // Production: seed permissions and Admin role only. Other roles are created via Users & Roles UI.
-        $admin = Role::firstOrCreate(['name' => 'Admin', 'guard_name' => $guardName]);
-        $admin->syncPermissions(Permission::query()->where('guard_name', $guardName)->get());
     }
 }

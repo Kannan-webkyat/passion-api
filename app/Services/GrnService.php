@@ -11,6 +11,8 @@ use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
+use App\Services\Accounting\GrnApprovePoster;
+use App\Services\InventoryCostingConfig;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -214,6 +216,8 @@ class GrnService
 
             $locationId = $this->assertGrnMainStoreLocation($locked);
             $refId = (string) $locked->id;
+            $costingMode = InventoryCostingConfig::mode();
+            $grnMerchandiseSubtotalSum = LandedCostAllocator::grnMerchandiseSubtotalSum($locked->items, $po);
 
             foreach ($locked->items as $grnLine) {
                 $accepted = (float) $grnLine->quantity_accepted;
@@ -225,6 +229,21 @@ class GrnService
                 if (! $poItem) {
                     throw new RuntimeException('PO line not found for GRN item.');
                 }
+
+                $landed = LandedCostAllocator::forGrnLine($po, $poItem, $accepted, $grnMerchandiseSubtotalSum);
+                $postedUnit = InventoryCostingConfig::postedUnitCostFromAllocation($landed);
+                $ordered = max(0.000001, (float) $poItem->quantity_ordered);
+                $lineTaxAccepted = round((float) ($poItem->tax_amount ?? 0) * ($accepted / $ordered), 2);
+                $grnLine->update([
+                    'line_subtotal_accepted' => $landed['line_subtotal_accepted'],
+                    'line_tax_accepted' => $lineTaxAccepted,
+                    'line_cess_accepted' => $landed['line_cess_accepted'],
+                    'line_freight_allocated' => $landed['line_freight_allocated'],
+                    'merchandise_unit_cost' => $landed['merchandise_unit'],
+                    'cess_unit_cost' => $landed['cess_unit'],
+                    'freight_unit_cost' => $landed['freight_unit'],
+                    'landed_unit_cost' => $postedUnit,
+                ]);
 
                 $this->postAcceptedLineStock(
                     $grnLine,
@@ -248,11 +267,14 @@ class GrnService
                 'status' => GRN::STATUS_APPROVED,
                 'approved_by' => $userId,
                 'approved_at' => now(),
+                'inventory_costing_mode' => $costingMode,
             ]);
 
             self::syncPurchaseOrderStatus($po->fresh(['items']));
 
-            $this->audit($locked, 'approved', $old, GRN::STATUS_APPROVED, $userId, null, 'GRN approved — stock posted');
+            $this->audit($locked, 'approved', $old, GRN::STATUS_APPROVED, $userId, null, 'GRN approved — stock posted ('.InventoryCostingConfig::publicMeta()['label'].' costing)');
+
+            app(GrnApprovePoster::class)->post($locked->fresh(['items.inventoryItem', 'items.purchaseOrderItem']), $userId);
 
             return $locked->fresh(['items.inventoryItem', 'purchaseOrder.items', 'vendor', 'location', 'creator', 'approver', 'auditLogs.user']);
         });
@@ -281,9 +303,41 @@ class GrnService
     }
 
     /**
+     * Create a GRN from a PO and submit for quality inspection (stock posts only after approve).
+     *
+     * @param  array<int, array<string, mixed>>|null  $lines  null = receive all remaining quantities
+     */
+    public function receivePurchaseOrderForInspection(
+        PurchaseOrder $purchaseOrder,
+        int $locationId,
+        ?array $lines = null,
+        ?int $userId = null,
+        ?UploadedFile $document = null
+    ): GRN {
+        $mainStoreId = self::resolveMainStoreLocationId($locationId);
+        $po = $purchaseOrder->load('items.inventoryItem');
+        $builtLines = $lines ?? $this->defaultLinesForRemaining($po);
+
+        $grn = $this->createDraft([
+            'purchase_order_id' => $po->id,
+            'inventory_location_id' => $mainStoreId,
+            'received_date' => now()->toDateString(),
+            'notes' => 'PO receive — pending inspection',
+            'received_by' => $userId,
+        ], $builtLines, $userId);
+
+        if ($document) {
+            $this->attachDocument($grn, $document, GrnAttachment::TYPE_DELIVERY_NOTE, null, $userId);
+        }
+
+        return $this->submit($grn, $userId);
+    }
+
+    /**
      * Backward-compatible full receive: create, submit, and approve a GRN in one step.
      *
      * @param  array<int, array<string, mixed>>|null  $lines  null = receive all remaining quantities
+     * @deprecated Use receivePurchaseOrderForInspection and inspect → approve in GrnWorkspace.
      */
     public function receivePurchaseOrderLegacy(
         PurchaseOrder $purchaseOrder,
@@ -485,6 +539,7 @@ class GrnService
             $share = $ordered > 0 ? $accepted / $ordered : 0;
             $lineSubtotal = round((float) ($poItem->subtotal ?? 0) * $share, 2);
             $lineTax = round((float) ($poItem->tax_amount ?? 0) * $share, 2);
+            $lineCess = round((float) ($poItem->total_cess ?? 0) * $share, 2);
 
             GrnItem::create([
                 'grn_id' => $grn->id,
@@ -499,6 +554,7 @@ class GrnService
                 'tax_rate' => $taxRate,
                 'line_subtotal_accepted' => $lineSubtotal,
                 'line_tax_accepted' => $lineTax,
+                'line_cess_accepted' => $lineCess,
                 'rejection_reason' => $this->normalizeRejectionReason($line['rejection_reason'] ?? null),
                 'rejection_notes' => $line['rejection_notes'] ?? null,
                 'quality_status' => $accepted > 0 && $rejected <= 0
@@ -642,10 +698,19 @@ class GrnService
         $conversionFactor = max(0.000001, (float) ($item->conversion_factor ?? 1));
         $convertedQuantity = $acceptedPurchaseQty * $conversionFactor;
 
-        $qtyOrdered = max(0.000001, (float) $poItem->quantity_ordered);
-        $exclusiveUnitInPurchaseUom = (float) ($poItem->subtotal ?? 0) / $qtyOrdered;
-        $lineExclusiveTotal = round($exclusiveUnitInPurchaseUom * $acceptedPurchaseQty, 2);
-        $unitCostPerIssue = $exclusiveUnitInPurchaseUom / $conversionFactor;
+        $grnLine->loadMissing('grn');
+        $snapshot = GrnItemCostSnapshot::fromGrnItem($grnLine, $grnLine->grn?->inventory_costing_mode);
+        $postedUnitInPurchaseUom = (float) $snapshot['posted_unit_cost'];
+        if ($postedUnitInPurchaseUom <= 0) {
+            $postedUnitInPurchaseUom = (float) $snapshot['merchandise_unit_cost'];
+        }
+        if ($postedUnitInPurchaseUom <= 0) {
+            throw new RuntimeException(
+                'GRN line is missing frozen cost fields (landed_unit_cost / merchandise_unit_cost).'
+            );
+        }
+        $linePostedTotal = round($postedUnitInPurchaseUom * $acceptedPurchaseQty, 2);
+        $unitCostPerIssue = $postedUnitInPurchaseUom / $conversionFactor;
 
         $stockBeforeIssue = InventoryItem::sumQuantityAcrossLocations($item->id);
         $onHandForWacIssue = max(0, $stockBeforeIssue);
@@ -654,8 +719,8 @@ class GrnService
 
         $denominatorPurchase = $onHandForWacPurchase + $acceptedPurchaseQty;
         $newPurchaseCost = $denominatorPurchase > 0
-            ? (($onHandForWacPurchase * $currentPurchasePrice) + ($acceptedPurchaseQty * $exclusiveUnitInPurchaseUom)) / $denominatorPurchase
-            : $exclusiveUnitInPurchaseUom;
+            ? (($onHandForWacPurchase * $currentPurchasePrice) + ($acceptedPurchaseQty * $postedUnitInPurchaseUom)) / $denominatorPurchase
+            : $postedUnitInPurchaseUom;
 
         DB::table('inventory_item_locations')->updateOrInsert(
             ['inventory_item_id' => $item->id, 'inventory_location_id' => $locationId],
@@ -683,7 +748,7 @@ class GrnService
             'type' => 'in',
             'quantity' => $convertedQuantity,
             'unit_cost' => round($unitCostPerIssue, 4),
-            'total_cost' => $lineExclusiveTotal,
+            'total_cost' => $linePostedTotal,
             'reason' => 'GRN Receipt',
             'notes' => "{$grn->grn_number} · PO {$po->po_number} @ {$locationName} · Accepted: {$acceptedPurchaseQty} ".($item->purchaseUom?->short_name ?? '').$rejectedNote,
             'user_id' => $userId,

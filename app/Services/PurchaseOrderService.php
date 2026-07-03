@@ -27,6 +27,7 @@ class PurchaseOrderService
             $items
         ))));
         $inventoryById = InventoryItem::query()
+            ->with('tax')
             ->whereIn('id', $itemIds)
             ->get()
             ->keyBy('id');
@@ -43,12 +44,18 @@ class PurchaseOrderService
 
             /** @var InventoryItem|null $inv */
             $inv = $inventoryById->get((int) $line['inventory_item_id']);
+
+            if ($basis !== PurchaseOrderLineAmounts::BASIS_NON_TAXABLE && $rate <= 0) {
+                $rate = (float) ($inv?->tax?->rate ?? 0);
+            }
+
             $unitCess = $inv ? CessSlabResolver::resolveUnitCess($inv, $up) : 0.0;
 
             $computed = PurchaseOrderLineAmounts::compute($qty, $up, $rate, $basis, $unitCess);
 
             $line['tax_price_basis'] = $basis;
             $line['tax_rate'] = $computed['tax_rate'];
+            $line['tax_type'] = PurchaseOrderLineAmounts::resolveTaxType($inv?->tax?->type);
             $line['subtotal'] = $computed['subtotal'];
             $line['tax_amount'] = $computed['tax_amount'];
             $line['total_amount'] = $computed['total_amount'];
@@ -60,6 +67,8 @@ class PurchaseOrderService
             $cessSum += $computed['total_cess'];
         }
         unset($line);
+
+        LiquorTaxValidator::validatePoLines($items, $inventoryById);
 
         return [
             'subtotal' => $subtotalSum,
@@ -159,6 +168,7 @@ class PurchaseOrderService
                 'tax_price_basis' => $line['tax_price_basis'],
                 'subtotal' => $line['subtotal'],
                 'tax_rate' => $line['tax_rate'] ?? 0,
+                'tax_type' => $line['tax_type'] ?? PurchaseOrderLineAmounts::resolveTaxType(null),
                 'tax_amount' => $line['tax_amount'],
                 'unit_cess' => $line['unit_cess'],
                 'total_cess' => $line['total_cess'],
@@ -253,7 +263,7 @@ class PurchaseOrderService
      */
     public function receivePurchaseOrder(PurchaseOrder $purchaseOrder, int $locationId, ?int $userId = null): PurchaseOrder
     {
-        app(GrnService::class)->receivePurchaseOrderLegacy($purchaseOrder, $locationId, null, $userId);
+        app(GrnService::class)->receivePurchaseOrderForInspection($purchaseOrder, $locationId, null, $userId);
 
         return $purchaseOrder->fresh(['vendor', 'items.inventoryItem', 'location', 'creator']);
     }

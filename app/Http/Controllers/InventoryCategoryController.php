@@ -3,12 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryCategory;
+use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 
 class InventoryCategoryController extends Controller
 {
     public function index()
     {
+        InventoryAuthorization::assertViewCatalog();
+
         return response()->json(InventoryCategory::with('parent')->orderBy('name')->get());
     }
 
@@ -35,6 +38,8 @@ class InventoryCategoryController extends Controller
 
     public function show(InventoryCategory $category)
     {
+        InventoryAuthorization::assertViewCatalog();
+
         return response()->json($category->load('items'));
     }
 
