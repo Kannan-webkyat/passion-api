@@ -16,54 +16,23 @@ return new class extends Migration
             return;
         }
 
+        // Normalize existing rows before tightening to ENUM (no DB triggers — those require
+        // SUPER / log_bin_trust_function_creators on replicated production MySQL).
+        // Runtime enforcement: App\Services\LiquorTaxValidator via PurchaseOrderService.
+        if (Schema::hasTable('inventory_items')) {
+            DB::statement("
+                UPDATE purchase_order_items poi
+                INNER JOIN inventory_items ii ON ii.id = poi.inventory_item_id
+                SET poi.tax_type = CASE
+                    WHEN COALESCE(ii.is_alcohol, 0) = 1 THEN 'vat'
+                    ELSE 'gst'
+                END
+            ");
+        }
+
         DB::statement("
             ALTER TABLE purchase_order_items
             MODIFY tax_type ENUM('gst', 'vat') NOT NULL DEFAULT 'gst'
-        ");
-
-        DB::unprepared('DROP TRIGGER IF EXISTS purchase_order_items_liquor_tax_insert');
-        DB::unprepared('DROP TRIGGER IF EXISTS purchase_order_items_liquor_tax_update');
-
-        DB::unprepared("
-            CREATE TRIGGER purchase_order_items_liquor_tax_insert
-            BEFORE INSERT ON purchase_order_items
-            FOR EACH ROW
-            BEGIN
-                DECLARE item_is_alcohol TINYINT(1) DEFAULT 0;
-                SELECT COALESCE(is_alcohol, 0) INTO item_is_alcohol
-                FROM inventory_items
-                WHERE id = NEW.inventory_item_id
-                LIMIT 1;
-                IF item_is_alcohol = 1 AND NEW.tax_type <> 'vat' THEN
-                    SIGNAL SQLSTATE '45000'
-                    SET MESSAGE_TEXT = 'Liquor items must use VAT. Please select a VAT tax rate.';
-                END IF;
-                IF item_is_alcohol = 0 AND NEW.tax_type = 'vat' THEN
-                    SIGNAL SQLSTATE '45000'
-                    SET MESSAGE_TEXT = 'Non-liquor items cannot use VAT. Please select a GST tax rate.';
-                END IF;
-            END
-        ");
-
-        DB::unprepared("
-            CREATE TRIGGER purchase_order_items_liquor_tax_update
-            BEFORE UPDATE ON purchase_order_items
-            FOR EACH ROW
-            BEGIN
-                DECLARE item_is_alcohol TINYINT(1) DEFAULT 0;
-                SELECT COALESCE(is_alcohol, 0) INTO item_is_alcohol
-                FROM inventory_items
-                WHERE id = NEW.inventory_item_id
-                LIMIT 1;
-                IF item_is_alcohol = 1 AND NEW.tax_type <> 'vat' THEN
-                    SIGNAL SQLSTATE '45000'
-                    SET MESSAGE_TEXT = 'Liquor items must use VAT. Please select a VAT tax rate.';
-                END IF;
-                IF item_is_alcohol = 0 AND NEW.tax_type = 'vat' THEN
-                    SIGNAL SQLSTATE '45000'
-                    SET MESSAGE_TEXT = 'Non-liquor items cannot use VAT. Please select a GST tax rate.';
-                END IF;
-            END
         ");
     }
 
@@ -72,9 +41,6 @@ return new class extends Migration
         if (Schema::getConnection()->getDriverName() !== 'mysql') {
             return;
         }
-
-        DB::unprepared('DROP TRIGGER IF EXISTS purchase_order_items_liquor_tax_insert');
-        DB::unprepared('DROP TRIGGER IF EXISTS purchase_order_items_liquor_tax_update');
 
         if (Schema::hasColumn('purchase_order_items', 'tax_type')) {
             DB::statement("
