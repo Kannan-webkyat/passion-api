@@ -13,25 +13,25 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $this->call([
-            // InventoryTaxSeeder::class,
-            // InventoryUomSeeder::class,
+            InventoryTaxSeeder::class,
+            InventoryUomSeeder::class,
             // ---
-            // CessSlabSeeder::class,
-            // RolePermissionSeeder::class,
-            // DefaultHotelRolesSeeder::class,
-            // DepartmentSeeder::class,
-            // LocationSeeder::class,
+            CessSlabSeeder::class,
+            RolePermissionSeeder::class,
+            DefaultHotelRolesSeeder::class,
+            DepartmentSeeder::class,
+            LocationSeeder::class,
             // --
-            // PaymentMethodSeeder::class,
-            // RestaurantTableSeeder::class,
+            PaymentMethodSeeder::class,
+            RestaurantTableSeeder::class,
             // FreshBiryaniTeaCoffeeSeeder::class,
             // BarSeeder::class,
             // --
-            // BarInventoryOrganizedSeeder::class,
+            BarInventoryOrganizedSeeder::class,
             // RestaurantInventoryCatalogSeeder::class,
-            // ChickenBiryaniSeeder::class,
-            // BarOutletSeeder::class,
-            // SampleBarCocktailSeeder::class,
+            ChickenBiryaniSeeder::class,
+            BarOutletSeeder::class,
+            SampleBarCocktailSeeder::class,
             // BarMenuConfigurationSeeder::class,
             // BarOrganizedItemPricingSeeder::class,
             // RestaurantMenuCatalogSeeder::class,
