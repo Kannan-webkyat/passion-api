@@ -85,6 +85,7 @@ class RolePermissionSeeder extends Seeder
             'pos-day-closing-override',
             'accounting-view-trial-balance',
             'accounting-vendor-pay',
+            'view-dashboard',
         ];
     }
 

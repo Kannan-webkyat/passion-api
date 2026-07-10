@@ -34,6 +34,7 @@ class DefaultHotelRolesSeeder extends Seeder
             'Kitchen Staff' => [
                 'kitchen-production',
                 'create-requisition',
+                'view-dashboard',
             ],
             'Store Keeper' => [
                 'inventory-view',
@@ -45,6 +46,7 @@ class DefaultHotelRolesSeeder extends Seeder
                 'manage-inventory',
                 'manage-grn',
                 'create-requisition',
+                'view-dashboard',
             ], $inventoryReports),
             'Outlet Manager' => [
                 'pos-order',
@@ -60,12 +62,14 @@ class DefaultHotelRolesSeeder extends Seeder
                 'report-order-type-mix',
                 'report-menu-performance',
                 'report-tax-gst-summary',
+                'view-dashboard',
             ],
             'Accounts' => [
                 'inventory-view',
                 'accounting-vendor-pay',
                 'accounting-view-trial-balance',
                 'inventory-report-purchase-history',
+                'view-dashboard',
             ],
         ];
     }
