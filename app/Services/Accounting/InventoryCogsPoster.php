@@ -4,13 +4,57 @@ namespace App\Services\Accounting;
 
 use App\Models\InventoryTransaction;
 use App\Models\JournalEntry;
+use App\Services\InventoryCostLayerService;
 
 final class InventoryCogsPoster
 {
     public function __construct(
         private readonly JournalPostingService $journal,
         private readonly PosCogsBusinessDateResolver $businessDateResolver,
+        private readonly InventoryCostLayerService $costLayers,
     ) {}
+
+    public function isJournalRequired(InventoryTransaction $transaction): bool
+    {
+        $isCogsOut = $transaction->type === 'out' && $transaction->reason === 'POS Order';
+        $isCogsReversal = $transaction->type === 'in' && $transaction->reason === 'Inventory Reversal';
+
+        if (! $isCogsOut && ! $isCogsReversal) {
+            return false;
+        }
+
+        return round((float) $transaction->total_cost, 2) > 0;
+    }
+
+    public function postStrict(InventoryTransaction $transaction, ?int $postedBy = null, ?string $businessDate = null): ?JournalEntry
+    {
+        if ($this->isJournalRequired($transaction)) {
+            LedgerPostingGuard::assertInfrastructure();
+        }
+
+        $entry = $this->post($transaction, $postedBy, $businessDate);
+
+        if ($this->isJournalRequired($transaction)) {
+            LedgerPostingGuard::requireEntry($entry, "inventory_cogs:{$transaction->id}");
+        }
+
+        return $entry;
+    }
+
+    public function postReversalStrict(InventoryTransaction $transaction, ?int $postedBy = null, ?string $businessDate = null): ?JournalEntry
+    {
+        if ($this->isJournalRequired($transaction)) {
+            LedgerPostingGuard::assertInfrastructure();
+        }
+
+        $entry = $this->postReversal($transaction, $postedBy, $businessDate);
+
+        if ($this->isJournalRequired($transaction)) {
+            LedgerPostingGuard::requireEntry($entry, "inventory_cogs_reversal:{$transaction->id}");
+        }
+
+        return $entry;
+    }
 
     public function post(InventoryTransaction $transaction, ?int $postedBy = null, ?string $businessDate = null): ?JournalEntry
     {
@@ -24,6 +68,9 @@ final class InventoryCogsPoster
         }
 
         $transaction->loadMissing('item');
+
+        $this->costLayers->consumeForPosCogs($transaction, $postedBy);
+
         $isAlcohol = (bool) $transaction->item?->is_alcohol;
 
         $cogsCode = $isAlcohol ? AccountCodes::COGS_BAR : AccountCodes::COGS_RESTAURANT;

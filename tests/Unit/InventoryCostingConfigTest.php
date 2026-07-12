@@ -25,6 +25,21 @@ class InventoryCostingConfigTest extends TestCase
         $this->assertSame(500.0, $posted);
     }
 
+    public function test_tax_aware_mode_posts_full_tax_aware_landed_unit(): void
+    {
+        $allocation = [
+            'merchandise_unit' => 500.0,
+            'landed_unit_purchase' => 650.0,
+        ];
+
+        $posted = InventoryCostingConfig::postedUnitCostForMode(
+            InventoryCostingConfig::MODE_TAX_AWARE,
+            $allocation,
+        );
+
+        $this->assertSame(650.0, $posted);
+    }
+
     public function test_landed_cost_mode_posts_full_landed_unit(): void
     {
         $allocation = [
@@ -57,7 +72,7 @@ class InventoryCostingConfigTest extends TestCase
 
         $grnLines = [(object) ['quantity_accepted' => 10, 'purchase_order_item_id' => 1]];
         $grnMerch = LandedCostAllocator::grnMerchandiseSubtotalSum($grnLines, $po);
-        $allocation = LandedCostAllocator::forGrnLine($po, $poItem, 10, $grnMerch);
+        $allocation = LandedCostAllocator::forGrnLine($po, $poItem, 10, $grnMerch, true);
 
         $postedExclusive = InventoryCostingConfig::postedUnitCostForMode(
             InventoryCostingConfig::MODE_EXCLUSIVE_ONLY,

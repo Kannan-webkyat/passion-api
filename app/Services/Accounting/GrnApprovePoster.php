@@ -6,11 +6,41 @@ use App\Models\GRN;
 use App\Models\JournalEntry;
 use App\Services\InventoryCostingConfig;
 
+/**
+ * GRN approve journal: tax-aware routing.
+ * - Non-recoverable tax (liquor VAT) → capitalized in inventory (1311/1310).
+ * - Recoverable tax (food GST) → Input GST asset (1420).
+ * - Account 1360 (Deferred Procurement) is not used.
+ */
 final class GrnApprovePoster
 {
     public function __construct(
         private readonly JournalPostingService $journal,
     ) {}
+
+    public function isJournalRequired(GRN $grn): bool
+    {
+        $grn->loadMissing('items');
+
+        foreach ($grn->items as $line) {
+            if ((float) $line->quantity_accepted > 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function postStrict(GRN $grn, ?int $postedBy = null): ?JournalEntry
+    {
+        if (! $this->isJournalRequired($grn)) {
+            return null;
+        }
+
+        LedgerPostingGuard::assertInfrastructure();
+
+        return $this->post($grn, $postedBy);
+    }
 
     public function post(GRN $grn, ?int $postedBy = null): JournalEntry
     {
@@ -24,10 +54,9 @@ final class GrnApprovePoster
         $inventoryLiquor = 0.0;
         $inputGst = 0.0;
         $inputVat = 0.0;
-        $deferredCharges = 0.0;
         $grniTotal = 0.0;
 
-        $exclusiveOnly = ($grn->inventory_costing_mode ?? InventoryCostingConfig::MODE_EXCLUSIVE_ONLY)
+        $legacyExclusive = ($grn->inventory_costing_mode ?? InventoryCostingConfig::MODE_TAX_AWARE)
             === InventoryCostingConfig::MODE_EXCLUSIVE_ONLY;
 
         foreach ($grn->items as $line) {
@@ -45,21 +74,31 @@ final class GrnApprovePoster
                 $inventoryFood += $inventoryAmount;
             }
 
-            $lineTax = (float) $line->line_tax_accepted;
-            $taxType = strtolower((string) ($line->purchaseOrderItem?->tax_type ?? 'gst'));
-            if ($taxType === 'vat') {
-                $inputVat += $lineTax;
-            } else {
-                $inputGst += $lineTax;
+            $recoverableTax = (float) ($line->line_recoverable_tax_accepted ?? 0);
+            if ($recoverableTax <= 0 && $legacyExclusive) {
+                $taxType = strtolower((string) ($line->purchaseOrderItem?->tax_type ?? 'gst'));
+                $lineTax = (float) $line->line_tax_accepted;
+                if ($taxType !== 'vat') {
+                    $recoverableTax = $lineTax;
+                }
+            } elseif ($recoverableTax <= 0 && ! $legacyExclusive) {
+                $eligible = $line->tax_input_credit_eligible;
+                $lineTax = (float) $line->line_tax_accepted;
+                if ($eligible === true || ($eligible === null && strtolower((string) ($line->purchaseOrderItem?->tax_type ?? 'gst')) !== 'vat')) {
+                    $recoverableTax = $lineTax;
+                }
             }
 
-            if ($exclusiveOnly) {
-                $deferredCharges += (float) $line->line_cess_accepted + (float) $line->line_freight_allocated;
-            }
+            $inputGst += $recoverableTax > 0 && ! $this->isRecoverableVatLine($line, $legacyExclusive)
+                ? $recoverableTax
+                : 0.0;
+            $inputVat += $recoverableTax > 0 && $this->isRecoverableVatLine($line, $legacyExclusive)
+                ? $recoverableTax
+                : 0.0;
 
             $grniTotal += round(
                 (float) $line->line_subtotal_accepted
-                + $lineTax
+                + (float) $line->line_tax_accepted
                 + (float) $line->line_cess_accepted
                 + (float) $line->line_freight_allocated,
                 2
@@ -98,13 +137,6 @@ final class GrnApprovePoster
                 'meta' => ['grn_id' => $grn->id],
             ];
         }
-        if ($deferredCharges > 0) {
-            $lines[] = [
-                'account_code' => AccountCodes::DEFERRED_PROCUREMENT,
-                'debit' => round($deferredCharges, 2),
-                'meta' => ['grn_id' => $grn->id],
-            ];
-        }
         if ($grniTotal > 0) {
             $lines[] = [
                 'account_code' => AccountCodes::GRNI,
@@ -124,9 +156,18 @@ final class GrnApprovePoster
             entryDate: $entryDate,
             businessDate: $grn->received_date?->toDateString(),
             sourceRef: $grn->grn_number,
-            memo: 'GRN approved — inventory + GRNI',
+            memo: 'GRN approved — tax-aware inventory + GRNI',
             lines: $lines,
             postedBy: $postedBy,
         );
+    }
+
+    private function isRecoverableVatLine(mixed $line, bool $legacyExclusive): bool
+    {
+        if ($legacyExclusive) {
+            return false;
+        }
+
+        return strtolower((string) ($line->purchaseOrderItem?->tax_type ?? 'gst')) === 'vat';
     }
 }

@@ -10,6 +10,7 @@ use App\Exceptions\LiquorTaxValidationException;
 use App\Services\LiquorTaxValidator;
 use App\Services\Accounting\InventoryAdjustmentPoster;
 use App\Services\Accounting\InventoryConsumptionPoster;
+use App\Services\Accounting\LedgerBackedTransaction;
 use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -253,7 +254,7 @@ class InventoryController extends Controller
                     'notes' => 'Stock edited via Item Master',
                     'user_id' => auth()->id(),
                 ]);
-                app(InventoryAdjustmentPoster::class)->post($tx, auth()->id());
+                app(InventoryAdjustmentPoster::class)->postStrict($tx, auth()->id());
             }
         }
 
@@ -418,7 +419,7 @@ class InventoryController extends Controller
             'inventory_item_id' => 'required|exists:inventory_items,id',
             'inventory_location_id' => 'required|exists:inventory_locations,id',
             'quantity' => 'required|numeric',
-            'reason' => 'required|string|in:Wastage,Expired,Breakage,Theft,Staff meal,Manual Adjustment,Correction,Components Stored,Assembled from Storage',
+            'reason' => 'required|string|in:Opening Stock,Wastage,Expired,Breakage,Theft,Staff meal,Manual Adjustment,Correction,Components Stored,Assembled from Storage',
             'notes' => 'nullable|string|max:500',
         ]);
 
@@ -430,69 +431,76 @@ class InventoryController extends Controller
             return response()->json(['message' => 'Quantity cannot be zero.'], 422);
         }
 
+        if ($validated['reason'] === 'Opening Stock' && $qty < 0) {
+            return response()->json(['message' => 'Opening Stock must use a positive quantity (stock in).'], 422);
+        }
+
         $isReduce = $qty < 0;
         $qtyAbs = abs($qty);
 
         $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
         $lineCost = round($qtyAbs * $unitCost, 2);
 
-        DB::beginTransaction();
         try {
-            DB::table('inventory_item_locations')->updateOrInsert(
-                ['inventory_item_id' => $item->id, 'inventory_location_id' => $location->id],
-                ['updated_at' => now(), 'created_at' => now()]
+            app(LedgerBackedTransaction::class)->run(
+                mutate: function () use ($item, $location, $isReduce, $qtyAbs, $unitCost, $lineCost, $validated) {
+                    DB::table('inventory_item_locations')->updateOrInsert(
+                        ['inventory_item_id' => $item->id, 'inventory_location_id' => $location->id],
+                        ['updated_at' => now(), 'created_at' => now()]
+                    );
+
+                    if ($isReduce) {
+                        $available = (float) (DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $location->id)
+                            ->lockForUpdate()
+                            ->value('quantity') ?? 0);
+
+                        if ($available + 1e-6 < $qtyAbs) {
+                            throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                                response()->json([
+                                    'message' => "Insufficient stock at {$location->name}. Available: {$available}, requested: {$qtyAbs}.",
+                                ], 422)
+                            );
+                        }
+
+                        DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $location->id)
+                            ->decrement('quantity', $qtyAbs);
+                    } else {
+                        DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $location->id)
+                            ->increment('quantity', $qtyAbs);
+                    }
+
+                    $transaction = InventoryTransaction::create([
+                        'inventory_item_id' => $item->id,
+                        'inventory_location_id' => $location->id,
+                        'type' => $isReduce ? 'out' : 'in',
+                        'quantity' => $qtyAbs,
+                        'unit_cost' => round($unitCost, 4),
+                        'total_cost' => $lineCost,
+                        'reason' => $validated['reason'],
+                        'notes' => $validated['notes'] ?? ($isReduce ? 'Stock reduced' : 'Stock added'),
+                        'user_id' => auth()->id(),
+                    ]);
+
+                    InventoryItem::syncStoredCurrentStockFromLocations($item->id);
+
+                    return $transaction;
+                },
+                postJournal: fn (InventoryTransaction $transaction) => app(InventoryAdjustmentPoster::class)->postStrict($transaction, auth()->id()),
+                journalRequired: fn (InventoryTransaction $transaction) => app(InventoryAdjustmentPoster::class)->isJournalRequired($transaction),
             );
-
-            if ($isReduce) {
-                $available = (float) (DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $item->id)
-                    ->where('inventory_location_id', $location->id)
-                    ->lockForUpdate()
-                    ->value('quantity') ?? 0);
-
-                if ($available + 1e-6 < $qtyAbs) {
-                    DB::rollBack();
-
-                    return response()->json([
-                        'message' => "Insufficient stock at {$location->name}. Available: {$available}, requested: {$qtyAbs}.",
-                    ], 422);
-                }
-
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $item->id)
-                    ->where('inventory_location_id', $location->id)
-                    ->decrement('quantity', $qtyAbs);
-            } else {
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $item->id)
-                    ->where('inventory_location_id', $location->id)
-                    ->increment('quantity', $qtyAbs);
-            }
-
-            $transaction = InventoryTransaction::create([
-                'inventory_item_id' => $item->id,
-                'inventory_location_id' => $location->id,
-                'type' => $isReduce ? 'out' : 'in',
-                'quantity' => $qtyAbs,
-                'unit_cost' => round($unitCost, 4),
-                'total_cost' => $lineCost,
-                'reason' => $validated['reason'],
-                'notes' => $validated['notes'] ?? ($isReduce ? 'Stock reduced' : 'Stock added'),
-                'user_id' => auth()->id(),
-            ]);
-
-            app(InventoryAdjustmentPoster::class)->post($transaction, auth()->id());
-
-            InventoryItem::syncStoredCurrentStockFromLocations($item->id);
-
-            DB::commit();
 
             return response()->json([
                 'message' => $isReduce ? 'Stock reduced successfully.' : 'Stock added successfully.',
             ]);
+        } catch (\Illuminate\Http\Exceptions\HttpResponseException $e) {
+            throw $e;
         } catch (\Exception $e) {
-            DB::rollBack();
-
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }

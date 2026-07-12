@@ -17,7 +17,11 @@ class InventoryTax extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['name', 'rate', 'type'];
+    protected $fillable = ['name', 'rate', 'type', 'is_input_credit_eligible'];
+
+    protected $casts = [
+        'is_input_credit_eligible' => 'boolean',
+    ];
 
     public function items()
     {

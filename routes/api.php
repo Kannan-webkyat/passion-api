@@ -80,6 +80,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('dashboard/financial-summary', [AdminDashboardController::class, 'financialSummary']);
     Route::get('dashboard/admin-summary', [AdminDashboardController::class, 'adminSummary']);
     Route::get('accounting/trial-balance', [AccountingController::class, 'trialBalance']);
+    Route::get('accounting/compliance/gstr1', [AccountingController::class, 'gstr1Summary']);
+    Route::get('accounting/compliance/gstr1/export', [AccountingController::class, 'gstr1Export']);
+    Route::get('accounting/compliance/kvat', [AccountingController::class, 'kvatSummary']);
+    Route::get('accounting/compliance/kvat/export', [AccountingController::class, 'kvatExport']);
     Route::apiResource('roles', RoleController::class);
     Route::apiResource('departments', DepartmentController::class);
     Route::get('permissions', [RoleController::class, 'permissions']);
@@ -297,6 +301,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('reports/recovery', [InventoryReportController::class, 'recovery']);
         Route::get('reports/purchase-history', [InventoryReportController::class, 'purchaseHistory']);
         Route::get('reports/excise-bar', [InventoryReportController::class, 'exciseBar']);
+        Route::get('reports/excise-bar/export', [InventoryReportController::class, 'exciseBarExport']);
         Route::apiResource('items', InventoryController::class);
         Route::apiResource('categories', InventoryCategoryController::class);
         Route::apiResource('uoms', InventoryUomController::class);

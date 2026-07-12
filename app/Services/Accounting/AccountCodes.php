@@ -62,6 +62,8 @@ final class AccountCodes
 
     public const GENERAL_EXPENSE = '6100';
 
+    public const OPENING_BALANCE_EQUITY = '3900';
+
     public static function tenderAccount(string $method): string
     {
         $m = strtolower(trim($method));

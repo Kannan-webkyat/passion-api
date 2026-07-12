@@ -4,7 +4,6 @@ namespace App\Services\Accounting;
 
 use App\Models\InventoryTransaction;
 use App\Models\JournalEntry;
-use Illuminate\Support\Facades\Schema;
 
 /**
  * Posts inventory shrinkage to expense when stock is reduced for loss reasons.
@@ -22,6 +21,7 @@ final class InventoryAdjustmentPoster
     ];
 
     private const GAIN_REASONS = [
+        'Opening Stock',
         'Manual Adjustment',
         'Correction',
     ];
@@ -30,12 +30,52 @@ final class InventoryAdjustmentPoster
         private readonly JournalPostingService $journal,
     ) {}
 
-    public function post(InventoryTransaction $transaction, ?int $postedBy = null): ?JournalEntry
+    public function isJournalRequired(InventoryTransaction $transaction): bool
     {
-        if (! Schema::hasTable('journal_entries')) {
-            return null;
+        if ($transaction->type === 'out') {
+            if (! in_array($transaction->reason, self::LOSS_REASONS, true)) {
+                return false;
+            }
+
+            if ($transaction->reason === 'Wastage' && $transaction->reference_type === 'recovery_breakdown') {
+                return false;
+            }
+
+            return round((float) $transaction->total_cost, 2) > 0;
         }
 
+        if ($transaction->type === 'in') {
+            if ($transaction->reason === 'Opening Stock') {
+                return round((float) $transaction->total_cost, 2) > 0;
+            }
+
+            if (! in_array($transaction->reason, self::GAIN_REASONS, true)) {
+                return false;
+            }
+
+            return round((float) $transaction->total_cost, 2) > 0;
+        }
+
+        return false;
+    }
+
+    public function postStrict(InventoryTransaction $transaction, ?int $postedBy = null): ?JournalEntry
+    {
+        if ($this->isJournalRequired($transaction)) {
+            LedgerPostingGuard::assertInfrastructure();
+        }
+
+        $entry = $this->post($transaction, $postedBy);
+
+        if ($this->isJournalRequired($transaction)) {
+            LedgerPostingGuard::requireEntry($entry, "inventory_adjustment:{$transaction->id}");
+        }
+
+        return $entry;
+    }
+
+    public function post(InventoryTransaction $transaction, ?int $postedBy = null): ?JournalEntry
+    {
         if ($transaction->type === 'out') {
             return $this->postDecrease($transaction, $postedBy);
         }
@@ -103,6 +143,10 @@ final class InventoryAdjustmentPoster
 
     private function postIncrease(InventoryTransaction $transaction, ?int $postedBy): ?JournalEntry
     {
+        if ($transaction->reason === 'Opening Stock') {
+            return $this->postOpeningStock($transaction, $postedBy);
+        }
+
         if (! in_array($transaction->reason, self::GAIN_REASONS, true)) {
             return null;
         }
@@ -138,6 +182,46 @@ final class InventoryAdjustmentPoster
                     'meta' => [
                         'inventory_transaction_id' => $transaction->id,
                         'reason' => $transaction->reason,
+                    ],
+                ],
+            ],
+            postedBy: $postedBy,
+        );
+    }
+
+    private function postOpeningStock(InventoryTransaction $transaction, ?int $postedBy): ?JournalEntry
+    {
+        $amount = round((float) $transaction->total_cost, 2);
+        if ($amount <= 0) {
+            return null;
+        }
+
+        $transaction->loadMissing('item');
+        $isAlcohol = (bool) $transaction->item?->is_alcohol;
+        $inventoryCode = $isAlcohol ? AccountCodes::INVENTORY_LIQUOR : AccountCodes::INVENTORY_FOOD;
+
+        return $this->journal->post(
+            sourceType: 'inventory_opening_stock',
+            sourceId: (int) $transaction->id,
+            entryDate: $transaction->created_at->toDateString(),
+            businessDate: null,
+            sourceRef: 'OPEN-STK #'.$transaction->id,
+            memo: 'Opening stock — '.$transaction->notes,
+            lines: [
+                [
+                    'account_code' => $inventoryCode,
+                    'debit' => $amount,
+                    'meta' => [
+                        'inventory_transaction_id' => $transaction->id,
+                        'inventory_item_id' => $transaction->inventory_item_id,
+                    ],
+                ],
+                [
+                    'account_code' => AccountCodes::OPENING_BALANCE_EQUITY,
+                    'credit' => $amount,
+                    'meta' => [
+                        'inventory_transaction_id' => $transaction->id,
+                        'reason' => 'Opening Stock',
                     ],
                 ],
             ],

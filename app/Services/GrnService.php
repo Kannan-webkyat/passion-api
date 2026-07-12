@@ -12,7 +12,11 @@ use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
 use App\Services\Accounting\GrnApprovePoster;
+use App\Services\Accounting\LedgerBackedTransaction;
+use App\Services\InventoryCostLayerService;
 use App\Services\InventoryCostingConfig;
+use App\Services\LandedCostAllocator;
+use App\Services\TaxCreditPolicy;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -202,82 +206,111 @@ class GrnService
 
     public function approve(GRN $grn, ?int $userId = null): GRN
     {
-        return DB::transaction(function () use ($grn, $userId) {
-            $locked = GRN::lockForUpdate()->with(['items.inventoryItem', 'purchaseOrder.items'])->findOrFail($grn->id);
-            if ($locked->status !== GRN::STATUS_PENDING) {
-                throw new RuntimeException('Only pending GRNs can be approved.');
-            }
-            if ($locked->inspected_at === null) {
-                throw new RuntimeException('GRN must be inspected before approval.');
-            }
+        /** @var list<array{grn_item: GrnItem, inventory_transaction: InventoryTransaction}> $lineReceipts */
+        $lineReceipts = [];
 
-            $po = PurchaseOrder::lockForUpdate()->with('items')->findOrFail($locked->purchase_order_id);
-            $this->validateGrnLines($locked);
-
-            $locationId = $this->assertGrnMainStoreLocation($locked);
-            $refId = (string) $locked->id;
-            $costingMode = InventoryCostingConfig::mode();
-            $grnMerchandiseSubtotalSum = LandedCostAllocator::grnMerchandiseSubtotalSum($locked->items, $po);
-
-            foreach ($locked->items as $grnLine) {
-                $accepted = (float) $grnLine->quantity_accepted;
-                if ($accepted <= 0) {
-                    continue;
+        return app(LedgerBackedTransaction::class)->run(
+            mutate: function () use ($grn, $userId, &$lineReceipts) {
+                $locked = GRN::lockForUpdate()->with(['items.inventoryItem', 'purchaseOrder.items'])->findOrFail($grn->id);
+                if ($locked->status !== GRN::STATUS_PENDING) {
+                    throw new RuntimeException('Only pending GRNs can be approved.');
+                }
+                if ($locked->inspected_at === null) {
+                    throw new RuntimeException('GRN must be inspected before approval.');
                 }
 
-                $poItem = $po->items->firstWhere('id', $grnLine->purchase_order_item_id);
-                if (! $poItem) {
-                    throw new RuntimeException('PO line not found for GRN item.');
+                $po = PurchaseOrder::lockForUpdate()->with('items')->findOrFail($locked->purchase_order_id);
+                $this->validateGrnLines($locked);
+
+                $locationId = $this->assertGrnMainStoreLocation($locked);
+                $refId = (string) $locked->id;
+                $costingMode = InventoryCostingConfig::mode();
+                $grnMerchandiseSubtotalSum = LandedCostAllocator::grnMerchandiseSubtotalSum($locked->items, $po);
+
+                foreach ($locked->items as $grnLine) {
+                    $accepted = (float) $grnLine->quantity_accepted;
+                    if ($accepted <= 0) {
+                        continue;
+                    }
+
+                    $poItem = $po->items->firstWhere('id', $grnLine->purchase_order_item_id);
+                    if (! $poItem) {
+                        throw new RuntimeException('PO line not found for GRN item.');
+                    }
+
+                    $poItem->loadMissing('inventoryItem.tax');
+                    $isInputCreditEligible = TaxCreditPolicy::forInventoryItem($poItem->inventoryItem);
+                    $landed = LandedCostAllocator::forGrnLine(
+                        $po,
+                        $poItem,
+                        $accepted,
+                        $grnMerchandiseSubtotalSum,
+                        $isInputCreditEligible
+                    );
+                    $postedUnit = InventoryCostingConfig::postedUnitCostFromAllocation($landed);
+                    $ordered = max(0.000001, (float) $poItem->quantity_ordered);
+                    $lineTaxAccepted = round((float) ($poItem->tax_amount ?? 0) * ($accepted / $ordered), 2);
+                    $grnLine->update([
+                        'line_subtotal_accepted' => $landed['line_subtotal_accepted'],
+                        'line_tax_accepted' => $lineTaxAccepted,
+                        'line_recoverable_tax_accepted' => $landed['line_recoverable_tax_accepted'],
+                        'line_non_recoverable_tax_accepted' => $landed['line_non_recoverable_tax_accepted'],
+                        'tax_input_credit_eligible' => $landed['tax_input_credit_eligible'],
+                        'line_cess_accepted' => $landed['line_cess_accepted'],
+                        'line_freight_allocated' => $landed['line_freight_allocated'],
+                        'merchandise_unit_cost' => $landed['merchandise_unit'],
+                        'cess_unit_cost' => $landed['cess_unit'],
+                        'freight_unit_cost' => $landed['freight_unit'],
+                        'non_recoverable_tax_unit_cost' => $landed['non_recoverable_tax_unit'],
+                        'landed_unit_cost' => $postedUnit,
+                    ]);
+
+                    $inventoryTransaction = $this->postAcceptedLineStock(
+                        $grnLine,
+                        $poItem,
+                        $po,
+                        $locked,
+                        $locationId,
+                        $refId,
+                        $userId
+                    );
+
+                    if ($inventoryTransaction !== null) {
+                        $lineReceipts[] = [
+                            'grn_item' => $grnLine->fresh(['inventoryItem']),
+                            'inventory_transaction' => $inventoryTransaction,
+                        ];
+                    }
+
+                    $poItem->increment('quantity_received', $accepted);
+                    PurchaseOrderService::subtractStockExpectedForQuantity(
+                        (int) $poItem->inventory_item_id,
+                        $accepted
+                    );
                 }
 
-                $landed = LandedCostAllocator::forGrnLine($po, $poItem, $accepted, $grnMerchandiseSubtotalSum);
-                $postedUnit = InventoryCostingConfig::postedUnitCostFromAllocation($landed);
-                $ordered = max(0.000001, (float) $poItem->quantity_ordered);
-                $lineTaxAccepted = round((float) ($poItem->tax_amount ?? 0) * ($accepted / $ordered), 2);
-                $grnLine->update([
-                    'line_subtotal_accepted' => $landed['line_subtotal_accepted'],
-                    'line_tax_accepted' => $lineTaxAccepted,
-                    'line_cess_accepted' => $landed['line_cess_accepted'],
-                    'line_freight_allocated' => $landed['line_freight_allocated'],
-                    'merchandise_unit_cost' => $landed['merchandise_unit'],
-                    'cess_unit_cost' => $landed['cess_unit'],
-                    'freight_unit_cost' => $landed['freight_unit'],
-                    'landed_unit_cost' => $postedUnit,
+                $old = $locked->status;
+                $locked->update([
+                    'status' => GRN::STATUS_APPROVED,
+                    'approved_by' => $userId,
+                    'approved_at' => now(),
+                    'inventory_costing_mode' => $costingMode,
                 ]);
 
-                $this->postAcceptedLineStock(
-                    $grnLine,
-                    $poItem,
-                    $po,
-                    $locked,
-                    $locationId,
-                    $refId,
-                    $userId
-                );
+                self::syncPurchaseOrderStatus($po->fresh(['items']));
 
-                $poItem->increment('quantity_received', $accepted);
-                PurchaseOrderService::subtractStockExpectedForQuantity(
-                    (int) $poItem->inventory_item_id,
-                    $accepted
-                );
-            }
+                $this->audit($locked, 'approved', $old, GRN::STATUS_APPROVED, $userId, null, 'GRN approved — stock posted ('.InventoryCostingConfig::publicMeta()['label'].' costing)');
 
-            $old = $locked->status;
-            $locked->update([
-                'status' => GRN::STATUS_APPROVED,
-                'approved_by' => $userId,
-                'approved_at' => now(),
-                'inventory_costing_mode' => $costingMode,
-            ]);
-
-            self::syncPurchaseOrderStatus($po->fresh(['items']));
-
-            $this->audit($locked, 'approved', $old, GRN::STATUS_APPROVED, $userId, null, 'GRN approved — stock posted ('.InventoryCostingConfig::publicMeta()['label'].' costing)');
-
-            app(GrnApprovePoster::class)->post($locked->fresh(['items.inventoryItem', 'items.purchaseOrderItem']), $userId);
-
-            return $locked->fresh(['items.inventoryItem', 'purchaseOrder.items', 'vendor', 'location', 'creator', 'approver', 'auditLogs.user']);
-        });
+                return $locked->fresh(['items.inventoryItem', 'items.purchaseOrderItem', 'purchaseOrder.items', 'vendor', 'location', 'creator', 'approver', 'auditLogs.user']);
+            },
+            postMutate: fn (GRN $approvedGrn) => app(InventoryCostLayerService::class)->recordGrnReceipt(
+                $approvedGrn,
+                $lineReceipts,
+                $userId
+            ),
+            postJournal: fn (GRN $approvedGrn) => app(GrnApprovePoster::class)->postStrict($approvedGrn, $userId),
+            journalRequired: fn (GRN $approvedGrn) => app(GrnApprovePoster::class)->isJournalRequired($approvedGrn),
+        );
     }
 
     public function cancel(GRN $grn, ?string $reason = null, ?int $userId = null): GRN
@@ -683,16 +716,16 @@ class GrnService
         int $locationId,
         string $refId,
         ?int $userId
-    ): void {
+    ): ?InventoryTransaction {
         $acceptedPurchaseQty = (float) $grnLine->quantity_accepted;
         if ($acceptedPurchaseQty <= 0) {
-            return;
+            return null;
         }
 
         /** @var InventoryItem|null $item */
         $item = InventoryItem::lockForUpdate()->find($poItem->inventory_item_id);
         if (! $item) {
-            return;
+            return null;
         }
 
         $conversionFactor = max(0.000001, (float) ($item->conversion_factor ?? 1));
@@ -742,7 +775,7 @@ class GrnService
             .($grnLine->rejection_notes ? " — {$grnLine->rejection_notes}" : '')
             : '';
 
-        InventoryTransaction::create([
+        return InventoryTransaction::create([
             'inventory_item_id' => $item->id,
             'inventory_location_id' => $locationId,
             'type' => 'in',

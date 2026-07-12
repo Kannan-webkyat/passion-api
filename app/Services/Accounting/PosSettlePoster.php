@@ -12,11 +12,35 @@ final class PosSettlePoster
         private readonly JournalPostingService $journal,
     ) {}
 
+    public function isJournalRequired(PosOrder $order): bool
+    {
+        if ($order->is_complimentary || (float) $order->total_amount <= 0) {
+            return false;
+        }
+
+        return round((float) $order->total_amount, 2) > 0;
+    }
+
+    public function postStrict(PosOrder $order, ?int $postedBy = null): ?JournalEntry
+    {
+        if ($this->isJournalRequired($order)) {
+            LedgerPostingGuard::assertInfrastructure();
+        }
+
+        $entry = $this->post($order, $postedBy);
+
+        if ($this->isJournalRequired($order)) {
+            LedgerPostingGuard::requireEntry($entry, "pos_settle:{$order->id}");
+        }
+
+        return $entry;
+    }
+
     public function post(PosOrder $order, ?int $postedBy = null): ?JournalEntry
     {
         $order->loadMissing('payments');
 
-        if ($order->is_complimentary || (float) $order->total_amount <= 0) {
+        if (! $this->isJournalRequired($order)) {
             return null;
         }
 

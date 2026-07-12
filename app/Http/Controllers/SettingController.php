@@ -168,7 +168,10 @@ class SettingController extends Controller
     {
         $this->checkPermission('manage-settings');
         $validated = $request->validate([
-            'inventory_costing_mode' => 'required|string|in:'.InventoryCostingConfig::MODE_EXCLUSIVE_ONLY.','.InventoryCostingConfig::MODE_LANDED_COST,
+            'inventory_costing_mode' => 'required|string|in:'
+                .InventoryCostingConfig::MODE_EXCLUSIVE_ONLY.','
+                .InventoryCostingConfig::MODE_LANDED_COST.','
+                .InventoryCostingConfig::MODE_TAX_AWARE,
         ]);
 
         InventoryCostingConfig::setMode($validated['inventory_costing_mode']);

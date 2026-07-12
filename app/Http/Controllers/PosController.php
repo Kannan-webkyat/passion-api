@@ -21,6 +21,7 @@ use App\Models\PosVoidWaste;
 use App\Services\Accounting\InventoryCogsPoster;
 use App\Services\Accounting\InventoryAdjustmentPoster;
 use App\Services\Accounting\PosRefundPoster;
+use App\Services\Accounting\LedgerBackedTransaction;
 use App\Services\Accounting\PosSettlePoster;
 use App\Models\Recipe;
 use App\Models\RestaurantCombo;
@@ -6426,109 +6427,112 @@ class PosController extends Controller
             return response()->json(['message' => 'Room charge is only available for room service orders with a linked booking.'], 422);
         }
 
-        DB::transaction(function () use ($order, $validated, $businessDate) {
-            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            if (! in_array($order->status, ['open', 'billed'])) {
-                throw new \Illuminate\Http\Exceptions\HttpResponseException(
-                    response()->json(['message' => 'Only open or billed orders can be settled.'], 422)
-                );
-            }
-
-            // If room charge is used, ensure booking is still active/checked-in
-            $hasRoomCharge = collect($validated['payments'] ?? [])->contains('method', 'room_charge');
-            if ($hasRoomCharge && $order->booking_id) {
-                $booking = Booking::lockForUpdate()->find($order->booking_id);
-                if (! $booking || $booking->status !== 'checked_in') {
+        app(LedgerBackedTransaction::class)->run(
+            mutate: function () use ($order, $validated, $businessDate) {
+                $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+                if (! in_array($order->status, ['open', 'billed'])) {
                     throw new \Illuminate\Http\Exceptions\HttpResponseException(
-                        response()->json(['message' => 'Linked booking is no longer checked-in. Cannot process room charge.'], 422)
+                        response()->json(['message' => 'Only open or billed orders can be settled.'], 422)
                     );
                 }
-            }
 
-            // Apply discount, service charge, tax exempt, delivery charge
-            $deliveryCharge = (float) ($validated['delivery_charge'] ?? 0);
-            if ($order->order_type !== 'delivery') {
-                $deliveryCharge = 0;
-            }
+                // If room charge is used, ensure booking is still active/checked-in
+                $hasRoomCharge = collect($validated['payments'] ?? [])->contains('method', 'room_charge');
+                if ($hasRoomCharge && $order->booking_id) {
+                    $booking = Booking::lockForUpdate()->find($order->booking_id);
+                    if (! $booking || $booking->status !== 'checked_in') {
+                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                            response()->json(['message' => 'Linked booking is no longer checked-in. Cannot process room charge.'], 422)
+                        );
+                    }
+                }
 
-            $isComplimentary = (bool) ($validated['is_complimentary'] ?? false);
+                // Apply discount, service charge, tax exempt, delivery charge
+                $deliveryCharge = (float) ($validated['delivery_charge'] ?? 0);
+                if ($order->order_type !== 'delivery') {
+                    $deliveryCharge = 0;
+                }
 
-            $order->update([
-                'business_date' => $businessDate,
-                'discount_type' => $isComplimentary ? 'percent' : ($validated['discount_type'] ?? null),
-                'discount_value' => $isComplimentary ? 100 : ($validated['discount_value'] ?? 0),
-                'service_charge_type' => $validated['service_charge_type'] ?? null,
-                'service_charge_value' => $validated['service_charge_value'] ?? 0,
-                'tax_exempt' => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
-                'tip_amount' => (float) ($validated['tip_amount'] ?? 0),
-                'delivery_charge' => $deliveryCharge,
-                'is_complimentary' => $isComplimentary,
-                'notes' => $isComplimentary ? ($validated['complimentary_note'] ?? $order->notes) : $order->notes,
-            ]);
-            $this->recalculate($order);
-            $order->refresh();
+                $isComplimentary = (bool) ($validated['is_complimentary'] ?? false);
 
-            if ((float) $order->discount_amount >= 0.01 || $order->is_complimentary) {
                 $order->update([
-                    'discount_approved_by' => auth()->id(),
-                    'discount_approved_at' => now(),
+                    'business_date' => $businessDate,
+                    'discount_type' => $isComplimentary ? 'percent' : ($validated['discount_type'] ?? null),
+                    'discount_value' => $isComplimentary ? 100 : ($validated['discount_value'] ?? 0),
+                    'service_charge_type' => $validated['service_charge_type'] ?? null,
+                    'service_charge_value' => $validated['service_charge_value'] ?? 0,
+                    'tax_exempt' => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
+                    'tip_amount' => (float) ($validated['tip_amount'] ?? 0),
+                    'delivery_charge' => $deliveryCharge,
+                    'is_complimentary' => $isComplimentary,
+                    'notes' => $isComplimentary ? ($validated['complimentary_note'] ?? $order->notes) : $order->notes,
                 ]);
-            } else {
-                $order->update([
-                    'discount_approved_by' => null,
-                    'discount_approved_at' => null,
-                ]);
-            }
-            $order->refresh();
+                $this->recalculate($order);
+                $order->refresh();
 
-            $paymentsTotal = collect($validated['payments'] ?? [])->sum('amount');
-            if (! $isComplimentary && $paymentsTotal < $order->total_amount - 0.01) {
-                throw new \Illuminate\Http\Exceptions\HttpResponseException(
-                    response()->json([
-                        'message' => 'Total payments (' . number_format($paymentsTotal, 2) . ') is less than order total (' . number_format($order->total_amount, 2) . ').',
-                    ], 422),
-                );
-            }
-
-            // Record payments (skip for complimentary — total is 0)
-            $order->payments()->delete();
-            if (! $isComplimentary) {
-                foreach ($validated['payments'] ?? [] as $pay) {
-                    PosPayment::create([
-                        'order_id' => $order->id,
-                        'business_date' => $businessDate,
-                        'method' => $pay['method'],
-                        'amount' => $pay['amount'],
-                        'reference_no' => $pay['reference_no'] ?? null,
-                        'paid_at' => now(),
-                        'received_by' => auth()->id(),
+                if ((float) $order->discount_amount >= 0.01 || $order->is_complimentary) {
+                    $order->update([
+                        'discount_approved_by' => auth()->id(),
+                        'discount_approved_at' => now(),
+                    ]);
+                } else {
+                    $order->update([
+                        'discount_approved_by' => null,
+                        'discount_approved_at' => null,
                     ]);
                 }
-            }
+                $order->refresh();
 
-            // Close order
-            $order->update(['status' => 'paid', 'closed_at' => now()]);
+                $paymentsTotal = collect($validated['payments'] ?? [])->sum('amount');
+                if (! $isComplimentary && $paymentsTotal < $order->total_amount - 0.01) {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json([
+                            'message' => 'Total payments (' . number_format($paymentsTotal, 2) . ') is less than order total (' . number_format($order->total_amount, 2) . ').',
+                        ], 422),
+                    );
+                }
 
-            // Ensure ALL active items in the order are deducted from inventory if not already done
-            $this->deductOrderInventoryCompletely($order);
+                // Record payments (skip for complimentary — total is 0)
+                $order->payments()->delete();
+                if (! $isComplimentary) {
+                    foreach ($validated['payments'] ?? [] as $pay) {
+                        PosPayment::create([
+                            'order_id' => $order->id,
+                            'business_date' => $businessDate,
+                            'method' => $pay['method'],
+                            'amount' => $pay['amount'],
+                            'reference_no' => $pay['reference_no'] ?? null,
+                            'paid_at' => now(),
+                            'received_by' => auth()->id(),
+                        ]);
+                    }
+                }
 
-            // Set table to cleaning (dine-in only)
-            if ($order->table_id) {
-                RestaurantTable::where('id', $order->table_id)->update(['status' => 'cleaning']);
-            }
+                // Close order
+                $order->update(['status' => 'paid', 'closed_at' => now()]);
 
-            $roomChargeTotal = collect($validated['payments'] ?? [])
-                ->where('method', 'room_charge')
-                ->sum('amount');
+                // Ensure ALL active items in the order are deducted from inventory if not already done
+                $this->deductOrderInventoryCompletely($order);
 
-            if ($roomChargeTotal > 0 && $order->booking_id) {
-                Booking::where('id', $order->booking_id)
-                    ->increment('extra_charges', $roomChargeTotal);
-            }
+                // Set table to cleaning (dine-in only)
+                if ($order->table_id) {
+                    RestaurantTable::where('id', $order->table_id)->update(['status' => 'cleaning']);
+                }
 
-            $orderForAccounting = $order->fresh(['payments']);
-            app(PosSettlePoster::class)->post($orderForAccounting, auth()->id());
-        });
+                $roomChargeTotal = collect($validated['payments'] ?? [])
+                    ->where('method', 'room_charge')
+                    ->sum('amount');
+
+                if ($roomChargeTotal > 0 && $order->booking_id) {
+                    Booking::where('id', $order->booking_id)
+                        ->increment('extra_charges', $roomChargeTotal);
+                }
+
+                return $order->fresh(['payments']);
+            },
+            postJournal: fn (PosOrder $orderForAccounting) => app(PosSettlePoster::class)->postStrict($orderForAccounting, auth()->id()),
+            journalRequired: fn (PosOrder $orderForAccounting) => app(PosSettlePoster::class)->isJournalRequired($orderForAccounting),
+        );
 
         $fresh = $order->fresh();
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
@@ -7815,7 +7819,7 @@ class PosController extends Controller
         ]);
 
         if (str_starts_with($refType, 'pos_order')) {
-            app(InventoryCogsPoster::class)->postReversal($transaction, auth()->id(), $businessDate);
+            app(InventoryCogsPoster::class)->postReversalStrict($transaction, auth()->id(), $businessDate);
         }
 
         InventoryItem::syncStoredCurrentStockFromLocations($itemId);
@@ -7950,7 +7954,7 @@ class PosController extends Controller
             'reference_id' => $refId,
         ]);
 
-        app(InventoryCogsPoster::class)->post($transaction, auth()->id(), $businessDate);
+        app(InventoryCogsPoster::class)->postStrict($transaction, auth()->id(), $businessDate);
 
         InventoryItem::syncStoredCurrentStockFromLocations($itemId);
     }

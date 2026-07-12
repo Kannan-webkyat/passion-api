@@ -1038,6 +1038,56 @@ class InventoryReportController extends Controller
     }
 
     /**
+     * CSV export of excise bar register (Kerala excise stock register prep).
+     */
+    public function exciseBarExport(Request $request)
+    {
+        $this->checkPermission('inventory-report-summary');
+
+        $payload = json_decode($this->exciseBar($request)->getContent(), true);
+        $rows = $payload['data'] ?? [];
+        $meta = $payload['meta'] ?? [];
+        $date = $meta['date'] ?? now()->toDateString();
+
+        $filename = "excise-bar-register-{$date}.csv";
+
+        return response()->streamDownload(function () use ($rows) {
+            $out = fopen('php://output', 'w');
+            fputcsv($out, [
+                'Item',
+                'Category',
+                'UOM',
+                'Opening Bottles',
+                'Opening Loose (L)',
+                'Receipts Bottles',
+                'Receipts Loose (L)',
+                'Sales Bottles',
+                'Sales Pegs',
+                'Closing Bottles',
+                'Closing Loose (L)',
+            ]);
+            foreach ($rows as $row) {
+                fputcsv($out, [
+                    $row['item_name'] ?? '',
+                    $row['category'] ?? '',
+                    $row['uom'] ?? '',
+                    $row['opening_bottles'] ?? 0,
+                    $row['opening_loose_litres'] ?? '',
+                    $row['receipts_bottles'] ?? 0,
+                    $row['receipts_loose_litres'] ?? '',
+                    $row['sales_bottles'] ?? 0,
+                    $row['sales_pegs'] ?? '',
+                    $row['closing_bottles'] ?? 0,
+                    $row['closing_loose_litres'] ?? '',
+                ]);
+            }
+            fclose($out);
+        }, $filename, [
+            'Content-Type' => 'text/csv',
+        ]);
+    }
+
+    /**
      * Dashboard Summary for Reports Page
      */
     public function dashboardSummary(Request $request)

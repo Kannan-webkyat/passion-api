@@ -5,32 +5,45 @@ namespace App\Services;
 use App\Models\Setting;
 
 /**
- * Controls whether GRN approval posts exclusive merchandise or full landed unit cost to WAC.
+ * Tax-aware inventory WAC: posted unit = merchandise + cess + freight + non-recoverable tax.
+ * Recoverable GST is excluded and posted to Input GST asset at GRN approve.
  */
 final class InventoryCostingConfig
 {
     public const SETTING_KEY = 'inventory_costing_mode';
 
+    /** @deprecated Legacy — new GRNs always use tax-aware landed cost. */
     public const MODE_EXCLUSIVE_ONLY = 'exclusive_only';
 
+    /** @deprecated Legacy — superseded by tax-aware landed cost. */
     public const MODE_LANDED_COST = 'landed_cost';
+
+    public const MODE_TAX_AWARE = 'tax_aware';
 
     public static function mode(): string
     {
-        $raw = strtolower(trim((string) Setting::get(self::SETTING_KEY, self::MODE_EXCLUSIVE_ONLY)));
+        $raw = strtolower(trim((string) Setting::get(self::SETTING_KEY, self::MODE_TAX_AWARE)));
 
-        return $raw === self::MODE_LANDED_COST ? self::MODE_LANDED_COST : self::MODE_EXCLUSIVE_ONLY;
+        return match ($raw) {
+            self::MODE_EXCLUSIVE_ONLY => self::MODE_EXCLUSIVE_ONLY,
+            self::MODE_LANDED_COST => self::MODE_LANDED_COST,
+            default => self::MODE_TAX_AWARE,
+        };
     }
 
     public static function usesLandedCost(): bool
     {
-        return self::mode() === self::MODE_LANDED_COST;
+        return self::mode() !== self::MODE_EXCLUSIVE_ONLY;
     }
 
     /**
      * Unit cost to persist on GRN line and post to inventory WAC.
      *
-     * @param  array{merchandise_unit: float, landed_unit_purchase: float}  $allocation
+     * @param  array{
+     *     merchandise_unit: float,
+     *     landed_unit_purchase: float,
+     *     non_recoverable_tax_unit?: float,
+     * }  $allocation
      */
     public static function postedUnitCostFromAllocation(array $allocation): float
     {
@@ -38,11 +51,21 @@ final class InventoryCostingConfig
     }
 
     /**
-     * @param  array{merchandise_unit: float, landed_unit_purchase: float}  $allocation
+     * @param  array{
+     *     merchandise_unit: float,
+     *     landed_unit_purchase: float,
+     *     non_recoverable_tax_unit?: float,
+     * }  $allocation
      */
     public static function postedUnitCostForMode(string $mode, array $allocation): float
     {
-        $usesLanded = strtolower(trim($mode)) === self::MODE_LANDED_COST;
+        $mode = strtolower(trim($mode));
+
+        if ($mode === self::MODE_TAX_AWARE) {
+            return round(max(0, (float) ($allocation['landed_unit_purchase'] ?? 0)), 4);
+        }
+
+        $usesLanded = $mode === self::MODE_LANDED_COST;
         $unit = $usesLanded
             ? (float) ($allocation['landed_unit_purchase'] ?? 0)
             : (float) ($allocation['merchandise_unit'] ?? 0);
@@ -52,9 +75,11 @@ final class InventoryCostingConfig
 
     public static function setMode(string $mode): void
     {
-        $normalized = strtolower(trim($mode)) === self::MODE_LANDED_COST
-            ? self::MODE_LANDED_COST
-            : self::MODE_EXCLUSIVE_ONLY;
+        $normalized = match (strtolower(trim($mode))) {
+            self::MODE_EXCLUSIVE_ONLY => self::MODE_EXCLUSIVE_ONLY,
+            self::MODE_LANDED_COST => self::MODE_LANDED_COST,
+            default => self::MODE_TAX_AWARE,
+        };
 
         Setting::set(self::SETTING_KEY, $normalized);
     }
@@ -63,6 +88,19 @@ final class InventoryCostingConfig
     public static function publicMeta(): array
     {
         $mode = self::mode();
+
+        if ($mode === self::MODE_TAX_AWARE) {
+            return [
+                'inventory_costing_mode' => $mode,
+                'label' => 'Tax-Aware Landed',
+                'badge' => 'Costing Mode: Tax-Aware Landed',
+                'description' => 'Stock WAC = exclusive base + cess + freight + non-recoverable tax (e.g. liquor VAT). Recoverable GST posts to Input GST asset.',
+                'includes_cess' => true,
+                'includes_freight' => true,
+                'includes_non_recoverable_tax' => true,
+            ];
+        }
+
         $usesLanded = $mode === self::MODE_LANDED_COST;
 
         return [
@@ -74,6 +112,7 @@ final class InventoryCostingConfig
                 : 'Stock WAC uses exclusive merchandise price only. Cess and freight are excluded from inventory valuation.',
             'includes_cess' => $usesLanded,
             'includes_freight' => $usesLanded,
+            'includes_non_recoverable_tax' => false,
         ];
     }
 }

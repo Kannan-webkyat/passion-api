@@ -8,7 +8,9 @@ use App\Models\PurchaseOrderItem;
 /**
  * APPROVE-TIME WRITE ONLY. Persists frozen values on grn_items via GrnService::approve().
  *
- * Do not import from reports, controllers (read paths), or UI formatters.
+ * Tax-aware WAC: landed unit = merchandise + cess + freight + non_recoverable_tax.
+ * Recoverable tax (GST ITC) is excluded from inventory and posted to input tax asset.
+ *
  * For reads use {@see GrnItemCostSnapshot} / {@see GrnFrozenCostPolicy}.
  */
 final class LandedCostAllocator
@@ -18,18 +20,24 @@ final class LandedCostAllocator
      *     line_subtotal_accepted: float,
      *     line_cess_accepted: float,
      *     line_freight_allocated: float,
+     *     line_recoverable_tax_accepted: float,
+     *     line_non_recoverable_tax_accepted: float,
      *     merchandise_unit: float,
      *     cess_unit: float,
      *     freight_unit: float,
+     *     non_recoverable_tax_unit: float,
+     *     recoverable_tax_unit: float,
      *     landed_unit_purchase: float,
      *     landed_total: float,
+     *     tax_input_credit_eligible: bool,
      * }
      */
     public static function forGrnLine(
         PurchaseOrder $po,
         PurchaseOrderItem $poItem,
         float $acceptedQty,
-        float $grnMerchandiseSubtotalSum
+        float $grnMerchandiseSubtotalSum,
+        bool $isInputCreditEligible
     ): array {
         $accepted = max(0, $acceptedQty);
         $ordered = max(0.000001, (float) $poItem->quantity_ordered);
@@ -37,6 +45,7 @@ final class LandedCostAllocator
 
         $lineSubtotalHigh = (float) ($poItem->subtotal ?? 0) * $share;
         $lineCessHigh = (float) ($poItem->total_cess ?? 0) * $share;
+        $lineTaxHigh = round((float) ($poItem->tax_amount ?? 0) * $share, 2);
 
         $poSubtotal = max(0, (float) ($po->subtotal ?? 0));
         $headerCharges = max(0, (float) ($po->transportation_charge ?? 0))
@@ -53,19 +62,32 @@ final class LandedCostAllocator
         $merchandiseUnit = (float) ($poItem->subtotal ?? 0) / $ordered;
         $cessUnit = (float) ($poItem->total_cess ?? 0) / $ordered;
         $freightUnit = $accepted > 0 ? $lineFreightHigh / $accepted : 0.0;
+        $taxUnit = (float) ($poItem->tax_amount ?? 0) / $ordered;
 
-        $landedUnitPurchase = round($merchandiseUnit + $cessUnit + $freightUnit, 4);
+        $taxSplit = TaxCreditPolicy::splitLineTax($lineTaxHigh, $accepted, $isInputCreditEligible);
+        $nonRecoverableTaxUnit = $isInputCreditEligible ? 0.0 : round($taxUnit, 4);
+        $recoverableTaxUnit = $isInputCreditEligible ? round($taxUnit, 4) : 0.0;
+
+        $landedUnitPurchase = round(
+            $merchandiseUnit + $cessUnit + $freightUnit + $nonRecoverableTaxUnit,
+            4
+        );
         $landedTotal = round($landedUnitPurchase * $accepted, 2);
 
         return [
             'line_subtotal_accepted' => round($lineSubtotalHigh, 2),
             'line_cess_accepted' => round($lineCessHigh, 2),
             'line_freight_allocated' => round($lineFreightHigh, 2),
+            'line_recoverable_tax_accepted' => $taxSplit['recoverable'],
+            'line_non_recoverable_tax_accepted' => $taxSplit['non_recoverable'],
             'merchandise_unit' => $merchandiseUnit,
             'cess_unit' => $cessUnit,
             'freight_unit' => $freightUnit,
+            'non_recoverable_tax_unit' => $nonRecoverableTaxUnit,
+            'recoverable_tax_unit' => $recoverableTaxUnit,
             'landed_unit_purchase' => $landedUnitPurchase,
             'landed_total' => $landedTotal,
+            'tax_input_credit_eligible' => $isInputCreditEligible,
         ];
     }
 
@@ -120,7 +142,10 @@ final class LandedCostAllocator
                 continue;
             }
 
-            $total += self::forGrnLine($po, $poItem, $accepted, $grnMerch)['line_freight_allocated'];
+            $poItem->loadMissing('inventoryItem.tax');
+            $eligible = TaxCreditPolicy::forInventoryItem($poItem->inventoryItem);
+
+            $total += self::forGrnLine($po, $poItem, $accepted, $grnMerch, $eligible)['line_freight_allocated'];
         }
 
         return round($total, 2);
