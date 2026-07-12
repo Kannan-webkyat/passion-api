@@ -24,6 +24,10 @@ class InventoryItem extends Model
         'stock_expected',
         'is_direct_sale',
         'is_prepared_item',
+        'is_alcohol',
+        'is_cess_applicable',
+        'cess_amount',
+        'liquor_category',
     ];
 
     protected $casts = [
