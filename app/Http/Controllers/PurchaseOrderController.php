@@ -51,7 +51,13 @@ class PurchaseOrderController extends Controller
         InventoryAuthorization::assertViewProcurement();
 
         return response()->json(
-            PurchaseOrder::with(['vendor', 'items.inventoryItem.tax', 'creator'])->latest()->get()
+            PurchaseOrder::with([
+                'vendor',
+                'items.inventoryItem.tax',
+                'creator',
+                'vendorPayments' => fn ($q) => $q->orderByDesc('paid_at'),
+                'vendorPayments.paidByUser:id,name',
+            ])->latest()->get()
         );
     }
 
@@ -81,7 +87,14 @@ class PurchaseOrderController extends Controller
     {
         InventoryAuthorization::assertViewProcurement();
 
-        return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem.tax', 'location', 'creator'));
+        return response()->json($purchaseOrder->load([
+            'vendor',
+            'items.inventoryItem.tax',
+            'location',
+            'creator',
+            'vendorPayments' => fn ($q) => $q->orderByDesc('paid_at'),
+            'vendorPayments.paidByUser:id,name',
+        ]));
     }
 
     public function update(Request $request, PurchaseOrder $purchaseOrder)
@@ -330,7 +343,8 @@ class PurchaseOrderController extends Controller
                     'vendor',
                     'items.inventoryItem.tax',
                     'creator',
-                    'vendorPayments',
+                    'vendorPayments' => fn ($q) => $q->orderByDesc('paid_at'),
+                    'vendorPayments.paidByUser:id,name',
                 ])
             );
         } catch (\Exception $e) {

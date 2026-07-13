@@ -18,6 +18,15 @@ use Illuminate\Support\Str;
 
 class InventoryController extends Controller
 {
+    /** Positive quantity always reduces stock (units lost). */
+    private const STOCK_OUT_REASONS = [
+        'Wastage',
+        'Expired',
+        'Breakage',
+        'Theft',
+        'Staff meal',
+    ];
+
     /**
      * Cost per issue UOM from purchase-UOM cost (matches GRN, POS deductions, stock valuation report).
      * cost_price = per purchase unit; conversion_factor = issue units per 1 purchase unit.
@@ -397,8 +406,18 @@ class InventoryController extends Controller
             }
         }
 
-        $isReduce = $qty < 0;
-        $qtyAbs = abs($qty);
+        if (in_array($validated['reason'], self::STOCK_OUT_REASONS, true)) {
+            if ($qty < 0) {
+                return response()->json([
+                    'message' => 'For '.$validated['reason'].', enter the number of units lost as a positive quantity (e.g. 1).',
+                ], 422);
+            }
+            $isReduce = true;
+            $qtyAbs = $qty;
+        } else {
+            $isReduce = $qty < 0;
+            $qtyAbs = abs($qty);
+        }
 
         $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
         $lineCost = round($qtyAbs * $unitCost, 2);
