@@ -115,7 +115,6 @@ class InventoryController extends Controller
             'cost_price' => 'nullable|numeric|min:0',
             'inspection_penalty_charge' => 'nullable|numeric|min:0',
             'reorder_level' => 'nullable|numeric|min:0',
-            'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
             'is_alcohol' => 'nullable|boolean',
@@ -135,37 +134,16 @@ class InventoryController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
+        if ($request->has('current_stock') && (float) $request->input('current_stock') > 0) {
+            return response()->json([
+                'message' => 'Do not set stock when creating an item. After saving, use Adjust Stock → Opening Stock.',
+            ], 422);
+        }
+
         $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
         $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
+        $validated['current_stock'] = 0;
         $item = InventoryItem::create($validated);
-
-        $purchaseUnitCost = (float) $validated['cost_price'];
-
-        $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
-            $purchaseUnitCost,
-            (float) ($validated['conversion_factor'] ?? 1)
-        );
-
-        if ($item->current_stock > 0) {
-            $mainStore = \App\Models\InventoryLocation::where('type', 'main_store')->first();
-            if ($mainStore) {
-                DB::table('inventory_item_locations')->updateOrInsert(
-                    ['inventory_item_id' => $item->id, 'inventory_location_id' => $mainStore->id],
-                    ['quantity' => $item->current_stock, 'reorder_level' => $item->reorder_level, 'updated_at' => now(), 'created_at' => now()]
-                );
-
-                InventoryTransaction::create([
-                    'inventory_item_id' => $item->id,
-                    'inventory_location_id' => $mainStore->id,
-                    'type' => 'in',
-                    'quantity' => $item->current_stock,
-                    'unit_cost' => $issueUnitCost,
-                    'total_cost' => round($item->current_stock * $issueUnitCost, 2),
-                    'reason' => 'Initial Stock',
-                    'user_id' => auth()->id(),
-                ]);
-            }
-        }
 
         InventoryItem::syncStoredCurrentStockFromLocations($item->id);
         $item->refresh();
@@ -199,7 +177,6 @@ class InventoryController extends Controller
             'cost_price' => 'nullable|numeric|min:0',
             'inspection_penalty_charge' => 'nullable|numeric|min:0',
             'reorder_level' => 'nullable|numeric|min:0',
-            'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
             'is_alcohol' => 'nullable|boolean',
@@ -219,44 +196,20 @@ class InventoryController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
-        $oldStock = $item->current_stock;
-        $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
-        $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
-        $item->update($validated);
-
-        // Stored cost is per purchase UOM (WAC on GRN; manual entry same convention).
-        $purchaseUnitCost = (float) $validated['cost_price'];
-
-        $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
-            $purchaseUnitCost,
-            (float) ($validated['conversion_factor'] ?? 1)
-        );
-
-        // If manual stock edit, sync with Main Store
-        if (isset($validated['current_stock']) && $validated['current_stock'] != $oldStock) {
-            $mainStore = \App\Models\InventoryLocation::where('type', 'main_store')->first();
-            if ($mainStore) {
-                DB::table('inventory_item_locations')->updateOrInsert(
-                    ['inventory_item_id' => $item->id, 'inventory_location_id' => $mainStore->id],
-                    ['quantity' => $item->current_stock, 'updated_at' => now()]
-                );
-
-                $qtyDelta = abs($item->current_stock - $oldStock);
-                $isIncrease = $item->current_stock > $oldStock;
-                $tx = InventoryTransaction::create([
-                    'inventory_item_id' => $item->id,
-                    'inventory_location_id' => $mainStore->id,
-                    'type' => $isIncrease ? 'in' : 'out',
-                    'quantity' => $qtyDelta,
-                    'unit_cost' => $issueUnitCost,
-                    'total_cost' => round($qtyDelta * $issueUnitCost, 2),
-                    'reason' => 'Manual Adjustment',
-                    'notes' => 'Stock edited via Item Master',
-                    'user_id' => auth()->id(),
-                ]);
-                app(InventoryAdjustmentPoster::class)->postStrict($tx, auth()->id());
+        if ($request->has('current_stock')) {
+            $requestedStock = (float) $request->input('current_stock');
+            $actualStock = InventoryItem::sumQuantityAcrossLocations($item->id);
+            if (abs($requestedStock - $actualStock) > 1e-6) {
+                return response()->json([
+                    'message' => 'Stock cannot be changed from the item form. Use Adjust Stock (Opening Stock for first count, or Correction / Wastage for changes).',
+                ], 422);
             }
         }
+
+        $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
+        $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
+        unset($validated['current_stock']);
+        $item->update($validated);
 
         InventoryItem::syncStoredCurrentStockFromLocations($item->id);
 
@@ -433,6 +386,15 @@ class InventoryController extends Controller
 
         if ($validated['reason'] === 'Opening Stock' && $qty < 0) {
             return response()->json(['message' => 'Opening Stock must use a positive quantity (stock in).'], 422);
+        }
+
+        if ($qty > 0 && $validated['reason'] === 'Manual Adjustment') {
+            $onHand = InventoryItem::sumQuantityAcrossLocations($item->id);
+            if ($onHand <= 0) {
+                return response()->json([
+                    'message' => 'For the first stock entry use reason Opening Stock, not Manual Adjustment.',
+                ], 422);
+            }
         }
 
         $isReduce = $qty < 0;

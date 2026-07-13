@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Exceptions\JournalPostingException;
 use App\Events\BookingChargesUpdated;
 use App\Events\HousekeepingStateUpdated;
 use App\Events\PosRestaurantUpdated;
@@ -6609,60 +6610,74 @@ class PosController extends Controller
         ]);
 
         $blocked = false;
-        DB::transaction(function () use ($order, $validated, &$blocked) {
-            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-            if (! in_array($order->status, ['open', 'billed'])) {
-                $blocked = true;
+        try {
+            DB::transaction(function () use ($order, $validated, &$blocked) {
+                $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+                if (! in_array($order->status, ['open', 'billed'])) {
+                    $blocked = true;
 
-                return;
-            }
+                    return;
+                }
 
-            $order->loadMissing('restaurant');
-            $businessDate = $order->business_date?->format('Y-m-d')
-                ?? BusinessDateService::resolve($order->restaurant);
+                $order->loadMissing('restaurant');
+                $businessDate = $order->business_date?->format('Y-m-d')
+                    ?? BusinessDateService::resolve($order->restaurant);
 
-            $order->update([
-                'status' => 'void',
-                'business_date' => $businessDate,
-                'closed_at' => now(),
-                'void_reason' => $validated['void_reason'],
-                'void_notes' => $validated['void_notes'] ?? null,
-                'voided_by' => auth()->id(),
-                'voided_at' => now(),
-            ]);
+                $order->update([
+                    'status' => 'void',
+                    'business_date' => $businessDate,
+                    'closed_at' => now(),
+                    'void_reason' => $validated['void_reason'],
+                    'void_notes' => $validated['void_notes'] ?? null,
+                    'voided_by' => auth()->id(),
+                    'voided_at' => now(),
+                ]);
 
-            if ($order->table_id) {
-                RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
-            }
+                if ($order->table_id) {
+                    RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
+                }
 
-            $kitchenStore = $this->getKitchenForOrder($order);
-            $barLocationId = $order->restaurant?->bar_location_id;
-            $barStore = $barLocationId
-                ? InventoryLocation::find($barLocationId)
-                : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
+                $kitchenStore = $this->getKitchenForOrder($order);
+                $barLocationId = $order->restaurant?->bar_location_id;
+                $barStore = $barLocationId
+                    ? InventoryLocation::find($barLocationId)
+                    : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
 
-            // Don't reverse if kitchen started cooking (kot_started_at) — ingredients in use or used.
-            // System deducts at "Mark Ready", but physically they use ingredients when they start.
-            foreach ($order->items()->where('status', 'active')->with('menuItem')->get() as $item) {
-                $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
-                if ($item->kot_started_at || $item->kitchen_ready_at) {
-                    $this->recordVoidWaste($order, $item, $targetStore, $validated['void_reason']);
+                // Don't reverse if kitchen started cooking (kot_started_at) — ingredients in use or used.
+                // System deducts at "Mark Ready", but physically they use ingredients when they start.
+                foreach ($order->items()->where('status', 'active')->with(['menuItem', 'combo.menuItems'])->get() as $item) {
+                    $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
+                    if ($item->kot_started_at || $item->kitchen_ready_at) {
+                        $this->recordVoidWaste($order, $item, $targetStore, $validated['void_reason']);
+                        $item->update(['status' => 'cancelled']);
+
+                        continue;
+                    }
+                    if ($item->inventory_deducted && $targetStore) {
+                        $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_void', (string) $order->id);
+                    }
                     $item->update(['status' => 'cancelled']);
+                }
+            });
+        } catch (\Illuminate\Http\Exceptions\HttpResponseException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            report($e);
 
-                    continue;
-                }
-                if ($item->inventory_deducted && $targetStore) {
-                    $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_void', (string) $order->id);
-                }
-                $item->update(['status' => 'cancelled']);
-            }
-        });
+            return response()->json([
+                'message' => $e->getMessage() ?: 'Could not void order.',
+            ], 422);
+        }
 
         if ($blocked) {
             return response()->json(['message' => 'Order can no longer be voided (status changed).'], 422);
         }
 
-        $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
+        try {
+            $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
+        } catch (\Throwable $e) {
+            report($e);
+        }
 
         return response()->json(['message' => 'Order voided.']);
     }
@@ -7750,7 +7765,7 @@ class PosController extends Controller
 
     private function reverseInventoryByQuantity(PosOrderItem $orderItem, InventoryLocation $location, float $baseQty, string $refType, string $refId): void
     {
-        $orderItem->loadMissing('variant');
+        $orderItem->loadMissing('variant', 'combo.menuItems');
         DB::transaction(function () use ($orderItem, $location, $baseQty, $refType, $refId) {
             $orderItem->loadMissing('order');
             $businessDate = $orderItem->order?->business_date?->format('Y-m-d');
@@ -7819,7 +7834,21 @@ class PosController extends Controller
         ]);
 
         if (str_starts_with($refType, 'pos_order')) {
-            app(InventoryCogsPoster::class)->postReversalStrict($transaction, auth()->id(), $businessDate);
+            $poster = app(InventoryCogsPoster::class);
+            try {
+                if ($refType === 'pos_order_void') {
+                    // Void must succeed even if COGS reversal journal cannot post (e.g. after GL reset).
+                    $poster->postReversal($transaction, auth()->id(), $businessDate);
+                } else {
+                    $poster->postReversalStrict($transaction, auth()->id(), $businessDate);
+                }
+            } catch (JournalPostingException $e) {
+                if ($refType === 'pos_order_void') {
+                    report($e);
+                } else {
+                    throw $e;
+                }
+            }
         }
 
         InventoryItem::syncStoredCurrentStockFromLocations($itemId);
@@ -7883,6 +7912,10 @@ class PosController extends Controller
         string $voidReason,
     ): void {
         if ($quantity <= 0) {
+            return;
+        }
+
+        if (! \Illuminate\Support\Facades\Schema::hasTable('pos_void_waste')) {
             return;
         }
 
