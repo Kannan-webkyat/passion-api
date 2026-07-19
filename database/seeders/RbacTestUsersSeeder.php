@@ -59,6 +59,8 @@ class RbacTestUsersSeeder extends Seeder
         ]);
         $manager->givePermissionTo([
             'pos-day-closing',
+            'pos-day-closing-unlock',
+            'pos-business-date-override',
             'pos-discount',
             'pos-void-item',
             'pos-reopen-order',

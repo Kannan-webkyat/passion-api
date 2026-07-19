@@ -16,11 +16,35 @@ class DayClosingService
 {
     public const PERMISSION_OVERRIDE_SEQUENTIAL = 'pos-day-closing-override';
 
+    public const PERMISSION_UNLOCK = 'pos-day-closing-unlock';
+
     public function lastClosedDate(int $restaurantId): ?string
     {
         $date = PosDayClosing::query()
             ->where('restaurant_id', $restaurantId)
             ->max('closed_date');
+
+        if (! $date) {
+            return null;
+        }
+
+        return $date instanceof \Carbon\CarbonInterface
+            ? $date->format('Y-m-d')
+            : (string) $date;
+    }
+
+    /**
+     * A business date is "behind a sealed day" when a strictly later date has
+     * already been closed for the outlet. Trading there would create a hole
+     * (an open day sitting before a sealed Z-report) and must be blocked until
+     * the later date is unlocked.
+     */
+    public function laterClosedDate(int $restaurantId, string $businessDate): ?string
+    {
+        $date = PosDayClosing::query()
+            ->where('restaurant_id', $restaurantId)
+            ->whereDate('closed_date', '>', $businessDate)
+            ->min('closed_date');
 
         if (! $date) {
             return null;
@@ -113,7 +137,7 @@ class DayClosingService
 
         $openBilled = (int) ($summary['open_billed_count'] ?? 0);
         $kotPending = $this->countKotPendingOnOpenOrders($restaurantId, $closedDate);
-        $openTables = $this->countOccupiedTables($restaurantId);
+        $unclearedTables = $this->countUnclearedTables($restaurantId);
         $negStock = (int) ($inventoryPrecheck['negative_stock']['count'] ?? 0);
         $pendingReq = (int) ($inventoryPrecheck['pending_requisitions']['count'] ?? 0);
         $invOk = (bool) ($inventoryPrecheck['can_close'] ?? true);
@@ -153,13 +177,13 @@ class DayClosingService
             ],
             [
                 'key' => 'open_tables',
-                'label' => 'Occupied tables',
-                'status' => $openTables === 0 ? 'pass' : ($openBilled > 0 ? 'fail' : 'warn'),
-                'count' => $openTables,
-                'blocking' => false,
-                'detail' => $openTables === 0
-                    ? 'No tables marked occupied.'
-                    : 'Tables still occupied — verify orders are settled.',
+                'label' => 'Tables cleared (available)',
+                'status' => $unclearedTables === 0 ? 'pass' : 'fail',
+                'count' => $unclearedTables,
+                'blocking' => true,
+                'detail' => $unclearedTables === 0
+                    ? 'All tables are available.'
+                    : 'Mark occupied/cleaning tables as available after settle or void.',
             ],
             [
                 'key' => 'negative_stock',
@@ -220,11 +244,14 @@ class DayClosingService
             ->count();
     }
 
-    private function countOccupiedTables(int $restaurantId): int
+    /**
+     * Tables that must be cleared before day close (occupied or still cleaning).
+     */
+    public function countUnclearedTables(int $restaurantId): int
     {
         return (int) RestaurantTable::query()
             ->where('restaurant_master_id', $restaurantId)
-            ->where('status', 'occupied')
+            ->whereIn('status', ['occupied', 'cleaning'])
             ->count();
     }
 }

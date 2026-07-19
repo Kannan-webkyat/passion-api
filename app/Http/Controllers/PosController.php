@@ -42,6 +42,7 @@ use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
@@ -5244,6 +5245,7 @@ class PosController extends Controller
         $rules = [
             'order_type' => 'nullable|in:dine_in,takeaway,room_service,delivery,walk_in',
             'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'business_date' => 'nullable|date|before_or_equal:today',
             'covers' => 'required|integer|min:1',
             'customer_name' => 'nullable|string|max:191',
             'customer_phone' => 'nullable|string|max:30',
@@ -5272,10 +5274,20 @@ class PosController extends Controller
         }
 
         $restaurant = RestaurantMaster::find($validated['restaurant_id']);
-        $businessDate = BusinessDateService::resolve($restaurant);
+        $automaticBusinessDate = BusinessDateService::resolve($restaurant);
+        $businessDate = $validated['business_date'] ?? $automaticBusinessDate;
+        $isBusinessDateOverride = $businessDate !== $automaticBusinessDate;
+
+        if ($isBusinessDateOverride) {
+            $this->checkPermission('pos-business-date-override');
+        }
 
         $duplicateOrder = null;
-        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder, $businessDate, $restaurant) {
+        $order = DB::transaction(function () use ($validated, $orderType, &$duplicateOrder, $businessDate, $restaurant, $isBusinessDateOverride, $automaticBusinessDate) {
+            // Serialize against a concurrent day-close on this outlet (close takes the
+            // same row lock) so an order can't be created into a day being sealed.
+            RestaurantMaster::where('id', $validated['restaurant_id'])->lockForUpdate()->first();
+
             if ($orderType === 'dine_in') {
                 // Lock the table to prevent concurrent order creation
                 RestaurantTable::where('id', $validated['table_id'])->lockForUpdate()->first();
@@ -5296,6 +5308,18 @@ class PosController extends Controller
                 $businessDate,
                 'Cannot open new orders: this business date is already closed for this outlet.',
             );
+
+            // Block trading on a day that sits behind an already-sealed later day
+            // (a hole left by a sequential-close override). Unlock the later date first.
+            $laterClosed = app(DayClosingService::class)
+                ->laterClosedDate((int) $validated['restaurant_id'], $businessDate);
+            if ($laterClosed !== null) {
+                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                    response()->json([
+                        'message' => "Cannot open orders for {$businessDate}: a later business date ({$laterClosed}) is already closed for this outlet. Unlock it first.",
+                    ], 422)
+                );
+            }
 
             $order = PosOrder::create([
                 'order_type' => $orderType,
@@ -5318,6 +5342,17 @@ class PosController extends Controller
                 'status' => 'open',
                 'opened_at' => now(),
             ]);
+
+            if ($isBusinessDateOverride) {
+                Log::warning('pos.order.business_date_overridden', [
+                    'order_id' => $order->id,
+                    'restaurant_id' => $order->restaurant_id,
+                    'business_date' => $businessDate,
+                    'automatic_business_date' => $automaticBusinessDate,
+                    'opened_by' => auth()->id(),
+                    'opened_by_name' => auth()->user()?->name,
+                ]);
+            }
 
             if ($orderType === 'dine_in') {
                 RestaurantTable::where('id', $validated['table_id'])
@@ -5361,11 +5396,28 @@ class PosController extends Controller
         if (! empty($validated['order_id'])) {
             $query->where('id', (int) $validated['order_id']);
         } else {
-            if (! empty($validated['from'])) {
-                $query->whereDate('closed_at', '>=', $validated['from']);
-            }
-            if (! empty($validated['to'])) {
-                $query->whereDate('closed_at', '<=', $validated['to']);
+            // Filter by business date (Z-report / day-close date), with legacy
+            // fallback for older rows that only have closed_at.
+            $applyBusinessDateRange = function ($q, string $from, string $to) {
+                $q->where(function ($w) use ($from, $to) {
+                    $w->where(function ($bd) use ($from, $to) {
+                        $bd->whereNotNull('business_date')
+                            ->whereDate('business_date', '>=', $from)
+                            ->whereDate('business_date', '<=', $to);
+                    })->orWhere(function ($legacy) use ($from, $to) {
+                        $legacy->whereNull('business_date')
+                            ->whereDate('closed_at', '>=', $from)
+                            ->whereDate('closed_at', '<=', $to);
+                    });
+                });
+            };
+
+            if (! empty($validated['from']) && ! empty($validated['to'])) {
+                $applyBusinessDateRange($query, $validated['from'], $validated['to']);
+            } elseif (! empty($validated['from'])) {
+                $applyBusinessDateRange($query, $validated['from'], $validated['from']);
+            } elseif (! empty($validated['to'])) {
+                $applyBusinessDateRange($query, $validated['to'], $validated['to']);
             }
         }
 
@@ -5383,6 +5435,7 @@ class PosController extends Controller
             'is_complimentary' => (bool) ($o->is_complimentary ?? false),
             'refunded_amount' => (float) $o->refunds->sum('amount'),
             'status' => $o->status,
+            'business_date' => $o->business_date?->toDateString(),
             'closed_at' => $o->closed_at,
         ]);
 
@@ -6180,6 +6233,11 @@ class PosController extends Controller
 
                     return;
                 }
+                if ((string) $src->business_date?->toDateString() !== (string) $target->business_date?->toDateString()) {
+                    $errorResponse = response()->json(['message' => 'Can only merge orders from the same business date. Settle or close these checks separately.'], 422);
+
+                    return;
+                }
             }
 
             // Lock involved tables to prevent concurrent order creation/transfers
@@ -6848,8 +6906,15 @@ class PosController extends Controller
         // ── 1. CHECK IF ORDER’S BUSINESS DAY IS CLOSED (sealed day — no further refunds) ──
         $order->loadMissing('restaurant');
         $this->assertBusinessDateOpenForPos($order, 'Cannot refund: this order\'s business date is already closed for this outlet.');
-        // Cash-out / Z-report: attribute refund to the business date when the refund is performed
+        // Cash-out / Z-report: attribute refund to the business date when the refund is performed.
         $refundBusinessDate = BusinessDateService::resolve($order->restaurant);
+        // The refund's own cash date must also be open, otherwise the sealed day's
+        // drawer/Z-report would silently drift after close.
+        $this->assertBusinessDateOpenForRestaurant(
+            (int) $order->restaurant_id,
+            $refundBusinessDate,
+            'Cannot refund: the current business date is already closed for this outlet. Unlock the day first, then refund.',
+        );
 
         $validated = $request->validate([
             'amount' => 'required|numeric|min:0.01',

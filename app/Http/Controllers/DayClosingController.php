@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\PosDayClosing;
+use App\Models\PosDayClosingArchive;
 use App\Models\PosOrder;
 use App\Models\PosPayment;
 use App\Models\Recipe;
@@ -12,6 +13,7 @@ use App\Services\DayClosingService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class DayClosingController extends Controller
 {
@@ -44,6 +46,7 @@ class DayClosingController extends Controller
 
         $restaurantId = (int) $validated['restaurant_id'];
         $closedDate = $validated['date'];
+        $this->authorizeRestaurantId($restaurantId);
 
         $existing = PosDayClosing::where('restaurant_id', $restaurantId)
             ->where('closed_date', $closedDate)
@@ -85,13 +88,24 @@ class DayClosingController extends Controller
 
         $restaurantId = (int) $validated['restaurant_id'];
         $closedDate = $validated['date'];
+        $this->authorizeRestaurantId($restaurantId);
 
         $closing = DB::transaction(function () use ($restaurantId, $closedDate, $validated) {
+            // Serialize against concurrent order creation on the same outlet
+            // (openOrder takes the same row lock) so a bill can't slip in between
+            // the open-orders check and the closing insert.
+            RestaurantMaster::where('id', $restaurantId)->lockForUpdate()->first();
+
             $this->dayClosing->assertSequentialOrAbort($restaurantId, $closedDate);
 
             $summary = $this->computeSummary($restaurantId, $closedDate);
             if (($summary['open_billed_count'] ?? 0) > 0) {
                 abort(422, 'Cannot close day: there are still open or billed orders for this business date.');
+            }
+
+            $unclearedTables = $this->dayClosing->countUnclearedTables($restaurantId);
+            if ($unclearedTables > 0) {
+                abort(422, "Cannot close day: {$unclearedTables} table(s) are still occupied or cleaning. Settle/void orders and mark tables available first.");
             }
 
             $inv = $this->computeInventoryPrecheck($restaurantId, $closedDate);
@@ -148,6 +162,89 @@ class DayClosingController extends Controller
             'message' => 'Day closed successfully.',
             'closing' => $closing->load('closedByUser'),
         ], $closing->wasRecentlyCreated ? 201 : 200);
+    }
+
+    /**
+     * Unlock (reopen) a closed business day so POS can take orders again.
+     * POST /pos/day-closing/unlock
+     *
+     * Managers may only unlock the latest closed date for an outlet.
+     * Admin / Super Admin may unlock any closed date.
+     */
+    public function unlock(Request $request)
+    {
+        $this->checkPermission(DayClosingService::PERMISSION_UNLOCK);
+        $validated = $request->validate([
+            'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'date' => 'required|date',
+            'reason' => 'nullable|string|max:500',
+        ]);
+
+        $restaurantId = (int) $validated['restaurant_id'];
+        $closedDate = $validated['date'];
+        $this->authorizeRestaurantId($restaurantId);
+
+        $closing = DB::transaction(function () use ($restaurantId, $closedDate, $validated) {
+            $existing = PosDayClosing::where('restaurant_id', $restaurantId)
+                ->where('closed_date', $closedDate)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $existing) {
+                abort(422, 'This business date is not closed.');
+            }
+
+            $laterExists = PosDayClosing::where('restaurant_id', $restaurantId)
+                ->where('closed_date', '>', $closedDate)
+                ->exists();
+
+            $user = auth()->user();
+            $isAdmin = $user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'));
+            if ($laterExists && ! $isAdmin) {
+                abort(422, 'Cannot unlock: a later business date is already closed for this outlet. Unlock the latest closed date first, or ask an Admin.');
+            }
+
+            // Preserve the sealed Z-report snapshot before removing the active row,
+            // so the original figures remain auditable after re-trading/re-closing.
+            $archive = PosDayClosingArchive::create([
+                'original_id' => $existing->id,
+                'restaurant_id' => $existing->restaurant_id,
+                'closed_date' => $existing->closed_date,
+                'closed_at' => $existing->closed_at,
+                'closed_by' => $existing->closed_by,
+                'snapshot' => $existing->only($existing->getFillable()),
+                'unlocked_by' => $user?->id,
+                'unlocked_at' => now(),
+                'unlock_reason' => $validated['reason'] ?? null,
+            ]);
+
+            Log::info('pos.day_closing.unlocked', [
+                'restaurant_id' => $restaurantId,
+                'closed_date' => $closedDate,
+                'closing_id' => $existing->id,
+                'archive_id' => $archive->id,
+                'unlocked_by' => $user?->id,
+                'unlocked_by_name' => $user?->name,
+                'reason' => $validated['reason'] ?? null,
+                'snapshot' => [
+                    'total_paid' => $existing->total_paid,
+                    'order_count' => $existing->order_count,
+                    'closed_at' => $existing->closed_at?->toIso8601String(),
+                    'closed_by' => $existing->closed_by,
+                ],
+            ]);
+
+            $existing->delete();
+
+            return $existing;
+        });
+
+        return response()->json([
+            'message' => 'Day unlocked. POS can take orders for this business date again. Close the day when trading is finished.',
+            'unlocked_date' => $closedDate,
+            'restaurant_id' => $restaurantId,
+            'previous_closing_id' => $closing->id,
+        ]);
     }
 
     /**

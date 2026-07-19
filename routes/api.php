@@ -248,6 +248,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         // Day Closing
         Route::get('day-closing/preview', [DayClosingController::class, 'preview']);
         Route::post('day-closing', [DayClosingController::class, 'close']);
+        Route::post('day-closing/unlock', [DayClosingController::class, 'unlock']);
         Route::get('day-closings', [DayClosingController::class, 'index']);
         Route::get('day-closings/export', [DayClosingController::class, 'export']);
     });

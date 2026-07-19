@@ -31,6 +31,8 @@ use App\Models\HousekeepingChecklistItem;
 use App\Models\RoomCleaningRelease;
 use App\Models\Setting;
 use App\Models\User;
+use App\Services\BusinessDateService;
+use App\Services\DayClosingService;
 use App\Services\HousekeepingChecklistService;
 use App\Services\RoomCleaningAvailabilityService;
 use App\Support\CheckoutInspectionInspector;
@@ -1780,6 +1782,16 @@ class HousekeepingController extends Controller
             return Schema::hasColumn('pos_payments', $col);
         };
 
+        // Post into an OPEN business date. Use the outlet's resolved business date
+        // (honours the day-cutoff), but never into a day that is already closed or
+        // that sits behind a sealed day — otherwise a finalised Z-report would drift.
+        $businessDate = BusinessDateService::resolve($restaurant);
+        $dayClosing = app(DayClosingService::class);
+        $lastClosed = $dayClosing->lastClosedDate((int) $restaurant->id);
+        if ($lastClosed !== null && Carbon::parse($businessDate)->lte(Carbon::parse($lastClosed))) {
+            $businessDate = Carbon::parse($lastClosed)->addDay()->toDateString();
+        }
+
         // Create POS order in paid state with room_charge payment.
         $orderData = [
             'restaurant_id' => $restaurant->id,
@@ -1796,7 +1808,7 @@ class HousekeepingController extends Controller
             $orderData['table_id'] = null;
         }
         if ($hasPosOrders('business_date')) {
-            $orderData['business_date'] = Carbon::today()->toDateString();
+            $orderData['business_date'] = $businessDate;
         }
         if ($hasPosOrders('waiter_id')) {
             $orderData['waiter_id'] = null;
@@ -1886,7 +1898,7 @@ class HousekeepingController extends Controller
             'received_by' => $userId,
         ];
         if ($hasPosPayments('business_date')) {
-            $pay['business_date'] = Carbon::today();
+            $pay['business_date'] = $businessDate;
         }
         PosPayment::create($pay);
 

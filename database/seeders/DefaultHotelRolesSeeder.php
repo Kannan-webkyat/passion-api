@@ -52,6 +52,8 @@ class DefaultHotelRolesSeeder extends Seeder
                 'pos-order',
                 'pos-settle',
                 'pos-day-closing',
+                'pos-day-closing-unlock',
+                'pos-business-date-override',
                 'pos-void-item',
                 'pos-discount',
                 'pos-reopen-order',

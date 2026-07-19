@@ -83,6 +83,8 @@ class RolePermissionSeeder extends Seeder
             'pos-reopen-order',
             'pos-day-closing',
             'pos-day-closing-override',
+            'pos-day-closing-unlock',
+            'pos-business-date-override',
             'accounting-view-trial-balance',
             'accounting-vendor-pay',
             'view-dashboard',
