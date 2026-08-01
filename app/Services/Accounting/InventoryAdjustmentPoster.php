@@ -33,6 +33,10 @@ final class InventoryAdjustmentPoster
     public function isJournalRequired(InventoryTransaction $transaction): bool
     {
         if ($transaction->type === 'out') {
+            if ($transaction->reason === 'Opening Stock') {
+                return round((float) $transaction->total_cost, 2) > 0;
+            }
+
             if (! in_array($transaction->reason, self::LOSS_REASONS, true)) {
                 return false;
             }
@@ -89,6 +93,10 @@ final class InventoryAdjustmentPoster
 
     private function postDecrease(InventoryTransaction $transaction, ?int $postedBy): ?JournalEntry
     {
+        if ($transaction->reason === 'Opening Stock') {
+            return $this->postOpeningStockReversal($transaction, $postedBy);
+        }
+
         if (! in_array($transaction->reason, self::LOSS_REASONS, true)) {
             return null;
         }
@@ -222,6 +230,50 @@ final class InventoryAdjustmentPoster
                     'meta' => [
                         'inventory_transaction_id' => $transaction->id,
                         'reason' => 'Opening Stock',
+                    ],
+                ],
+            ],
+            postedBy: $postedBy,
+        );
+    }
+
+    /**
+     * Reverses an opening stock entry against equity instead of expense, so that
+     * fixing a count typo before go-live leaves no phantom operating cost behind.
+     */
+    private function postOpeningStockReversal(InventoryTransaction $transaction, ?int $postedBy): ?JournalEntry
+    {
+        $amount = round((float) $transaction->total_cost, 2);
+        if ($amount <= 0) {
+            return null;
+        }
+
+        $transaction->loadMissing('item');
+        $isAlcohol = (bool) $transaction->item?->is_alcohol;
+        $inventoryCode = $isAlcohol ? AccountCodes::INVENTORY_LIQUOR : AccountCodes::INVENTORY_FOOD;
+
+        return $this->journal->post(
+            sourceType: 'inventory_opening_stock_reversal',
+            sourceId: (int) $transaction->id,
+            entryDate: $transaction->created_at->toDateString(),
+            businessDate: null,
+            sourceRef: 'OPEN-STK-REV #'.$transaction->id,
+            memo: 'Opening stock reversal — '.$transaction->notes,
+            lines: [
+                [
+                    'account_code' => AccountCodes::OPENING_BALANCE_EQUITY,
+                    'debit' => $amount,
+                    'meta' => [
+                        'inventory_transaction_id' => $transaction->id,
+                        'reason' => 'Opening Stock',
+                    ],
+                ],
+                [
+                    'account_code' => $inventoryCode,
+                    'credit' => $amount,
+                    'meta' => [
+                        'inventory_transaction_id' => $transaction->id,
+                        'inventory_item_id' => $transaction->inventory_item_id,
                     ],
                 ],
             ],

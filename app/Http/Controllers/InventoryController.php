@@ -396,10 +396,6 @@ class InventoryController extends Controller
             return response()->json(['message' => 'Quantity cannot be zero.'], 422);
         }
 
-        if ($validated['reason'] === 'Opening Stock' && $qty < 0) {
-            return response()->json(['message' => 'Opening Stock must use a positive quantity (stock in).'], 422);
-        }
-
         if ($qty > 0 && $validated['reason'] === 'Manual Adjustment') {
             $onHand = InventoryItem::sumQuantityAcrossLocations($item->id);
             if ($onHand <= 0) {
