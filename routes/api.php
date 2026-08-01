@@ -22,6 +22,7 @@ use App\Http\Controllers\InventoryUomController;
 use App\Http\Controllers\LaundryRequestController;
 use App\Http\Controllers\MenuCategoryController;
 use App\Http\Controllers\MenuItemController;
+use App\Http\Controllers\MenuAvailabilityController;
 use App\Http\Controllers\MenuPricingController;
 use App\Http\Controllers\MenuSubCategoryController;
 use App\Http\Controllers\PaymentMethodController;
@@ -209,6 +210,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('rooms', [PosController::class, 'rooms']);
         Route::get('active-orders', [PosController::class, 'activeOrders']);
         Route::get('menu', [PosController::class, 'menu']);
+        Route::get('menu-visibility', [PosController::class, 'menuVisibility']);
         Route::post('orders', [PosController::class, 'openOrder']);
         Route::get('orders/history', [PosController::class, 'orderHistory']);
         Route::get('orders/{order}', [PosController::class, 'getOrder']);
@@ -271,6 +273,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('menu-items', MenuItemController::class);
     Route::get('menu-pricing', [MenuPricingController::class, 'index']);
     Route::put('menu-pricing/{menuItem}', [MenuPricingController::class, 'update']);
+    Route::get('menu-availability', [MenuAvailabilityController::class, 'index']);
+    Route::patch('menu-availability', [MenuAvailabilityController::class, 'update']);
     Route::apiResource('menu-dietary-types', DietaryTypeController::class);
     Route::apiResource('menu-combos', ComboController::class);
 

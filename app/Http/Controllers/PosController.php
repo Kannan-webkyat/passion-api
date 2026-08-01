@@ -4815,6 +4815,321 @@ class PosController extends Controller
 
     // ── Menu for POS ──────────────────────────────────────────────────────────
 
+    /**
+     * Diagnose why a menu item is / isn't visible on POS for an outlet,
+     * and why it may show as Sold Out even when “kitchen has stock”.
+     */
+    public function menuVisibility(Request $request)
+    {
+        $user = auth()->user();
+        $allowed = $user
+            && (
+                $user->hasRole('Admin')
+                || $user->hasRole('Super Admin')
+                || $user->can('pos-order')
+                || $user->can('manage-menu')
+            );
+        if (! $allowed) {
+            abort(403, 'Unauthorized action.');
+        }
+
+        $validated = $request->validate([
+            'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'menu_item_id' => 'required|exists:menu_items,id',
+        ]);
+
+        $restaurantId = (int) $validated['restaurant_id'];
+        $this->authorizeRestaurantId($restaurantId);
+
+        $restaurant = RestaurantMaster::findOrFail($restaurantId);
+        $item = MenuItem::with([
+            'category',
+            'variants',
+            'inventoryItem',
+            'recipe.ingredients.inventoryItem',
+        ])->findOrFail((int) $validated['menu_item_id']);
+
+        $checks = [];
+        $push = function (string $id, bool $ok, string $label, ?string $fix = null, ?string $detail = null) use (&$checks) {
+            $checks[] = compact('id', 'ok', 'label', 'fix', 'detail');
+        };
+
+        $push(
+            'item_active',
+            (bool) $item->is_active,
+            'Menu item is active',
+            $item->is_active ? null : 'Turn on Is Active under Menu Configuration.'
+        );
+
+        $categoryOk = $item->category && (bool) $item->category->is_active;
+        $push(
+            'category_active',
+            $categoryOk,
+            'Menu category is active',
+            $categoryOk ? null : 'Activate the category (or move the item to an active category).',
+            $item->category?->name
+        );
+
+        $kitchenOk = (bool) ($restaurant->kitchen_location_id || $restaurant->bar_location_id);
+        $push(
+            'kitchen_bar_mapped',
+            $kitchenOk,
+            'Outlet has kitchen and/or bar store mapped',
+            $kitchenOk ? null : 'Set kitchen/bar store on the restaurant (Outlets). Without this, POS menu returns an error for the whole outlet.'
+        );
+
+        $rmi = RestaurantMenuItem::where('menu_item_id', $item->id)
+            ->where('restaurant_master_id', $restaurantId)
+            ->first();
+
+        $linked = (bool) $rmi;
+        $push(
+            'outlet_linked',
+            $linked,
+            'Item is linked to this outlet',
+            $linked ? null : 'Open Menu Configuration → edit item → add this restaurant under Outlets.'
+        );
+
+        $outletActive = $linked && (bool) ($rmi->is_active ?? false);
+        $push(
+            'outlet_active',
+            $outletActive,
+            'Outlet link is active (On)',
+            ! $linked
+                ? 'Link the outlet first.'
+                : ($outletActive ? null : 'Enable the outlet toggle for this item (Menu Pricing or Menu Configuration).')
+        );
+
+        $variants = $item->variants ?? collect();
+        $hasVariants = $variants->isNotEmpty();
+        $sellOk = false;
+        $sellDetail = null;
+
+        if ($linked) {
+            if ($hasVariants) {
+                $priced = [];
+                foreach ($variants as $v) {
+                    $rvi = RestaurantMenuItemVariant::where('restaurant_menu_item_id', $rmi->id)
+                        ->where('menu_item_variant_id', $v->id)
+                        ->first();
+                    $price = $rvi ? (float) $rvi->price : (float) ($v->price ?? 0);
+                    $priced[] = [
+                        'size' => $v->size_label,
+                        'price' => $price,
+                        'source' => $rvi ? 'outlet_override' : 'variant_base_fallback',
+                    ];
+                    if ($price > 0) {
+                        $sellOk = true;
+                    }
+                }
+                $sellDetail = collect($priced)->map(fn ($p) => $p['size'].': ₹'.$p['price'].' ('.$p['source'].')')->implode('; ');
+                $push(
+                    'sell_price',
+                    $sellOk,
+                    'At least one variant has sell price > 0 at this outlet',
+                    $sellOk
+                        ? null
+                        : 'Set variant prices under Menu Pricing for this outlet. POS hides items when all size prices are 0.',
+                    $sellDetail
+                );
+            } else {
+                $sellOk = (float) ($rmi->price ?? 0) > 0;
+                $push(
+                    'sell_price',
+                    $sellOk,
+                    'Outlet sell price is > 0',
+                    $sellOk
+                        ? null
+                        : 'Set Sell ₹ for this outlet under Menu Pricing. Recipe cost alone does not make the item appear.',
+                    'Outlet price: ₹'.number_format((float) ($rmi->price ?? 0), 2)
+                );
+            }
+        } else {
+            $push(
+                'sell_price',
+                false,
+                $hasVariants
+                    ? 'At least one variant has sell price > 0 at this outlet'
+                    : 'Outlet sell price is > 0',
+                'Link the outlet first, then set prices in Menu Pricing.'
+            );
+        }
+
+        $hasRecipe = (bool) $item->recipe;
+        $push(
+            'recipe',
+            true,
+            'Recipe / BOM',
+            null,
+            $hasRecipe
+                ? 'Recipe is present (costing / stock). Recipe does NOT control POS visibility.'
+                : 'No recipe linked — item can still appear on POS if linked + priced. Stock may be untracked.'
+        );
+
+        $blocking = collect($checks)->where('ok', false)->whereNotIn('id', ['recipe'])->values();
+        $visible = $blocking->isEmpty();
+
+        // ── Stock / Sold Out diagnosis (item can be visible but not sellable) ──
+        $kitchenStore = $this->getKitchenLocationForRestaurant($restaurant);
+        $barStore = $this->getBarLocationForRestaurant($restaurant);
+        $storeResolver = $this->storeResolver();
+        $recipe = $item->recipe;
+        $stock = [
+            'mode' => 'untracked',
+            'sold_out' => false,
+            'available_qty' => null,
+            'store' => null,
+            'summary' => 'Not stock-tracked on POS (available_qty is null).',
+            'fix' => null,
+            'details' => [],
+        ];
+
+        if ($recipe && (bool) ($recipe->requires_production ?? true)) {
+            $businessDate = BusinessDateService::resolve($restaurant);
+            $batchPool = app(BatchProductionPoolService::class);
+            $produced = (float) $batchPool->producedByMenuItem($businessDate, [$item->id])->get($item->id, 0);
+            $committed = (float) $batchPool->committedSalesByMenuItem(
+                [$item->id],
+                $businessDate,
+                null,
+                false,
+                $restaurantId,
+            )->get($item->id, 0);
+            $avail = max(0, $produced - $committed);
+
+            $rawKitchenNotes = [];
+            if ($kitchenStore && $recipe->ingredients->isNotEmpty()) {
+                foreach ($recipe->ingredients->take(5) as $ing) {
+                    if (! $ing->inventory_item_id) {
+                        continue;
+                    }
+                    $qty = $storeResolver->quantityAt((int) $ing->inventory_item_id, (int) $kitchenStore->id);
+                    $rawKitchenNotes[] = ($ing->inventoryItem?->name ?? '#'.$ing->inventory_item_id).' at Kitchen: '.$qty.' (ignored for batch availability)';
+                }
+            }
+
+            $stock = [
+                'mode' => 'batch_production',
+                'sold_out' => $avail <= 0,
+                'available_qty' => $avail,
+                'store' => null,
+                'business_date' => $businessDate,
+                'produced' => $produced,
+                'committed_sales' => $committed,
+                'summary' => 'Batch recipe: POS uses today’s production pool, not raw kitchen ingredient qty.',
+                'fix' => $avail > 0
+                    ? null
+                    : 'Produce portions for this recipe (Kitchen / Production) for business date '.$businessDate.'. Raw kitchen stock alone will not clear Sold Out. Or switch recipe to Made-to-order (requires_production = false) if POS should use ingredient stock.',
+                'details' => [
+                    'Recipe requires_production = true',
+                    'Produced today: '.$produced,
+                    'Committed sales: '.$committed,
+                    'Available portions: '.$avail,
+                    ...$rawKitchenNotes,
+                ],
+            ];
+        } elseif ($item->inventory_item_id) {
+            $targetStore = $storeResolver->resolve($item, $kitchenStore, $barStore, $restaurant, $recipe);
+            $phys = $targetStore
+                ? $storeResolver->quantityAt((int) $item->inventory_item_id, (int) $targetStore->id)
+                : 0.0;
+            $kitchenQty = $kitchenStore
+                ? $storeResolver->quantityAt((int) $item->inventory_item_id, (int) $kitchenStore->id)
+                : null;
+            $barQty = $barStore
+                ? $storeResolver->quantityAt((int) $item->inventory_item_id, (int) $barStore->id)
+                : null;
+            $stock = [
+                'mode' => 'finished_good',
+                'sold_out' => $phys <= 0,
+                'available_qty' => max(0, $phys),
+                'store' => $targetStore ? [
+                    'id' => $targetStore->id,
+                    'name' => $targetStore->name,
+                    'type' => $targetStore->type,
+                ] : null,
+                'summary' => 'Direct inventory SKU — POS checks stock at the deduction store for this outlet.',
+                'fix' => $phys > 0
+                    ? null
+                    : 'Move / transfer stock into '.($targetStore?->name ?? 'the mapped kitchen/bar store').'. Stock sitting only in Main Store (or the other outlet store) will still show Sold Out.',
+                'details' => array_values(array_filter([
+                    'Inventory item: '.($item->inventoryItem?->name ?? '#'.$item->inventory_item_id),
+                    'Uses bar rules: '.($storeResolver->usesBarStore($item, $restaurant, $barStore, $kitchenStore) ? 'yes' : 'no'),
+                    $kitchenStore ? 'Kitchen ('.$kitchenStore->name.'): '.$kitchenQty : null,
+                    $barStore ? 'Bar ('.$barStore->name.'): '.$barQty : null,
+                    $targetStore ? 'POS checks: '.$targetStore->name.' = '.$phys : 'No kitchen/bar store resolved',
+                ])),
+            ];
+        } elseif ($recipe && ! (bool) ($recipe->requires_production ?? true)) {
+            $usesBar = $storeResolver->usesBarStore($item, $restaurant, $barStore, $kitchenStore);
+            $targetStore = $usesBar ? ($barStore ?? $kitchenStore) : ($kitchenStore ?? $barStore);
+            $stockMap = $storeResolver->stockMapAtLocation($targetStore);
+            $soldOut = $storeResolver->mtoRecipeIsSoldOut($recipe, $item, $stockMap);
+            $multiplier = 1 / max(0.001, (float) $recipe->yield_quantity);
+            $requirements = $this->bomExpander()->flattenedRequirements($recipe, $multiplier);
+            $short = [];
+            foreach ($requirements as $invId => $need) {
+                $have = (float) ($stockMap[$invId] ?? 0);
+                if ($have < $need) {
+                    $inv = InventoryItem::find($invId);
+                    $short[] = ($inv?->name ?? '#'.$invId).': need '.$need.', have '.$have.' at '.($targetStore?->name ?? 'store');
+                }
+            }
+            if ($requirements === []) {
+                $short[] = 'Recipe has no usable ingredients (empty BOM) — POS treats as Sold Out.';
+            }
+            $stock = [
+                'mode' => 'made_to_order',
+                'sold_out' => $soldOut,
+                'available_qty' => $soldOut ? 0 : null,
+                'store' => $targetStore ? [
+                    'id' => $targetStore->id,
+                    'name' => $targetStore->name,
+                    'type' => $targetStore->type,
+                ] : null,
+                'summary' => 'Made-to-order: POS checks recipe ingredients at kitchen/bar (not “any kitchen stock”).',
+                'fix' => ! $soldOut
+                    ? null
+                    : (count($short)
+                        ? 'Short ingredients at '.($targetStore?->name ?? 'mapped store').'. Transfer those SKUs there, or fix BOM quantities.'
+                        : 'Insufficient ingredient stock at the mapped store.'),
+                'details' => array_values(array_filter([
+                    'Uses bar store: '.($usesBar ? 'yes' : 'no'),
+                    'Yield qty: '.(float) ($recipe->yield_quantity ?? 1),
+                    ...$short,
+                ])),
+            ];
+        }
+
+        return response()->json([
+            'visible_in_pos' => $visible,
+            'restaurant' => [
+                'id' => $restaurant->id,
+                'name' => $restaurant->name,
+                'kitchen_location_id' => $restaurant->kitchen_location_id,
+                'bar_location_id' => $restaurant->bar_location_id,
+            ],
+            'menu_item' => [
+                'id' => $item->id,
+                'name' => $item->name,
+                'item_code' => $item->item_code,
+                'has_variants' => $hasVariants,
+                'inventory_item_id' => $item->inventory_item_id,
+                'is_direct_sale' => (bool) $item->is_direct_sale,
+                'requires_production_flag' => (bool) ($item->requires_production ?? true),
+                'recipe_requires_production' => $recipe ? (bool) ($recipe->requires_production ?? true) : null,
+            ],
+            'checks' => $checks,
+            'blocking_reasons' => $blocking->pluck('fix')->filter()->values(),
+            'stock' => $stock,
+            'note' => $visible
+                ? ($stock['sold_out']
+                    ? 'Item appears on POS but is Sold Out. See stock.fix — kitchen raw stock is often the wrong place to look.'
+                    : 'Item should appear on POS for this outlet and is not marked sold out by stock rules.')
+                : 'Fix the failed visibility checks above. Most common: outlet not linked, or sell/variant price is 0.',
+        ]);
+    }
+
     public function menu(Request $request)
     {
         $this->checkPermission('pos-order');
