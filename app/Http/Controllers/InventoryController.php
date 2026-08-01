@@ -243,23 +243,26 @@ class InventoryController extends Controller
     public function stats()
     {
         InventoryAuthorization::assertViewCatalog();
-        $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom')->get();
-        $sums = DB::table('inventory_item_locations')
-            ->whereIn('inventory_item_id', $items->pluck('id'))
-            ->groupBy('inventory_item_id')
-            ->selectRaw('inventory_item_id, COALESCE(SUM(quantity), 0) as total')
-            ->pluck('total', 'inventory_item_id');
 
-        $qty = fn(InventoryItem $i) => (float) ($sums[$i->id] ?? 0);
+        // Aggregate in SQL: hydrating every item + relations here duplicated the
+        // /inventory/items payload on each dashboard load.
+        $locationSums = DB::table('inventory_item_locations')
+            ->selectRaw('inventory_item_id, SUM(quantity) as qty')
+            ->groupBy('inventory_item_id');
 
-        $totalValue = $items->sum(fn($i) => $qty($i) * ($i->cost_price / ($i->conversion_factor ?: 1)));
-        $lowStockCount = $items->filter(fn($i) => $qty($i) <= (float) $i->reorder_level)->count();
+        $totals = DB::table('inventory_items as i')
+            ->leftJoinSub($locationSums, 'l', 'l.inventory_item_id', '=', 'i.id')
+            ->selectRaw('COUNT(*) as total_items')
+            ->selectRaw('COALESCE(SUM(COALESCE(l.qty, 0) * COALESCE(i.cost_price, 0) / IF(COALESCE(i.conversion_factor, 0) = 0, 1, i.conversion_factor)), 0) as total_value')
+            ->selectRaw('SUM(CASE WHEN COALESCE(l.qty, 0) <= COALESCE(i.reorder_level, 0) THEN 1 ELSE 0 END) as low_stock_count')
+            ->first();
+
         $recentTx = InventoryTransaction::with(['item', 'location'])->latest()->take(10)->get();
 
         return response()->json([
-            'total_items' => $items->count(),
-            'total_value' => $totalValue,
-            'low_stock_count' => $lowStockCount,
+            'total_items' => (int) ($totals->total_items ?? 0),
+            'total_value' => (float) ($totals->total_value ?? 0),
+            'low_stock_count' => (int) ($totals->low_stock_count ?? 0),
             'recent_transactions' => $recentTx,
         ]);
     }
