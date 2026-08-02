@@ -106,6 +106,12 @@ class SettingController extends Controller
             }
             $path = $request->file('logo')->store('receipt-logos', 'public');
             Setting::set('receipt_logo_path', $path);
+        } elseif ($request->boolean('remove_logo')) {
+            $old = Setting::get('receipt_logo_path');
+            if ($old && Storage::disk('public')->exists($old)) {
+                Storage::disk('public')->delete($old);
+            }
+            Setting::set('receipt_logo_path', '');
         }
 
         return response()->json(Setting::getReceiptDefaults());
