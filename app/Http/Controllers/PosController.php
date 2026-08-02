@@ -5365,7 +5365,10 @@ class PosController extends Controller
                         $item->price_tax_inclusive = (bool) ($rmi->price_tax_inclusive ?? true);
                     }
                     if ($item->variants && $item->variants->isNotEmpty()) {
-                        $item->variants = $item->variants->map(function ($v) use ($rmi, $rviByRmiAndVariant) {
+                        // Must be setRelation, not `$item->variants = ...`: toArray() merges
+                        // relations after attributes, so a plain assign is silently dropped
+                        // and the outlet price falls back to the global variant price.
+                        $item->setRelation('variants', $item->variants->map(function ($v) use ($rmi, $rviByRmiAndVariant) {
                             $price = (float) $v->price;
                             if ($rmi) {
                                 $rvi = $rviByRmiAndVariant->get($rmi->id . '_' . $v->id);
@@ -5375,9 +5378,9 @@ class PosController extends Controller
                             }
 
                             return ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $price, 'ml_quantity' => (float) ($v->ml_quantity ?? 1)];
-                        })->values();
+                        })->values());
                     } else {
-                        $item->variants = [];
+                        $item->setRelation('variants', collect());
                     }
                     $item->requires_production = (bool) $item->requires_production;
                     if ($batchProducedByMenuId->has($item->id)) {
@@ -5431,9 +5434,9 @@ class PosController extends Controller
             $categories->each(function ($cat) use ($physicalStock, $legacyBatchProduced, $legacyBatchCommitted) {
                 $cat->items->each(function ($item) use ($physicalStock, $legacyBatchProduced, $legacyBatchCommitted) {
                     if ($item->variants && $item->variants->isNotEmpty()) {
-                        $item->variants = $item->variants->map(fn($v) => ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $v->price, 'ml_quantity' => (float) ($v->ml_quantity ?? 1)])->values();
+                        $item->setRelation('variants', $item->variants->map(fn($v) => ['id' => $v->id, 'size_label' => $v->size_label, 'price' => (string) $v->price, 'ml_quantity' => (float) ($v->ml_quantity ?? 1)])->values());
                     } else {
-                        $item->variants = [];
+                        $item->setRelation('variants', collect());
                     }
                     $item->requires_production = (bool) $item->requires_production;
                     if ($legacyBatchProduced->has($item->id)) {
@@ -5453,7 +5456,7 @@ class PosController extends Controller
         // Hide items that are not sellable (no positive outlet/base/variant price).
         $categories = $categories
             ->map(function ($cat) {
-                $cat->items = collect($cat->items)->filter(function ($item) {
+                $cat->setRelation('items', collect($cat->items)->filter(function ($item) {
                     $variants = collect($item->variants ?? []);
                     if ($variants->isNotEmpty()) {
                         return $variants->contains(function ($v) {
@@ -5464,7 +5467,7 @@ class PosController extends Controller
                     }
 
                     return (float) ($item->price ?? 0) > 0;
-                })->values();
+                })->values());
 
                 return $cat;
             })
