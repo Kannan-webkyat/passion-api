@@ -5,12 +5,28 @@ namespace App\Http\Controllers;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\InventoryTransaction;
+use App\Models\InventoryTax;
+use App\Exceptions\LiquorTaxValidationException;
+use App\Services\LiquorTaxValidator;
+use App\Services\Accounting\InventoryAdjustmentPoster;
+use App\Services\Accounting\InventoryConsumptionPoster;
+use App\Services\Accounting\LedgerBackedTransaction;
+use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class InventoryController extends Controller
 {
+    /** Positive quantity always reduces stock (units lost). */
+    private const STOCK_OUT_REASONS = [
+        'Wastage',
+        'Expired',
+        'Breakage',
+        'Theft',
+        'Staff meal',
+    ];
+
     /**
      * Cost per issue UOM from purchase-UOM cost (matches GRN, POS deductions, stock valuation report).
      * cost_price = per purchase unit; conversion_factor = issue units per 1 purchase unit.
@@ -49,6 +65,20 @@ class InventoryController extends Controller
         }
     }
 
+    /** @param  array<string, mixed>  $validated */
+    private function validateItemMasterTaxMapping(array $validated): void
+    {
+        $tax = isset($validated['tax_id'])
+            ? InventoryTax::query()->find($validated['tax_id'])
+            : null;
+
+        LiquorTaxValidator::validateItemMasterTax(
+            (bool) $validated['is_alcohol'],
+            $tax?->type,
+            $validated['name'] ?? null
+        );
+    }
+
     /** Empty or whitespace-only SKU is stored as null (multiple nulls allowed under unique). */
     private function mergeNormalizedSku(Request $request): void
     {
@@ -62,6 +92,8 @@ class InventoryController extends Controller
 
     public function index()
     {
+        InventoryAuthorization::assertViewCatalog();
+
         $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'locations')->orderBy('name')->get();
         $sums = DB::table('inventory_item_locations')
             ->whereIn('inventory_item_id', $items->pluck('id'))
@@ -92,7 +124,6 @@ class InventoryController extends Controller
             'cost_price' => 'nullable|numeric|min:0',
             'inspection_penalty_charge' => 'nullable|numeric|min:0',
             'reorder_level' => 'nullable|numeric|min:0',
-            'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
             'is_alcohol' => 'nullable|boolean',
@@ -105,37 +136,23 @@ class InventoryController extends Controller
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
         $this->normalizeAlcoholLiquorFields($validated);
+
+        try {
+            $this->validateItemMasterTaxMapping($validated);
+        } catch (LiquorTaxValidationException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        if ($request->has('current_stock') && (float) $request->input('current_stock') > 0) {
+            return response()->json([
+                'message' => 'Do not set stock when creating an item. After saving, use Adjust Stock → Opening Stock.',
+            ], 422);
+        }
+
         $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
         $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
+        $validated['current_stock'] = 0;
         $item = InventoryItem::create($validated);
-
-        $purchaseUnitCost = (float) $validated['cost_price'];
-
-        $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
-            $purchaseUnitCost,
-            (float) ($validated['conversion_factor'] ?? 1)
-        );
-
-        if ($item->current_stock > 0) {
-            $mainStore = \App\Models\InventoryLocation::where('type', 'main_store')->first();
-            if ($mainStore) {
-                DB::table('inventory_item_locations')->updateOrInsert(
-                    ['inventory_item_id' => $item->id, 'inventory_location_id' => $mainStore->id],
-                    ['quantity' => $item->current_stock, 'reorder_level' => $item->reorder_level, 'updated_at' => now(), 'created_at' => now()]
-                );
-
-                InventoryTransaction::create([
-                    'inventory_item_id' => $item->id,
-                    'inventory_location_id' => $mainStore->id,
-                    'type' => 'in',
-                    'quantity' => $item->current_stock,
-                    'unit_cost' => $issueUnitCost,
-                    'total_cost' => round($item->current_stock * $issueUnitCost, 2),
-                    'reason' => 'Initial Stock',
-                    'user_id' => auth()->id(),
-                ]);
-            }
-        }
 
         InventoryItem::syncStoredCurrentStockFromLocations($item->id);
         $item->refresh();
@@ -145,6 +162,8 @@ class InventoryController extends Controller
 
     public function show(InventoryItem $item)
     {
+        InventoryAuthorization::assertViewCatalog();
+
         $item->load('category', 'vendor', 'purchaseUom', 'issueUom', 'tax', 'transactions');
         $item->setAttribute('current_stock', (float) InventoryItem::sumQuantityAcrossLocations($item->id));
 
@@ -167,7 +186,6 @@ class InventoryController extends Controller
             'cost_price' => 'nullable|numeric|min:0',
             'inspection_penalty_charge' => 'nullable|numeric|min:0',
             'reorder_level' => 'nullable|numeric|min:0',
-            'current_stock' => 'nullable|numeric|min:0',
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
             'is_alcohol' => 'nullable|boolean',
@@ -181,42 +199,26 @@ class InventoryController extends Controller
         $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
         $this->normalizeAlcoholLiquorFields($validated);
 
-        $oldStock = $item->current_stock;
-        $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
-        $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
-        $item->update($validated);
+        try {
+            $this->validateItemMasterTaxMapping($validated);
+        } catch (LiquorTaxValidationException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
 
-        // Stored cost is per purchase UOM (WAC on GRN; manual entry same convention).
-        $purchaseUnitCost = (float) $validated['cost_price'];
-
-        $issueUnitCost = $this->issueUnitCostFromPurchaseFields(
-            $purchaseUnitCost,
-            (float) ($validated['conversion_factor'] ?? 1)
-        );
-
-        // If manual stock edit, sync with Main Store
-        if (isset($validated['current_stock']) && $validated['current_stock'] != $oldStock) {
-            $mainStore = \App\Models\InventoryLocation::where('type', 'main_store')->first();
-            if ($mainStore) {
-                DB::table('inventory_item_locations')->updateOrInsert(
-                    ['inventory_item_id' => $item->id, 'inventory_location_id' => $mainStore->id],
-                    ['quantity' => $item->current_stock, 'updated_at' => now()]
-                );
-
-                $qtyDelta = abs($item->current_stock - $oldStock);
-                InventoryTransaction::create([
-                    'inventory_item_id' => $item->id,
-                    'inventory_location_id' => $mainStore->id,
-                    'type' => $item->current_stock > $oldStock ? 'in' : 'out',
-                    'quantity' => $qtyDelta,
-                    'unit_cost' => $issueUnitCost,
-                    'total_cost' => round($qtyDelta * $issueUnitCost, 2),
-                    'reason' => 'Manual Adjustment',
-                    'notes' => 'Stock edited via Item Master',
-                    'user_id' => auth()->id(),
-                ]);
+        if ($request->has('current_stock')) {
+            $requestedStock = (float) $request->input('current_stock');
+            $actualStock = InventoryItem::sumQuantityAcrossLocations($item->id);
+            if (abs($requestedStock - $actualStock) > 1e-6) {
+                return response()->json([
+                    'message' => 'Stock cannot be changed from the item form. Use Adjust Stock (Opening Stock for first count, or Correction / Wastage for changes).',
+                ], 422);
             }
         }
+
+        $validated['cost_price'] = round((float) ($validated['cost_price'] ?? 0), 4);
+        $validated['inspection_penalty_charge'] = round((float) ($validated['inspection_penalty_charge'] ?? 0), 2);
+        unset($validated['current_stock']);
+        $item->update($validated);
 
         InventoryItem::syncStoredCurrentStockFromLocations($item->id);
 
@@ -240,23 +242,27 @@ class InventoryController extends Controller
 
     public function stats()
     {
-        $items = InventoryItem::with('category', 'vendor', 'purchaseUom', 'issueUom')->get();
-        $sums = DB::table('inventory_item_locations')
-            ->whereIn('inventory_item_id', $items->pluck('id'))
-            ->groupBy('inventory_item_id')
-            ->selectRaw('inventory_item_id, COALESCE(SUM(quantity), 0) as total')
-            ->pluck('total', 'inventory_item_id');
+        InventoryAuthorization::assertViewCatalog();
 
-        $qty = fn(InventoryItem $i) => (float) ($sums[$i->id] ?? 0);
+        // Aggregate in SQL: hydrating every item + relations here duplicated the
+        // /inventory/items payload on each dashboard load.
+        $locationSums = DB::table('inventory_item_locations')
+            ->selectRaw('inventory_item_id, SUM(quantity) as qty')
+            ->groupBy('inventory_item_id');
 
-        $totalValue = $items->sum(fn($i) => $qty($i) * ($i->cost_price / ($i->conversion_factor ?: 1)));
-        $lowStockCount = $items->filter(fn($i) => $qty($i) <= (float) $i->reorder_level)->count();
+        $totals = DB::table('inventory_items as i')
+            ->leftJoinSub($locationSums, 'l', 'l.inventory_item_id', '=', 'i.id')
+            ->selectRaw('COUNT(*) as total_items')
+            ->selectRaw('COALESCE(SUM(COALESCE(l.qty, 0) * COALESCE(i.cost_price, 0) / IF(COALESCE(i.conversion_factor, 0) = 0, 1, i.conversion_factor)), 0) as total_value')
+            ->selectRaw('SUM(CASE WHEN COALESCE(l.qty, 0) <= COALESCE(i.reorder_level, 0) THEN 1 ELSE 0 END) as low_stock_count')
+            ->first();
+
         $recentTx = InventoryTransaction::with(['item', 'location'])->latest()->take(10)->get();
 
         return response()->json([
-            'total_items' => $items->count(),
-            'total_value' => $totalValue,
-            'low_stock_count' => $lowStockCount,
+            'total_items' => (int) ($totals->total_items ?? 0),
+            'total_value' => (float) ($totals->total_value ?? 0),
+            'low_stock_count' => (int) ($totals->low_stock_count ?? 0),
             'recent_transactions' => $recentTx,
         ]);
     }
@@ -277,10 +283,24 @@ class InventoryController extends Controller
         $destLocation = isset($validated['to_location_id'])
             ? \App\Models\InventoryLocation::find($validated['to_location_id'])
             : null;
+        $qty = (float) $validated['quantity'];
 
         DB::beginTransaction();
         try {
-            // 1. Ensure source row exists (supports negative stock)
+            $sourceStock = (float) (DB::table('inventory_item_locations')
+                ->where('inventory_item_id', $item->id)
+                ->where('inventory_location_id', $sourceLocation->id)
+                ->lockForUpdate()
+                ->value('quantity') ?? 0);
+
+            if ($sourceStock + 1e-6 < $qty) {
+                DB::rollBack();
+
+                return response()->json([
+                    'message' => "Insufficient stock at {$sourceLocation->name}. Available: {$sourceStock}, requested: {$qty}.",
+                ], 422);
+            }
+
             DB::table('inventory_item_locations')->updateOrInsert(
                 ['inventory_item_id' => $item->id, 'inventory_location_id' => $sourceLocation->id],
                 ['updated_at' => now(), 'created_at' => now()]
@@ -293,7 +313,6 @@ class InventoryController extends Controller
                 ->decrement('quantity', $validated['quantity']);
 
             $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
-            $qty = (float) $validated['quantity'];
             $refId = (string) \Illuminate\Support\Str::uuid();
 
             // 3. Log OUT Transaction
@@ -341,6 +360,10 @@ class InventoryController extends Controller
 
             DB::commit();
 
+            if (! $destLocation) {
+                app(InventoryConsumptionPoster::class)->post($outTx, auth()->id());
+            }
+
             return response()->json($outTx->load('item'), 201);
         } catch (\Exception $e) {
             DB::rollBack();
@@ -361,7 +384,7 @@ class InventoryController extends Controller
             'inventory_item_id' => 'required|exists:inventory_items,id',
             'inventory_location_id' => 'required|exists:inventory_locations,id',
             'quantity' => 'required|numeric',
-            'reason' => 'required|string|in:Wastage,Expired,Breakage,Theft,Staff meal,Manual Adjustment,Correction,Components Stored,Assembled from Storage',
+            'reason' => 'required|string|in:Opening Stock,Wastage,Expired,Breakage,Theft,Staff meal,Manual Adjustment,Correction,Components Stored,Assembled from Storage',
             'notes' => 'nullable|string|max:500',
         ]);
 
@@ -373,53 +396,91 @@ class InventoryController extends Controller
             return response()->json(['message' => 'Quantity cannot be zero.'], 422);
         }
 
-        $isReduce = $qty < 0;
-        $qtyAbs = abs($qty);
+        if ($qty > 0 && $validated['reason'] === 'Manual Adjustment') {
+            $onHand = InventoryItem::sumQuantityAcrossLocations($item->id);
+            if ($onHand <= 0) {
+                return response()->json([
+                    'message' => 'For the first stock entry use reason Opening Stock, not Manual Adjustment.',
+                ], 422);
+            }
+        }
+
+        if (in_array($validated['reason'], self::STOCK_OUT_REASONS, true)) {
+            if ($qty < 0) {
+                return response()->json([
+                    'message' => 'For '.$validated['reason'].', enter the number of units lost as a positive quantity (e.g. 1).',
+                ], 422);
+            }
+            $isReduce = true;
+            $qtyAbs = $qty;
+        } else {
+            $isReduce = $qty < 0;
+            $qtyAbs = abs($qty);
+        }
 
         $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
         $lineCost = round($qtyAbs * $unitCost, 2);
 
-        DB::beginTransaction();
         try {
-            DB::table('inventory_item_locations')->updateOrInsert(
-                ['inventory_item_id' => $item->id, 'inventory_location_id' => $location->id],
-                ['updated_at' => now(), 'created_at' => now()]
+            app(LedgerBackedTransaction::class)->run(
+                mutate: function () use ($item, $location, $isReduce, $qtyAbs, $unitCost, $lineCost, $validated) {
+                    DB::table('inventory_item_locations')->updateOrInsert(
+                        ['inventory_item_id' => $item->id, 'inventory_location_id' => $location->id],
+                        ['updated_at' => now(), 'created_at' => now()]
+                    );
+
+                    if ($isReduce) {
+                        $available = (float) (DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $location->id)
+                            ->lockForUpdate()
+                            ->value('quantity') ?? 0);
+
+                        if ($available + 1e-6 < $qtyAbs) {
+                            throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                                response()->json([
+                                    'message' => "Insufficient stock at {$location->name}. Available: {$available}, requested: {$qtyAbs}.",
+                                ], 422)
+                            );
+                        }
+
+                        DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $location->id)
+                            ->decrement('quantity', $qtyAbs);
+                    } else {
+                        DB::table('inventory_item_locations')
+                            ->where('inventory_item_id', $item->id)
+                            ->where('inventory_location_id', $location->id)
+                            ->increment('quantity', $qtyAbs);
+                    }
+
+                    $transaction = InventoryTransaction::create([
+                        'inventory_item_id' => $item->id,
+                        'inventory_location_id' => $location->id,
+                        'type' => $isReduce ? 'out' : 'in',
+                        'quantity' => $qtyAbs,
+                        'unit_cost' => round($unitCost, 4),
+                        'total_cost' => $lineCost,
+                        'reason' => $validated['reason'],
+                        'notes' => $validated['notes'] ?? ($isReduce ? 'Stock reduced' : 'Stock added'),
+                        'user_id' => auth()->id(),
+                    ]);
+
+                    InventoryItem::syncStoredCurrentStockFromLocations($item->id);
+
+                    return $transaction;
+                },
+                postJournal: fn (InventoryTransaction $transaction) => app(InventoryAdjustmentPoster::class)->postStrict($transaction, auth()->id()),
+                journalRequired: fn (InventoryTransaction $transaction) => app(InventoryAdjustmentPoster::class)->isJournalRequired($transaction),
             );
-
-            if ($isReduce) {
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $item->id)
-                    ->where('inventory_location_id', $location->id)
-                    ->decrement('quantity', $qtyAbs);
-            } else {
-                DB::table('inventory_item_locations')
-                    ->where('inventory_item_id', $item->id)
-                    ->where('inventory_location_id', $location->id)
-                    ->increment('quantity', $qtyAbs);
-            }
-
-            InventoryTransaction::create([
-                'inventory_item_id' => $item->id,
-                'inventory_location_id' => $location->id,
-                'type' => $isReduce ? 'out' : 'in',
-                'quantity' => $qtyAbs,
-                'unit_cost' => round($unitCost, 4),
-                'total_cost' => $lineCost,
-                'reason' => $validated['reason'],
-                'notes' => $validated['notes'] ?? ($isReduce ? 'Stock reduced' : 'Stock added'),
-                'user_id' => auth()->id(),
-            ]);
-
-            InventoryItem::syncStoredCurrentStockFromLocations($item->id);
-
-            DB::commit();
 
             return response()->json([
                 'message' => $isReduce ? 'Stock reduced successfully.' : 'Stock added successfully.',
             ]);
+        } catch (\Illuminate\Http\Exceptions\HttpResponseException $e) {
+            throw $e;
         } catch (\Exception $e) {
-            DB::rollBack();
-
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -518,16 +579,17 @@ class InventoryController extends Controller
         $noteSuffix = $userNote !== '' ? "{$userNote} | Ref {$refId}" : "Ref {$refId}";
 
         $affectedIds = [];
+        $postedTxIds = [];
 
         try {
-            DB::transaction(function () use ($sourceId, $sourceQty, $locId, $location, $recovered, $wasted, $refId, $refType, $noteSuffix, &$affectedIds) {
-                $this->recoveryDecrementLocation($sourceId, $locId, $sourceQty, $location->department_id, $refId, $refType, 'Recovery: source consumed', $noteSuffix);
+            DB::transaction(function () use ($sourceId, $sourceQty, $locId, $location, $recovered, $wasted, $refId, $refType, $noteSuffix, &$affectedIds, &$postedTxIds) {
+                $postedTxIds[] = $this->recoveryDecrementLocation($sourceId, $locId, $sourceQty, $location->department_id, $refId, $refType, 'Recovery: source consumed', $noteSuffix);
                 $affectedIds[] = $sourceId;
 
                 foreach ($wasted as $row) {
                     $id = (int) $row['inventory_item_id'];
                     $qty = (float) $row['quantity'];
-                    $this->recoveryDecrementLocation($id, $locId, $qty, $location->department_id, $refId, $refType, 'Wastage', $noteSuffix);
+                    $postedTxIds[] = $this->recoveryDecrementLocation($id, $locId, $qty, $location->department_id, $refId, $refType, 'Wastage', $noteSuffix);
                     $affectedIds[] = $id;
                 }
 
@@ -541,6 +603,14 @@ class InventoryController extends Controller
 
             foreach (array_unique($affectedIds) as $itemId) {
                 InventoryItem::syncStoredCurrentStockFromLocations($itemId);
+            }
+
+            $consumptionPoster = app(InventoryConsumptionPoster::class);
+            foreach (array_filter($postedTxIds) as $txId) {
+                $tx = InventoryTransaction::find($txId);
+                if ($tx && $tx->reason === 'Wastage') {
+                    $consumptionPoster->post($tx, auth()->id());
+                }
             }
         } catch (\Exception $e) {
             return response()->json(['message' => $e->getMessage()], 500);
@@ -584,7 +654,7 @@ class InventoryController extends Controller
         string $refType,
         string $reason,
         string $notes
-    ): void {
+    ): int {
         $item = InventoryItem::findOrFail($inventoryItemId);
         $unitCost = floatval($item->cost_price ?? 0) / floatval($item->conversion_factor ?: 1);
         $lineCost = round($qtyAbs * $unitCost, 2);
@@ -599,7 +669,7 @@ class InventoryController extends Controller
             ->where('inventory_location_id', $locationId)
             ->decrement('quantity', $qtyAbs);
 
-        InventoryTransaction::create([
+        $tx = InventoryTransaction::create([
             'inventory_item_id' => $inventoryItemId,
             'inventory_location_id' => $locationId,
             'department_id' => $departmentId,
@@ -613,6 +683,8 @@ class InventoryController extends Controller
             'reference_id' => $refId,
             'reference_type' => $refType,
         ]);
+
+        return (int) $tx->id;
     }
 
     private function recoveryIncrementLocation(

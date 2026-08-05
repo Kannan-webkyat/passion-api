@@ -23,6 +23,8 @@ class InventoryTaxController extends Controller
 
     public function index()
     {
+        $this->checkPermission('manage-inventory');
+
         return response()->json(InventoryTax::all());
     }
 
@@ -33,7 +35,12 @@ class InventoryTaxController extends Controller
             'name' => 'required|string|max:255',
             'rate' => 'required|numeric|min:0',
             'type' => 'required|string|in:local,inter-state,vat',
+            'is_input_credit_eligible' => 'nullable|boolean',
         ]);
+
+        if (! array_key_exists('is_input_credit_eligible', $validated)) {
+            $validated['is_input_credit_eligible'] = $validated['type'] !== 'vat';
+        }
 
         $tax = InventoryTax::create($validated);
 
@@ -47,7 +54,12 @@ class InventoryTaxController extends Controller
             'name' => 'required|string|max:255',
             'rate' => 'required|numeric|min:0',
             'type' => 'required|string|in:local,inter-state,vat',
+            'is_input_credit_eligible' => 'nullable|boolean',
         ]);
+
+        if (! array_key_exists('is_input_credit_eligible', $validated)) {
+            $validated['is_input_credit_eligible'] = $validated['type'] !== 'vat';
+        }
 
         $tax->update($validated);
 

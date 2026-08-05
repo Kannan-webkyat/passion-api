@@ -24,6 +24,10 @@ class InventoryItem extends Model
         'stock_expected',
         'is_direct_sale',
         'is_prepared_item',
+        'is_alcohol',
+        'is_cess_applicable',
+        'cess_amount',
+        'liquor_category',
     ];
 
     protected $casts = [
@@ -76,6 +80,12 @@ class InventoryItem extends Model
         return $this->belongsToMany(InventoryLocation::class, 'inventory_item_locations')
             ->withPivot('quantity', 'reorder_level')
             ->withTimestamps();
+    }
+
+    public function prepRecipe()
+    {
+        return $this->hasOne(Recipe::class, 'output_inventory_item_id')
+            ->where('recipe_kind', Recipe::KIND_SEMI_FINISHED);
     }
 
     /**

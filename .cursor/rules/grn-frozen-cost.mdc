@@ -1,0 +1,42 @@
+---
+description: GRN inventory cost must be read only from frozen grn_items/grns fields
+globs:
+  - "**/*Grn*"
+  - "**/grn*"
+  - "**/InventoryReport*"
+  - "**/GrnItemCostSnapshot*"
+  - "**/GrnFrozenCost*"
+  - "**/LandedCostAllocator*"
+alwaysApply: false
+---
+
+# GRN frozen cost (read-only)
+
+## Terminology (never mix)
+
+| Concept | Source | API / UI fields |
+|---------|--------|-----------------|
+| **Vendor Spend** | PO (`purchase_order_items`) | `vendor_unit_rate`, `vendor_spend_total` |
+| **Inventory Cost (WAC)** | GRN frozen (`grn_items`) | `cost_snapshot`, `posted_unit_cost` |
+
+`ProcurementCostTerminology` (backend) / `procurementCostTerminology.ts` (frontend) are the canonical labels.
+
+## Allowed sources for inventory cost (approved GRNs)
+
+Read **only** from:
+
+- `grn_items.merchandise_unit_cost`, `cess_unit_cost`, `freight_unit_cost`, `landed_unit_cost`
+- `grn_items.line_subtotal_accepted`, `line_cess_accepted`, `line_freight_allocated`
+- `grns.inventory_costing_mode`
+- `GrnItemCostSnapshot::fromGrnItem()` (single reader class)
+
+## Forbidden for cost reads
+
+- `purchase_order_items` (unit_price, subtotal, total_cess, etc.)
+- `inventory_items.cost_price`
+- `LandedCostAllocator` at read time (approve write only in `GrnService::approve()`)
+
+Policy constants: `GrnFrozenCostPolicy`  
+API attachment: `GrnApiPresenter::withCostSnapshots()`
+
+Never recompute landed cost in controllers, reports, or serializers.

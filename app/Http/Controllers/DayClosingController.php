@@ -3,16 +3,24 @@
 namespace App\Http\Controllers;
 
 use App\Models\PosDayClosing;
+use App\Models\PosDayClosingArchive;
 use App\Models\PosOrder;
 use App\Models\PosPayment;
+use App\Models\Recipe;
 use App\Models\RestaurantMaster;
 use App\Models\StoreRequest;
+use App\Services\DayClosingService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class DayClosingController extends Controller
 {
+    public function __construct(
+        private readonly DayClosingService $dayClosing,
+    ) {}
+
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
@@ -38,6 +46,7 @@ class DayClosingController extends Controller
 
         $restaurantId = (int) $validated['restaurant_id'];
         $closedDate = $validated['date'];
+        $this->authorizeRestaurantId($restaurantId);
 
         $existing = PosDayClosing::where('restaurant_id', $restaurantId)
             ->where('closed_date', $closedDate)
@@ -45,12 +54,20 @@ class DayClosingController extends Controller
 
         $summary = $this->computeSummary($restaurantId, $closedDate);
         $inventoryPrecheck = $this->computeInventoryPrecheck($restaurantId, $closedDate);
+        $checklist = $this->dayClosing->buildChecklist(
+            $restaurantId,
+            $closedDate,
+            $summary,
+            $inventoryPrecheck,
+            (bool) $existing,
+        );
 
         return response()->json([
             'already_closed' => (bool) $existing,
             'closing' => $existing?->load('closedByUser'),
             'summary' => $summary,
             'inventory_precheck' => $inventoryPrecheck,
+            'checklist' => $checklist,
         ]);
     }
 
@@ -71,11 +88,24 @@ class DayClosingController extends Controller
 
         $restaurantId = (int) $validated['restaurant_id'];
         $closedDate = $validated['date'];
+        $this->authorizeRestaurantId($restaurantId);
 
         $closing = DB::transaction(function () use ($restaurantId, $closedDate, $validated) {
+            // Serialize against concurrent order creation on the same outlet
+            // (openOrder takes the same row lock) so a bill can't slip in between
+            // the open-orders check and the closing insert.
+            RestaurantMaster::where('id', $restaurantId)->lockForUpdate()->first();
+
+            $this->dayClosing->assertSequentialOrAbort($restaurantId, $closedDate);
+
             $summary = $this->computeSummary($restaurantId, $closedDate);
             if (($summary['open_billed_count'] ?? 0) > 0) {
                 abort(422, 'Cannot close day: there are still open or billed orders for this business date.');
+            }
+
+            $unclearedTables = $this->dayClosing->countUnclearedTables($restaurantId);
+            if ($unclearedTables > 0) {
+                abort(422, "Cannot close day: {$unclearedTables} table(s) are still occupied or cleaning. Settle/void orders and mark tables available first.");
             }
 
             $inv = $this->computeInventoryPrecheck($restaurantId, $closedDate);
@@ -92,6 +122,8 @@ class DayClosingController extends Controller
                 abort(422, 'Cannot close day: '.implode(' ', $parts));
             }
 
+            $payload = $this->closingPayloadFromSummary($summary, $validated);
+
             $existing = PosDayClosing::where('restaurant_id', $restaurantId)
                 ->where('closed_date', $closedDate)
                 ->lockForUpdate()
@@ -104,56 +136,115 @@ class DayClosingController extends Controller
                     $notes = trim($validated['notes'])."\n\n".$notes;
                 }
 
-                $existing->update([
+                $existing->update(array_merge($payload, [
                     'closed_at' => now(),
                     'closed_by' => auth()->id(),
                     'opening_balance' => $validated['opening_balance'] ?? $existing->opening_balance,
                     'closing_balance' => $validated['closing_balance'] ?? $existing->closing_balance,
-                    'total_sales' => $summary['total_sales'],
-                    'total_discount' => $summary['total_discount'],
-                    'total_tax' => $summary['total_tax'],
-                    'total_service_charge' => $summary['total_service_charge'],
-                    'total_tip' => $summary['total_tip'],
-                    'total_paid' => $summary['total_paid'],
-                    'cash_total' => $summary['cash_total'],
-                    'card_total' => $summary['card_total'],
-                    'upi_total' => $summary['upi_total'],
-                    'room_charge_total' => $summary['room_charge_total'],
-                    'order_count' => $summary['order_count'],
-                    'void_count' => $summary['void_count'],
                     'notes' => $notes ?: null,
-                ]);
+                ]));
 
                 return $existing;
             }
 
-            return PosDayClosing::create([
+            return PosDayClosing::create(array_merge($payload, [
                 'restaurant_id' => $restaurantId,
                 'closed_date' => $closedDate,
                 'closed_at' => now(),
                 'closed_by' => auth()->id(),
                 'opening_balance' => $validated['opening_balance'] ?? null,
                 'closing_balance' => $validated['closing_balance'] ?? null,
-                'total_sales' => $summary['total_sales'],
-                'total_discount' => $summary['total_discount'],
-                'total_tax' => $summary['total_tax'],
-                'total_service_charge' => $summary['total_service_charge'],
-                'total_tip' => $summary['total_tip'],
-                'total_paid' => $summary['total_paid'],
-                'cash_total' => $summary['cash_total'],
-                'card_total' => $summary['card_total'],
-                'upi_total' => $summary['upi_total'],
-                'room_charge_total' => $summary['room_charge_total'],
-                'order_count' => $summary['order_count'],
-                'void_count' => $summary['void_count'],
                 'notes' => $validated['notes'] ?? null,
-            ]);
+            ]));
         });
 
         return response()->json([
             'message' => 'Day closed successfully.',
             'closing' => $closing->load('closedByUser'),
         ], $closing->wasRecentlyCreated ? 201 : 200);
+    }
+
+    /**
+     * Unlock (reopen) a closed business day so POS can take orders again.
+     * POST /pos/day-closing/unlock
+     *
+     * Managers may only unlock the latest closed date for an outlet.
+     * Admin / Super Admin may unlock any closed date.
+     */
+    public function unlock(Request $request)
+    {
+        $this->checkPermission(DayClosingService::PERMISSION_UNLOCK);
+        $validated = $request->validate([
+            'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'date' => 'required|date',
+            'reason' => 'nullable|string|max:500',
+        ]);
+
+        $restaurantId = (int) $validated['restaurant_id'];
+        $closedDate = $validated['date'];
+        $this->authorizeRestaurantId($restaurantId);
+
+        $closing = DB::transaction(function () use ($restaurantId, $closedDate, $validated) {
+            $existing = PosDayClosing::where('restaurant_id', $restaurantId)
+                ->where('closed_date', $closedDate)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $existing) {
+                abort(422, 'This business date is not closed.');
+            }
+
+            $laterExists = PosDayClosing::where('restaurant_id', $restaurantId)
+                ->where('closed_date', '>', $closedDate)
+                ->exists();
+
+            $user = auth()->user();
+            $isAdmin = $user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'));
+            if ($laterExists && ! $isAdmin) {
+                abort(422, 'Cannot unlock: a later business date is already closed for this outlet. Unlock the latest closed date first, or ask an Admin.');
+            }
+
+            // Preserve the sealed Z-report snapshot before removing the active row,
+            // so the original figures remain auditable after re-trading/re-closing.
+            $archive = PosDayClosingArchive::create([
+                'original_id' => $existing->id,
+                'restaurant_id' => $existing->restaurant_id,
+                'closed_date' => $existing->closed_date,
+                'closed_at' => $existing->closed_at,
+                'closed_by' => $existing->closed_by,
+                'snapshot' => $existing->only($existing->getFillable()),
+                'unlocked_by' => $user?->id,
+                'unlocked_at' => now(),
+                'unlock_reason' => $validated['reason'] ?? null,
+            ]);
+
+            Log::info('pos.day_closing.unlocked', [
+                'restaurant_id' => $restaurantId,
+                'closed_date' => $closedDate,
+                'closing_id' => $existing->id,
+                'archive_id' => $archive->id,
+                'unlocked_by' => $user?->id,
+                'unlocked_by_name' => $user?->name,
+                'reason' => $validated['reason'] ?? null,
+                'snapshot' => [
+                    'total_paid' => $existing->total_paid,
+                    'order_count' => $existing->order_count,
+                    'closed_at' => $existing->closed_at?->toIso8601String(),
+                    'closed_by' => $existing->closed_by,
+                ],
+            ]);
+
+            $existing->delete();
+
+            return $existing;
+        });
+
+        return response()->json([
+            'message' => 'Day unlocked. POS can take orders for this business date again. Close the day when trading is finished.',
+            'unlocked_date' => $closedDate,
+            'restaurant_id' => $restaurantId,
+            'previous_closing_id' => $closing->id,
+        ]);
     }
 
     /**
@@ -258,7 +349,14 @@ class DayClosingController extends Controller
             'Tax',
             'Service chg',
             'Tip',
+            'Refunded',
             'Total paid',
+            'GST taxable',
+            'CGST',
+            'SGST',
+            'IGST',
+            'VAT taxable',
+            'VAT amount',
             'Cash',
             'Card',
             'UPI',
@@ -284,7 +382,14 @@ class DayClosingController extends Controller
                     $c->total_tax,
                     $c->total_service_charge,
                     $c->total_tip,
+                    $c->total_refunded ?? 0,
                     $c->total_paid,
+                    $c->gst_net_taxable ?? 0,
+                    $c->cgst_amount ?? 0,
+                    $c->sgst_amount ?? 0,
+                    $c->igst_amount ?? 0,
+                    $c->vat_net_taxable ?? 0,
+                    $c->vat_tax_amount ?? 0,
                     $c->cash_total,
                     $c->card_total,
                     $c->upi_total,
@@ -400,7 +505,13 @@ class DayClosingController extends Controller
              COALESCE(SUM(tax_amount), 0) as total_tax,
              COALESCE(SUM(service_charge_amount), 0) as total_service_charge,
              COALESCE(SUM(tip_amount), 0) as total_tip,
-             COALESCE(SUM(total_amount), 0) as total_paid'
+             COALESCE(SUM(total_amount), 0) as total_paid,
+             COALESCE(SUM(gst_net_taxable), 0) as gst_net_taxable,
+             COALESCE(SUM(vat_net_taxable), 0) as vat_net_taxable,
+             COALESCE(SUM(cgst_amount), 0) as cgst_amount,
+             COALESCE(SUM(sgst_amount), 0) as sgst_amount,
+             COALESCE(SUM(igst_amount), 0) as igst_amount,
+             COALESCE(SUM(vat_tax_amount), 0) as vat_tax_amount'
         )->first();
 
         // Refunds are attributed to the date they were PERFORMED, not the order date.
@@ -444,6 +555,12 @@ class DayClosingController extends Controller
             'total_tip' => (float) ($totals->total_tip ?? 0),
             'total_refunded' => (float) $totalRefunded,
             'total_paid' => (float) (($totals->total_paid ?? 0) - $totalRefunded),
+            'gst_net_taxable' => (float) ($totals->gst_net_taxable ?? 0),
+            'vat_net_taxable' => (float) ($totals->vat_net_taxable ?? 0),
+            'cgst_amount' => (float) ($totals->cgst_amount ?? 0),
+            'sgst_amount' => (float) ($totals->sgst_amount ?? 0),
+            'igst_amount' => (float) ($totals->igst_amount ?? 0),
+            'vat_tax_amount' => (float) ($totals->vat_tax_amount ?? 0),
             'cash_total' => $cashTotal,
             'card_total' => $cardTotal,
             'upi_total' => $upiTotal,
@@ -579,7 +696,13 @@ class DayClosingController extends Controller
         $producedQuery = DB::table('production_logs')
             ->join('recipes', 'recipes.id', '=', 'production_logs.recipe_id')
             ->join('menu_items', 'menu_items.id', '=', 'recipes.menu_item_id')
-            ->whereDate('production_logs.production_date', $closedDate);
+            ->where(function ($q) use ($closedDate) {
+                $q->whereDate('production_logs.business_date', $closedDate)
+                    ->orWhere(function ($legacy) use ($closedDate) {
+                        $legacy->whereNull('production_logs.business_date')
+                            ->whereDate('production_logs.production_date', $closedDate);
+                    });
+            });
 
         if ($kitchenId) {
             $producedQuery->where(function ($q) use ($kitchenId) {
@@ -639,6 +762,40 @@ class DayClosingController extends Controller
         usort($productionRows, fn ($a, $b) => strcmp($a['name'], $b['name']));
         $productionRows = array_slice($productionRows, 0, 40);
 
+        $prepProducedQuery = DB::table('production_logs')
+            ->join('recipes', 'recipes.id', '=', 'production_logs.recipe_id')
+            ->join('inventory_items', 'inventory_items.id', '=', 'recipes.output_inventory_item_id')
+            ->where('recipes.recipe_kind', Recipe::KIND_SEMI_FINISHED)
+            ->where(function ($q) use ($closedDate) {
+                $q->whereDate('production_logs.business_date', $closedDate)
+                    ->orWhere(function ($legacy) use ($closedDate) {
+                        $legacy->whereNull('production_logs.business_date')
+                            ->whereDate('production_logs.production_date', $closedDate);
+                    });
+            });
+
+        if ($kitchenId) {
+            $prepProducedQuery->where(function ($q) use ($kitchenId) {
+                $q->where('production_logs.inventory_location_id', $kitchenId)
+                    ->orWhereNull('production_logs.inventory_location_id');
+            });
+        }
+
+        $prepProductionRows = $prepProducedQuery
+            ->groupBy('recipes.output_inventory_item_id', 'inventory_items.name', 'inventory_items.sku')
+            ->selectRaw('recipes.output_inventory_item_id as inventory_item_id, inventory_items.name, inventory_items.sku, SUM(production_logs.quantity_produced) as qty')
+            ->orderBy('inventory_items.name')
+            ->limit(40)
+            ->get()
+            ->map(fn ($row) => [
+                'inventory_item_id' => (int) $row->inventory_item_id,
+                'name' => $row->name,
+                'sku' => $row->sku,
+                'produced' => round((float) $row->qty, 3),
+            ])
+            ->values()
+            ->all();
+
         $negCount = $negativeItems->count();
         $pendingCount = $pendingRequests->count();
 
@@ -657,9 +814,39 @@ class DayClosingController extends Controller
             ],
             'production_snapshot' => [
                 'rows' => $productionRows,
-                'note' => 'Only menu items with batch production (active recipe with “requires production”) are listed. Produced = kitchen logs for this calendar date; sold/void = POS for this business date. Implied = produced − sold − void — for review vs the physical pot (wastage/adjustments). Items sold only as made-to-order or direct sale without batch logs are omitted.',
+                'note' => 'Only menu items with batch production (active recipe with “requires production”) are listed. Produced = kitchen logs for this business date; sold/void = POS for this business date. Implied = produced − sold − void — for review vs the physical pot (wastage/adjustments). Items sold only as made-to-order or direct sale without batch logs are omitted.',
+            ],
+            'prep_production_snapshot' => [
+                'rows' => $prepProductionRows,
+                'note' => 'Semi-finished prep batches produced in Kitchen on this business date (syrups, batters, bases). Review vs physical prep stock on hand.',
             ],
             'can_close' => $negCount === 0 && $pendingCount === 0,
+        ];
+    }
+
+    /** @param  array<string, mixed>  $summary */
+    private function closingPayloadFromSummary(array $summary, array $validated): array
+    {
+        return [
+            'total_sales' => $summary['total_sales'],
+            'total_discount' => $summary['total_discount'],
+            'total_tax' => $summary['total_tax'],
+            'total_service_charge' => $summary['total_service_charge'],
+            'total_tip' => $summary['total_tip'],
+            'total_refunded' => $summary['total_refunded'] ?? 0,
+            'total_paid' => $summary['total_paid'],
+            'gst_net_taxable' => $summary['gst_net_taxable'] ?? 0,
+            'vat_net_taxable' => $summary['vat_net_taxable'] ?? 0,
+            'cgst_amount' => $summary['cgst_amount'] ?? 0,
+            'sgst_amount' => $summary['sgst_amount'] ?? 0,
+            'igst_amount' => $summary['igst_amount'] ?? 0,
+            'vat_tax_amount' => $summary['vat_tax_amount'] ?? 0,
+            'cash_total' => $summary['cash_total'],
+            'card_total' => $summary['card_total'],
+            'upi_total' => $summary['upi_total'],
+            'room_charge_total' => $summary['room_charge_total'],
+            'order_count' => $summary['order_count'],
+            'void_count' => $summary['void_count'],
         ];
     }
 }

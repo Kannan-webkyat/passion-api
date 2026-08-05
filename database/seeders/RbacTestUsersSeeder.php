@@ -13,7 +13,7 @@ class RbacTestUsersSeeder extends Seeder
 {
     public function run(): void
     {
-        // Ensure core roles exist (RolePermissionSeeder should already run).
+        // Ensure core roles exist (DefaultHotelRolesSeeder should already run).
         $adminRole = Role::firstOrCreate(['name' => 'Admin']);
         $cashierRole = Role::firstOrCreate(['name' => 'Cashier']);
         $waiterRole = Role::firstOrCreate(['name' => 'Waiter']);
@@ -69,6 +69,8 @@ class RbacTestUsersSeeder extends Seeder
         ]);
         $manager->givePermissionTo([
             'pos-day-closing',
+            'pos-day-closing-unlock',
+            'pos-business-date-override',
             'pos-discount',
             'pos-void-item',
             'pos-reopen-order',

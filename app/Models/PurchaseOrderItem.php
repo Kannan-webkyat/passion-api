@@ -10,7 +10,7 @@ class PurchaseOrderItem extends Model
         'purchase_order_id', 'inventory_item_id', 'quantity_ordered', 'quantity_received',
         'quantity_damaged_transit', 'quantity_broken_transit',
         'unit_price', 'tax_price_basis', 'subtotal',
-        'tax_rate', 'tax_amount', 'unit_cess', 'total_cess', 'total_amount',
+        'tax_rate', 'tax_type', 'tax_amount', 'unit_cess', 'total_cess', 'total_amount',
     ];
 
     public function purchaseOrder()

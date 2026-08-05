@@ -1,12 +1,14 @@
 <?php
 
 use App\Http\Controllers\AdminDashboardController;
+use App\Http\Controllers\AccountingController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\CessSlabController;
 use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
+use App\Http\Controllers\GrnController;
 use App\Http\Controllers\DietaryTypeController;
 use App\Http\Controllers\HousekeepingChecklistController;
 use App\Http\Controllers\HousekeepingController;
@@ -21,6 +23,7 @@ use App\Http\Controllers\InventoryUomController;
 use App\Http\Controllers\LaundryRequestController;
 use App\Http\Controllers\MenuCategoryController;
 use App\Http\Controllers\MenuItemController;
+use App\Http\Controllers\MenuAvailabilityController;
 use App\Http\Controllers\MenuPricingController;
 use App\Http\Controllers\MenuSubCategoryController;
 use App\Http\Controllers\PaymentMethodController;
@@ -78,6 +81,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('users', UserController::class);
     Route::get('dashboard/financial-summary', [AdminDashboardController::class, 'financialSummary']);
     Route::get('dashboard/admin-summary', [AdminDashboardController::class, 'adminSummary']);
+    Route::get('accounting/trial-balance', [AccountingController::class, 'trialBalance']);
+    Route::get('accounting/compliance/gstr1', [AccountingController::class, 'gstr1Summary']);
+    Route::get('accounting/compliance/gstr1/export', [AccountingController::class, 'gstr1Export']);
+    Route::get('accounting/compliance/kvat', [AccountingController::class, 'kvatSummary']);
+    Route::get('accounting/compliance/kvat/export', [AccountingController::class, 'kvatExport']);
     Route::apiResource('roles', RoleController::class);
     Route::apiResource('departments', DepartmentController::class);
     Route::get('permissions', [RoleController::class, 'permissions']);
@@ -189,6 +197,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::put('settings/invoice-profile', [SettingController::class, 'updateInvoiceProfile']);
     Route::get('settings/invoice-bank', [SettingController::class, 'invoiceBank']);
     Route::put('settings/invoice-bank', [SettingController::class, 'updateInvoiceBank']);
+    Route::get('settings/inventory-costing', [SettingController::class, 'inventoryCosting']);
+    Route::put('settings/inventory-costing', [SettingController::class, 'updateInventoryCosting']);
+    Route::get('settings/bom-deduction', [SettingController::class, 'bomDeduction']);
+    Route::put('settings/bom-deduction', [SettingController::class, 'updateBomDeduction']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);
@@ -207,6 +219,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('rooms', [PosController::class, 'rooms']);
         Route::get('active-orders', [PosController::class, 'activeOrders']);
         Route::get('menu', [PosController::class, 'menu']);
+        Route::get('menu-visibility', [PosController::class, 'menuVisibility']);
         Route::post('orders', [PosController::class, 'openOrder']);
         Route::get('orders/history', [PosController::class, 'orderHistory']);
         Route::get('orders/{order}', [PosController::class, 'getOrder']);
@@ -246,6 +259,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         // Day Closing
         Route::get('day-closing/preview', [DayClosingController::class, 'preview']);
         Route::post('day-closing', [DayClosingController::class, 'close']);
+        Route::post('day-closing/unlock', [DayClosingController::class, 'unlock']);
         Route::get('day-closings', [DayClosingController::class, 'index']);
         Route::get('day-closings/export', [DayClosingController::class, 'export']);
     });
@@ -268,12 +282,18 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('menu-items', MenuItemController::class);
     Route::get('menu-pricing', [MenuPricingController::class, 'index']);
     Route::put('menu-pricing/{menuItem}', [MenuPricingController::class, 'update']);
+    Route::get('menu-availability', [MenuAvailabilityController::class, 'index']);
+    Route::patch('menu-availability', [MenuAvailabilityController::class, 'update']);
     Route::apiResource('menu-dietary-types', DietaryTypeController::class);
     Route::apiResource('menu-combos', ComboController::class);
 
     // BOM / Recipe Module
     Route::get('recipes', [RecipeController::class, 'index']);
+    Route::get('recipes/production', [RecipeController::class, 'productionList']);
+    Route::get('recipes/inventory-item/{inventoryItemId}', [RecipeController::class, 'showInventoryRecipe']);
     Route::put('recipes/menu-item/{menuItemId}', [RecipeController::class, 'upsert']);
+    Route::put('recipes/inventory-item/{inventoryItemId}', [RecipeController::class, 'upsertInventoryRecipe']);
+    Route::post('recipes/preview-cost', [RecipeController::class, 'previewCost']);
     Route::post('recipes/{recipe}/produce', [RecipeController::class, 'produce']);
     Route::get('production-logs', [RecipeController::class, 'productionLogs']);
     Route::get('production-logs/{log}/details', [RecipeController::class, 'productionLogDetails']);
@@ -295,6 +315,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('reports/recovery', [InventoryReportController::class, 'recovery']);
         Route::get('reports/purchase-history', [InventoryReportController::class, 'purchaseHistory']);
         Route::get('reports/excise-bar', [InventoryReportController::class, 'exciseBar']);
+        Route::get('reports/excise-bar/export', [InventoryReportController::class, 'exciseBarExport']);
         Route::apiResource('items', InventoryController::class);
         Route::apiResource('categories', InventoryCategoryController::class);
         Route::apiResource('uoms', InventoryUomController::class);
@@ -317,6 +338,15 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('purchase-orders/{purchaseOrder}/send', [PurchaseOrderController::class, 'send']);
         Route::post('purchase-orders/{purchaseOrder}/cancel', [PurchaseOrderController::class, 'cancel']);
         Route::post('purchase-orders/{purchaseOrder}/pay', [PurchaseOrderController::class, 'pay']);
+
+        Route::get('purchase-orders/{purchaseOrder}/grn-remaining', [GrnController::class, 'poRemaining']);
+        Route::get('grns/meta', [GrnController::class, 'meta']);
+        Route::apiResource('grns', GrnController::class)->except(['destroy']);
+        Route::post('grns/{grn}/submit', [GrnController::class, 'submit']);
+        Route::post('grns/{grn}/inspect', [GrnController::class, 'inspect']);
+        Route::post('grns/{grn}/approve', [GrnController::class, 'approve']);
+        Route::post('grns/{grn}/cancel', [GrnController::class, 'cancel']);
+        Route::post('grns/{grn}/attachments', [GrnController::class, 'storeAttachment']);
 
         Route::apiResource('procurement-requisitions', ProcurementRequisitionController::class);
         Route::post('procurement-requisitions/{procurement_requisition}/request-quotes', [ProcurementRequisitionController::class, 'requestQuotes']);

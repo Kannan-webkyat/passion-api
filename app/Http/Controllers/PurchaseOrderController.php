@@ -2,11 +2,12 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\InventoryItem;
-use App\Models\InventoryLocation;
-use App\Models\InventoryTransaction;
 use App\Models\PurchaseOrder;
-use App\Models\PurchaseOrderItem;
+use App\Models\VendorPayment;
+use App\Exceptions\LiquorTaxValidationException;
+use App\Services\Accounting\VendorPaymentPoster;
+use App\Services\GrnService;
+use App\Services\InventoryAuthorization;
 use App\Services\PurchaseOrderLineAmounts;
 use App\Services\PurchaseOrderService;
 use Illuminate\Http\Request;
@@ -47,8 +48,16 @@ class PurchaseOrderController extends Controller
 
     public function index()
     {
+        InventoryAuthorization::assertViewProcurement();
+
         return response()->json(
-            PurchaseOrder::with(['vendor', 'items.inventoryItem', 'creator'])->latest()->get()
+            PurchaseOrder::with([
+                'vendor',
+                'items.inventoryItem.tax',
+                'creator',
+                'vendorPayments' => fn ($q) => $q->orderByDesc('paid_at'),
+                'vendorPayments.paidByUser:id,name',
+            ])->latest()->get()
         );
     }
 
@@ -67,6 +76,8 @@ class PurchaseOrderController extends Controller
             $po = app(PurchaseOrderService::class)->createFromValidatedData($validated);
 
             return response()->json($po, 201);
+        } catch (LiquorTaxValidationException $e) {
+            return response()->json(['message' => $e->getMessage()], 422);
         } catch (\Exception $e) {
             return response()->json(['message' => $e->getMessage()], 500);
         }
@@ -74,7 +85,16 @@ class PurchaseOrderController extends Controller
 
     public function show(PurchaseOrder $purchaseOrder)
     {
-        return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem', 'location', 'creator'));
+        InventoryAuthorization::assertViewProcurement();
+
+        return response()->json($purchaseOrder->load([
+            'vendor',
+            'items.inventoryItem.tax',
+            'location',
+            'creator',
+            'vendorPayments' => fn ($q) => $q->orderByDesc('paid_at'),
+            'vendorPayments.paidByUser:id,name',
+        ]));
     }
 
     public function update(Request $request, PurchaseOrder $purchaseOrder)
@@ -96,8 +116,6 @@ class PurchaseOrderController extends Controller
         try {
             $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items']);
             $financials = PurchaseOrderService::buildHeaderFinancials($lineTotals, $validated);
-
-            PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
 
             $purchaseOrder->update([
                 'vendor_id' => $validated['vendor_id'],
@@ -125,6 +143,7 @@ class PurchaseOrderController extends Controller
                     'tax_price_basis' => $line['tax_price_basis'],
                     'subtotal' => $line['subtotal'],
                     'tax_rate' => $line['tax_rate'] ?? 0,
+                    'tax_type' => $line['tax_type'] ?? \App\Services\PurchaseOrderLineAmounts::resolveTaxType(null),
                     'tax_amount' => $line['tax_amount'],
                     'unit_cess' => $line['unit_cess'],
                     'total_cess' => $line['total_cess'],
@@ -132,11 +151,13 @@ class PurchaseOrderController extends Controller
                 ]);
             }
 
-            PurchaseOrderService::addStockExpectedForPurchaseOrder($purchaseOrder->fresh(['items']));
-
             DB::commit();
 
-            return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem', 'location', 'creator'));
+            return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem.tax', 'location', 'creator'));
+        } catch (LiquorTaxValidationException $e) {
+            DB::rollBack();
+
+            return response()->json(['message' => $e->getMessage()], 422);
         } catch (\Exception $e) {
             DB::rollBack();
 
@@ -152,7 +173,6 @@ class PurchaseOrderController extends Controller
         }
 
         $reqId = $purchaseOrder->procurement_requisition_id;
-        PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
         $purchaseOrder->delete();
         PurchaseOrderService::syncProcurementRequisitionStatus($reqId);
 
@@ -167,9 +187,10 @@ class PurchaseOrderController extends Controller
         }
 
         $purchaseOrder->update(['status' => 'sent']);
+        PurchaseOrderService::addStockExpectedForPurchaseOrder($purchaseOrder->fresh(['items']));
         PurchaseOrderService::syncProcurementRequisitionStatus($purchaseOrder->procurement_requisition_id);
 
-        return response()->json($purchaseOrder->fresh()->load('vendor', 'items.inventoryItem', 'location', 'creator'));
+        return response()->json($purchaseOrder->fresh()->load('vendor', 'items.inventoryItem.tax', 'location', 'creator'));
     }
 
     public function cancel(Request $request, PurchaseOrder $purchaseOrder)
@@ -181,14 +202,14 @@ class PurchaseOrderController extends Controller
         }
 
         if ($purchaseOrder->status === 'cancelled') {
-            return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem', 'location', 'creator'));
+            return response()->json($purchaseOrder->load('vendor', 'items.inventoryItem.tax', 'location', 'creator'));
         }
 
         $validated = $request->validate([
             'reason' => 'nullable|string|max:500',
         ]);
 
-        if (in_array($purchaseOrder->status, ['draft', 'sent'], true)) {
+        if (in_array($purchaseOrder->status, ['sent', 'partial'], true)) {
             PurchaseOrderService::subtractStockExpectedForPurchaseOrderLines($purchaseOrder);
         }
 
@@ -202,41 +223,53 @@ class PurchaseOrderController extends Controller
 
         PurchaseOrderService::syncProcurementRequisitionStatus($purchaseOrder->procurement_requisition_id);
 
-        return response()->json($purchaseOrder->fresh()->load('vendor', 'items.inventoryItem', 'location', 'creator'));
+        return response()->json($purchaseOrder->fresh()->load('vendor', 'items.inventoryItem.tax', 'location', 'creator'));
     }
 
     public function receive(Request $request, PurchaseOrder $purchaseOrder)
     {
-        $this->checkPermission('manage-inventory');
+        InventoryAuthorization::assertInspectGrn();
 
         $validated = $request->validate([
             'location_id' => 'nullable|exists:inventory_locations,id',
             'document' => 'nullable|file|max:4096',
-            'items' => 'required|array|min:1',
-            'items.*.purchase_order_item_id' => 'required|integer',
-            'items.*.quantity_received' => 'required|integer|min:0',
-            'items.*.quantity_damaged_transit' => 'nullable|integer|min:0',
-            'items.*.quantity_broken_transit' => 'nullable|integer|min:0',
+            'items' => 'nullable|array|min:1',
+            'items.*.purchase_order_item_id' => 'required_with:items|integer',
+            'items.*.quantity_received' => 'required_with:items|numeric|min:0',
+            'items.*.quantity_rejected' => 'nullable|numeric|min:0',
+            'items.*.rejection_reason' => 'nullable|string|max:255',
         ]);
 
-        $locationId = $validated['location_id'] ?? InventoryLocation::where('type', 'main_store')->first()?->id;
-        if (! $locationId) {
-            return response()->json(['message' => 'No target location available'], 422);
-        }
+        $locationId = GrnService::resolveMainStoreLocationId(
+            isset($validated['location_id']) ? (int) $validated['location_id'] : null
+        );
 
         try {
-            $po = app(PurchaseOrderService::class)->receivePurchaseOrder(
-                $purchaseOrder,
-                (int) $locationId,
-                auth()->id()
-            );
-
-            if ($request->hasFile('document')) {
-                $path = $request->file('document')->store('po_documents', 'public');
-                $po->update(['received_document_path' => $path]);
+            $lines = null;
+            if (! empty($validated['items'])) {
+                $lines = array_map(fn ($row) => [
+                    'purchase_order_item_id' => (int) $row['purchase_order_item_id'],
+                    'quantity_received' => (float) $row['quantity_received'],
+                    'quantity_rejected' => (float) ($row['quantity_rejected'] ?? 0),
+                    'rejection_reason' => $row['rejection_reason'] ?? null,
+                ], $validated['items']);
             }
 
-            return response()->json($po->load('vendor', 'items.inventoryItem', 'creator'));
+            $grn = app(GrnService::class)->receivePurchaseOrderForInspection(
+                $purchaseOrder,
+                (int) $locationId,
+                $lines,
+                auth()->id(),
+                $request->file('document')
+            );
+
+            $po = $purchaseOrder->fresh(['vendor', 'items.inventoryItem.tax', 'location', 'creator', 'grns']);
+
+            return response()->json([
+                'purchase_order' => $po,
+                'grn' => $grn->load('items.inventoryItem.tax'),
+                'message' => 'GRN '.$grn->grn_number.' submitted — complete quality inspection before approval.',
+            ]);
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         } catch (\Exception $e) {
@@ -246,12 +279,13 @@ class PurchaseOrderController extends Controller
 
     public function pay(Request $request, PurchaseOrder $purchaseOrder)
     {
-        $this->checkPermission('manage-inventory');
+        InventoryAuthorization::assertPayVendor();
         $validated = $request->validate([
             'payment_method' => 'required|string',
             'payment_reference' => 'nullable|string',
-            'paid_amount' => 'required|numeric|min:0',
+            'paid_amount' => 'required|numeric|min:0.01',
             'invoice' => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:4096',
+            'notes' => 'nullable|string',
         ]);
 
         DB::beginTransaction();
@@ -262,28 +296,57 @@ class PurchaseOrderController extends Controller
             if (! in_array($lockedPo->status, ['received', 'partial'], true)) {
                 throw new \Exception('Only received or partial orders can be paid');
             }
-            if ($lockedPo->payment_status === 'paid') {
-                throw new \Exception('Order is already fully paid');
-            }
-
-            if ($request->hasFile('invoice')) {
-                $path = $request->file('invoice')->store('po_invoices', 'public');
-                $lockedPo->invoice_path = $path;
-            }
 
             $payable = $lockedPo->payableAmount();
-            $totalPaid = floatval($lockedPo->paid_amount) + floatval($validated['paid_amount']);
+            $alreadyPaid = round((float) $lockedPo->paid_amount, 2);
+            $paymentAmount = round((float) $validated['paid_amount'], 2);
+
+            if ($alreadyPaid + $paymentAmount > $payable + 0.01) {
+                throw new \Exception('Payment exceeds remaining payable amount');
+            }
+
+            $invoicePath = $lockedPo->invoice_path;
+            if ($request->hasFile('invoice')) {
+                $invoicePath = $request->file('invoice')->store('po_invoices', 'public');
+            }
+
+            $vendorPayment = VendorPayment::create([
+                'purchase_order_id' => $lockedPo->id,
+                'vendor_id' => $lockedPo->vendor_id,
+                'amount' => $paymentAmount,
+                'payment_method' => $validated['payment_method'],
+                'payment_reference' => $validated['payment_reference'] ?? null,
+                'paid_at' => now(),
+                'paid_by' => auth()->id(),
+                'invoice_path' => $invoicePath,
+                'notes' => $validated['notes'] ?? null,
+            ]);
+
+            $totalPaid = round($alreadyPaid + $paymentAmount, 2);
 
             $lockedPo->payment_status = $totalPaid >= $payable - 0.01 ? 'paid' : 'partially_paid';
             $lockedPo->payment_method = $validated['payment_method'];
-            $lockedPo->payment_reference = $validated['payment_reference'];
+            $lockedPo->payment_reference = $validated['payment_reference'] ?? null;
             $lockedPo->paid_amount = $totalPaid;
             $lockedPo->paid_at = now();
+            if ($invoicePath) {
+                $lockedPo->invoice_path = $invoicePath;
+            }
             $lockedPo->save();
+
+            app(VendorPaymentPoster::class)->post($vendorPayment, auth()->id());
 
             DB::commit();
 
-            return response()->json($lockedPo->load('vendor', 'items.inventoryItem', 'creator'));
+            return response()->json(
+                $lockedPo->fresh()->load([
+                    'vendor',
+                    'items.inventoryItem.tax',
+                    'creator',
+                    'vendorPayments' => fn ($q) => $q->orderByDesc('paid_at'),
+                    'vendorPayments.paidByUser:id,name',
+                ])
+            );
         } catch (\Exception $e) {
             DB::rollBack();
 

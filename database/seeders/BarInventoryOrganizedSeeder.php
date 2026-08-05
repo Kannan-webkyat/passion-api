@@ -44,10 +44,18 @@ class BarInventoryOrganizedSeeder extends Seeder
                 'email' => null,
                 'address' => 'Kerala State Beverages Corporation',
                 'is_liquor_supplier' => true,
+                'default_tax_price_basis' => 'tax_inclusive',
             ]
         );
+        $vendorUpdates = [];
         if (! $vendor->is_liquor_supplier) {
-            $vendor->update(['is_liquor_supplier' => true]);
+            $vendorUpdates['is_liquor_supplier'] = true;
+        }
+        if ($vendor->default_tax_price_basis !== 'tax_inclusive') {
+            $vendorUpdates['default_tax_price_basis'] = 'tax_inclusive';
+        }
+        if ($vendorUpdates !== []) {
+            $vendor->update($vendorUpdates);
         }
 
         $alcoholRoot = InventoryCategory::updateOrCreate(

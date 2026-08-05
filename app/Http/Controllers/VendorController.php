@@ -3,12 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\Vendor;
+use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 
 class VendorController extends Controller
 {
     public function index()
     {
+        InventoryAuthorization::assertViewCatalog();
+
         return response()->json(Vendor::orderBy('name')->get());
     }
 
@@ -26,7 +29,7 @@ class VendorController extends Controller
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
-            'phone' => 'required|string|max:20',
+            'phone' => 'nullable|string|max:20',
             'email' => 'nullable|email|max:255',
             'address' => 'nullable|string',
             'gstin' => 'nullable|string|max:15|regex:/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/',
@@ -43,6 +46,8 @@ class VendorController extends Controller
 
     public function show(Vendor $vendor)
     {
+        InventoryAuthorization::assertViewCatalog();
+
         return response()->json($vendor->load('items'));
     }
 
@@ -52,7 +57,7 @@ class VendorController extends Controller
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'contact_person' => 'nullable|string|max:255',
-            'phone' => 'required|string|max:20',
+            'phone' => 'nullable|string|max:20',
             'email' => 'nullable|email|max:255',
             'address' => 'nullable|string',
             'gstin' => 'nullable|string|max:15|regex:/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/',

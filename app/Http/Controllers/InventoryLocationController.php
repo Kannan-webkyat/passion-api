@@ -3,26 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryLocation;
+use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 
 class InventoryLocationController extends Controller
 {
-    private function checkPermission(string $permission): void
-    {
-        $user = auth()->user();
-        if (! $user) {
-            abort(401, 'Unauthenticated.');
-        }
-        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
-            return;
-        }
-        if (! $user->can($permission)) {
-            abort(403, 'Unauthorized action.');
-        }
-    }
-
     public function index(Request $request)
     {
+        InventoryAuthorization::assertViewCatalog();
+
         $query = InventoryLocation::with('department');
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
@@ -33,10 +22,10 @@ class InventoryLocationController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-inventory');
+        InventoryAuthorization::assertManage();
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name',
-            'type' => 'required|string|in:main_store,kitchen_store,sub_store,housekeeping_store,satellite',
+            'type' => 'required|string|in:main_store,kitchen_store,sub_store,bar_store,housekeeping_store,satellite',
             'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean',
         ]);
@@ -48,15 +37,17 @@ class InventoryLocationController extends Controller
 
     public function show(InventoryLocation $location)
     {
+        InventoryAuthorization::assertViewCatalog();
+
         return response()->json($location->load(['items', 'department']));
     }
 
     public function update(Request $request, InventoryLocation $location)
     {
-        $this->checkPermission('manage-inventory');
+        InventoryAuthorization::assertManage();
         $validated = $request->validate([
             'name' => 'required|string|unique:inventory_locations,name,' . $location->id,
-            'type' => 'required|string|in:main_store,kitchen_store,sub_store,housekeeping_store,satellite',
+            'type' => 'required|string|in:main_store,kitchen_store,sub_store,bar_store,housekeeping_store,satellite',
             'department_id' => 'nullable|exists:departments,id',
             'is_active' => 'boolean',
         ]);
@@ -72,7 +63,7 @@ class InventoryLocationController extends Controller
 
     public function destroy(InventoryLocation $location)
     {
-        $this->checkPermission('manage-inventory');
+        InventoryAuthorization::assertManage();
         if ($location->type === 'main_store') {
             return response()->json(['message' => 'The Main Store cannot be deleted.'], 422);
         }

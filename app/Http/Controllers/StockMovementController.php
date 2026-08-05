@@ -5,11 +5,13 @@ namespace App\Http\Controllers;
 use App\Models\InventoryTransaction;
 use App\Models\PosOrder;
 use App\Models\PosOrderItem;
+use App\Services\InventoryAuthorization;
 
 class StockMovementController extends Controller
 {
     public function index(\Illuminate\Http\Request $request)
     {
+        InventoryAuthorization::assertViewMovements();
         $query = InventoryTransaction::with(['item.issueUom', 'location', 'department']);
 
         // Smart Search (Item name, SKU, Reference, or Notes)
@@ -51,7 +53,7 @@ class StockMovementController extends Controller
             } elseif ($request->type === 'requisition') {
                 $query->where('reference_type', '=', 'requisition');
             } elseif ($request->type === 'purchase') {
-                $query->where('reference_type', '=', 'purchase_order');
+                $query->whereIn('reference_type', ['grn', 'purchase_order']);
             } elseif ($request->type === 'manual') {
                 $query->whereNull('reference_type');
             }

@@ -8,12 +8,13 @@ class ProductionLog extends Model
 {
     protected $fillable = [
         'recipe_id', 'inventory_location_id', 'quantity_produced', 'unit_cost', 'total_cost',
-        'produced_by', 'production_date', 'notes', 'reference_id',
+        'produced_by', 'production_date', 'business_date', 'notes', 'reference_id',
     ];
 
     protected $casts = [
         'quantity_produced' => 'decimal:3',
         'production_date' => 'datetime',
+        'business_date' => 'date',
     ];
 
     public function recipe()

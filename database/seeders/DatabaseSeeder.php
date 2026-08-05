@@ -18,6 +18,7 @@ class DatabaseSeeder extends Seeder
             // ---
             CessSlabSeeder::class,
             RolePermissionSeeder::class,
+            DefaultHotelRolesSeeder::class,
             DepartmentSeeder::class,
             LocationSeeder::class,
             // --

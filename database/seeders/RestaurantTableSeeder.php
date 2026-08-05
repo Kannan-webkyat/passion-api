@@ -129,7 +129,11 @@ class RestaurantTableSeeder extends Seeder
             $ottaal->update(['kitchen_location_id' => $kitchen->id]);
         }
         if ($barStore) {
-            $bar->update(['kitchen_location_id' => $barStore->id]);
+            $bar->update([
+                'kitchen_location_id' => $barStore->id,
+                'bar_location_id' => $barStore->id,
+            ]);
+            $ottaal->update(['bar_location_id' => $barStore->id]);
         } elseif ($kitchen) {
             $bar->update(['kitchen_location_id' => $kitchen->id]);
         }

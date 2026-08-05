@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class PurchaseOrder extends Model
 {
@@ -46,6 +47,16 @@ class PurchaseOrder extends Model
     public function items()
     {
         return $this->hasMany(PurchaseOrderItem::class);
+    }
+
+    public function grns(): HasMany
+    {
+        return $this->hasMany(GRN::class);
+    }
+
+    public function vendorPayments(): HasMany
+    {
+        return $this->hasMany(VendorPayment::class);
     }
 
     public function creator(): BelongsTo

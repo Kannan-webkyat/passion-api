@@ -3,12 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\InventoryUom;
+use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 
 class InventoryUomController extends Controller
 {
     public function index()
     {
+        InventoryAuthorization::assertViewCatalog();
+
         return response()->json(InventoryUom::orderBy('name')->get());
     }
 

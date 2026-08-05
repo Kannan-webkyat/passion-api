@@ -52,6 +52,9 @@ class MenuItemController extends Controller
     {
         $this->checkPermission('manage-menu');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
+        $request->merge([
+            'menu_sub_category_id' => $request->input('menu_sub_category_id') ?: null,
+        ]);
         $this->mergeNormalizedItemCode($request);
         $validated = $request->validate([
             'item_code' => 'nullable|string|max:255|unique:menu_items,item_code',
@@ -116,6 +119,9 @@ class MenuItemController extends Controller
     {
         $this->checkPermission('manage-menu');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
+        $request->merge([
+            'menu_sub_category_id' => $request->input('menu_sub_category_id') ?: null,
+        ]);
         $this->mergeNormalizedItemCode($request);
         $validated = $request->validate([
             'item_code' => 'nullable|string|max:255|unique:menu_items,item_code,'.$menuItem->id,

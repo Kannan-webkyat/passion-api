@@ -3,11 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\CessSlab;
+use App\Services\InventoryAuthorization;
 use Illuminate\Http\Request;
 
 class CessSlabController extends Controller
 {
-    private function checkPermission(): void
+    private function checkManagePermission(): void
     {
         $user = auth()->user();
         if ($user && ! $user->hasRole('Admin') && ! $user->can('manage-settings')) {
@@ -15,16 +16,23 @@ class CessSlabController extends Controller
         }
     }
 
+    private function checkReadPermission(): void
+    {
+        if (! InventoryAuthorization::canViewCatalog()) {
+            abort(403, 'Unauthorized action.');
+        }
+    }
+
     public function index()
     {
-        $this->checkPermission();
+        $this->checkReadPermission();
 
         return response()->json(CessSlab::orderBy('item_category')->orderBy('min_mrp')->get());
     }
 
     public function store(Request $request)
     {
-        $this->checkPermission();
+        $this->checkManagePermission();
         $validated = $request->validate([
             'item_category' => 'required|string|max:32',
             'min_mrp' => 'required|numeric|min:0',
@@ -43,7 +51,7 @@ class CessSlabController extends Controller
 
     public function update(Request $request, CessSlab $cessSlab)
     {
-        $this->checkPermission();
+        $this->checkManagePermission();
         $validated = $request->validate([
             'item_category' => 'sometimes|string|max:32',
             'min_mrp' => 'sometimes|numeric|min:0',
@@ -63,7 +71,7 @@ class CessSlabController extends Controller
 
     public function destroy(CessSlab $cessSlab)
     {
-        $this->checkPermission();
+        $this->checkManagePermission();
         $cessSlab->delete();
 
         return response()->json(null, 204);
