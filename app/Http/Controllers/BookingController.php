@@ -17,6 +17,7 @@ use App\Models\RoomStatusBlock;
 use App\Models\Setting;
 use App\Support\BookingInspectionChargeLines;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingRoomAvailability;
 use App\Support\BookingRoomTransferService;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
@@ -833,48 +834,16 @@ class BookingController extends Controller
             ], 422);
         }
 
-        // 1. Availability Check (Overlap) - Using BookingSegment (datetime-safe)
+        // Availability: segment overlap + hard status blocks (maintenance / hold).
+        // Dirty/cleaning only block when creating as checked_in. Re-checked under row locks before insert.
+        $availabilityEnd = $checkOutAt ?: $checkInAt->copy()->addHours(12);
         foreach ($roomIds as $roomId) {
-            $overlap = BookingSegment::where('room_id', '=', $roomId, 'and')
-                // Checked-out/completed segments must not block fresh reservations.
-                ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
-                ->where(function ($query) use ($checkInAt, $checkOutAt) {
-                    // For hour_package, checkOutAt can be computed later per-room after plan selection.
-                    // Here we still require a checkOutAt for overlap. If not provided, do a conservative check
-                    // by treating it as +12h (max package) to avoid false availability.
-                    $end = $checkOutAt ?: $checkInAt->copy()->addHours(12);
-                    $query->where('check_in_at', '<', $end)
-                        ->where('check_out_at', '>', $checkInAt);
-                })->exists();
-
-            if ($overlap) {
-                $room = Room::find($roomId, ['room_number']);
-
+            try {
+                BookingRoomAvailability::assertSellable((int) $roomId, $checkInAt, $availabilityEnd, $status);
+            } catch (ValidationException $e) {
                 return response()->json([
-                    'message' => 'Room #' . ($room?->room_number ?? (string) $roomId) . ' is already reserved for the selected dates.',
+                    'message' => collect($e->errors())->flatten()->first() ?: 'Room is not available for the selected dates.',
                 ], 422);
-            }
-
-            // 2. Room status block check (source of truth, overlap-aware)
-            $room = Room::findOrFail($roomId);
-            $startAt = $checkInAt->copy();
-            $endAt = ($checkOutAt ?: $checkInAt->copy()->addHours(12))->copy();
-            $startDate = $startAt->toDateString();
-            $endDateExclusive = $this->dateEndExclusiveFromDateTime($endAt);
-
-            $blocking = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
-                ->where('is_active', true)
-                ->where('start_date', '<', $endDateExclusive)
-                ->where('end_date', '>', $startDate)
-                ->get();
-
-            if ($blocking->contains(fn($b) => $b->status === 'maintenance')) {
-                return response()->json(['message' => "Room #{$room->room_number} is under maintenance."], 422);
-            }
-
-            // Dirty/Cleaning blocks should only prevent immediate check-in.
-            if ($status === 'checked_in' && $blocking->contains(fn($b) => in_array($b->status, ['dirty', 'cleaning'], true))) {
-                return response()->json(['message' => "Room #{$room->room_number} requires cleaning before check-in."], 422);
             }
         }
 
@@ -960,6 +929,19 @@ class BookingController extends Controller
 
             $room = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons'])->findOrFail($roomId);
 
+            try {
+                BookingRoomAvailability::assertCapacity(
+                    $room,
+                    (int) ($bookingData['adults_count'] ?? 1),
+                    (int) ($bookingData['children_count'] ?? 0),
+                    (int) ($bookingData['extra_beds_count'] ?? 0),
+                );
+            } catch (ValidationException $e) {
+                return response()->json([
+                    'message' => collect($e->errors())->flatten()->first() ?: 'Occupancy exceeds room capacity.',
+                ], 422);
+            }
+
             // Compute/check datetime and totals for hourly packages
             $finalCheckInAt = $checkInAt->copy();
             $finalCheckOutAt = $checkOutAt ? $checkOutAt->copy() : null;
@@ -1038,26 +1020,45 @@ class BookingController extends Controller
 
             $this->assignEarlyCheckinTimeFromEstimatedArrival($bookingData, $bookingUnit);
 
-            $booking = Booking::create($bookingData);
+            // Concurrent booking safety: lock the room row and re-check overlap before insert.
+            try {
+                $booking = BookingRoomAvailability::withRoomLocks([(int) $roomId], function () use (
+                    $roomId,
+                    $bookingData,
+                    $finalCheckInAt,
+                    $finalCheckOutAt,
+                    $status,
+                ) {
+                    $end = $finalCheckOutAt ?: $finalCheckInAt->copy()->addHours(12);
+                    BookingRoomAvailability::assertSellable((int) $roomId, $finalCheckInAt, $end, $status);
 
-            // Create initial Stay Segment
-            BookingSegment::create([
-                'booking_id' => $booking->id,
-                'room_id' => $roomId,
-                'check_in' => $booking->check_in,
-                'check_out' => $booking->check_out,
-                'check_in_at' => $booking->check_in_at,
-                'check_out_at' => $booking->check_out_at,
-                'rate_plan_id' => $bookingData['rate_plan_id'],
-                'adults_count' => $bookingData['adults_count'],
-                'children_count' => $bookingData['children_count'],
-                'extra_beds_count' => $bookingData['extra_beds_count'],
-                'total_price' => $bookingData['total_price'],
-                'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
-            ]);
+                    $booking = Booking::create($bookingData);
 
-            if (($validated['status'] ?? '') === 'checked_in') {
-                Room::findOrFail($roomId)->update(['status' => 'occupied']);
+                    BookingSegment::create([
+                        'booking_id' => $booking->id,
+                        'room_id' => $roomId,
+                        'check_in' => $booking->check_in,
+                        'check_out' => $booking->check_out,
+                        'check_in_at' => $booking->check_in_at,
+                        'check_out_at' => $booking->check_out_at,
+                        'rate_plan_id' => $bookingData['rate_plan_id'],
+                        'adults_count' => $bookingData['adults_count'],
+                        'children_count' => $bookingData['children_count'],
+                        'extra_beds_count' => $bookingData['extra_beds_count'],
+                        'total_price' => $bookingData['total_price'],
+                        'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
+                    ]);
+
+                    if (($status ?? '') === 'checked_in') {
+                        Room::findOrFail($roomId)->update(['status' => 'occupied']);
+                    }
+
+                    return $booking;
+                });
+            } catch (ValidationException $e) {
+                return response()->json([
+                    'message' => collect($e->errors())->flatten()->first() ?: 'Room is not available for the selected dates.',
+                ], 422);
             }
 
             $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
@@ -1399,6 +1400,68 @@ class BookingController extends Controller
         $isNewCheckout = isset($validated['status'])
             && $validated['status'] === 'checked_out'
             && $booking->status !== 'checked_out';
+
+        // When stay dates change, re-run overlap / hard-block checks (same rules as create).
+        $datesChanging = isset($validated['check_in'])
+            || isset($validated['check_out'])
+            || isset($validated['check_in_at'])
+            || isset($validated['check_out_at']);
+        $occupancyChanging = isset($validated['adults_count'])
+            || isset($validated['children_count'])
+            || isset($validated['extra_beds_count']);
+
+        if ($datesChanging && ! in_array($validated['status'] ?? $booking->status, ['cancelled', 'checked_out'], true)) {
+            $nextCheckInAt = Carbon::parse(
+                $validated['check_in_at']
+                    ?? $validated['check_in']
+                    ?? $booking->check_in_at
+                    ?? $booking->check_in
+            );
+            $nextCheckOutAt = Carbon::parse(
+                $validated['check_out_at']
+                    ?? $validated['check_out']
+                    ?? $booking->check_out_at
+                    ?? $booking->check_out
+            );
+            $unit = $validated['booking_unit'] ?? $booking->booking_unit ?? 'day';
+            if ($unit === 'day') {
+                $nextCheckInAt = $nextCheckInAt->copy()->startOfDay();
+                $nextCheckOutAt = $nextCheckOutAt->copy()->startOfDay();
+            }
+            $roomIdForCheck = (int) ($validated['room_id'] ?? $booking->room_id);
+            $statusForCheck = (string) ($validated['status'] ?? $booking->status);
+            try {
+                BookingRoomAvailability::assertSellable(
+                    $roomIdForCheck,
+                    $nextCheckInAt,
+                    $nextCheckOutAt,
+                    $statusForCheck,
+                    (int) $booking->id,
+                );
+            } catch (ValidationException $e) {
+                return response()->json([
+                    'message' => collect($e->errors())->flatten()->first() ?: 'Room is not available for the selected dates.',
+                ], 422);
+            }
+        }
+
+        if ($occupancyChanging || $datesChanging) {
+            $roomForCap = Room::with('roomType')->find((int) ($validated['room_id'] ?? $booking->room_id));
+            if ($roomForCap) {
+                try {
+                    BookingRoomAvailability::assertCapacity(
+                        $roomForCap,
+                        (int) ($validated['adults_count'] ?? $booking->adults_count ?? 1),
+                        (int) ($validated['children_count'] ?? $booking->children_count ?? 0),
+                        (int) ($validated['extra_beds_count'] ?? $booking->extra_beds_count ?? 0),
+                    );
+                } catch (ValidationException $e) {
+                    return response()->json([
+                        'message' => collect($e->errors())->flatten()->first() ?: 'Occupancy exceeds room capacity.',
+                    ], 422);
+                }
+            }
+        }
 
         $booking->update($validated);
 
@@ -3044,16 +3107,18 @@ class BookingController extends Controller
             })
             // IMPORTANT: use segments so split-stays are respected
             ->whereDoesntHave('segments', function ($q) use ($checkInAt, $checkOutAt, $excludeId) {
-                $q->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+                $q->whereNotIn('status', BookingRoomAvailability::INACTIVE_SEGMENT_STATUSES)
                     ->where('check_in_at', '<', $checkOutAt)
                     ->where('check_out_at', '>', $checkInAt)
                     ->when($excludeId, function ($sq) use ($excludeId) {
                         $sq->where('booking_id', '!=', $excludeId);
                     });
             })
-            // Exclude rooms blocked by maintenance/dirty/cleaning ranges
+            // Maintenance / hold always block; dirty & cleaning remain sellable for confirmed stays
+            // (aligned with store()). Immediate check-in is gated separately at check-in time.
             ->whereDoesntHave('statusBlocks', function ($q) use ($checkInDate, $checkOutDateExclusive) {
                 $q->where('is_active', true)
+                    ->whereIn('status', BookingRoomAvailability::HARD_BLOCK_STATUSES)
                     ->where('start_date', '<', $checkOutDateExclusive)
                     ->where('end_date', '>', $checkInDate);
             })
