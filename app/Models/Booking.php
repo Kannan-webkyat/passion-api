@@ -26,6 +26,8 @@ class Booking extends Model
         'guest_identities',
         'city',
         'country',
+        'bill_to_name',
+        'guest_gstin',
         'adults_count',
         'children_count',
         'child_ages',

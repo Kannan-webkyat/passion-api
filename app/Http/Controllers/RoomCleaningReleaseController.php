@@ -10,7 +10,8 @@ use App\Models\Room;
 use App\Models\RoomCleaningRelease;
 use App\Models\RoomCleaningReleaseAudit;
 use App\Models\RoomStatusBlock;
-use App\Models\User;
+use App\Support\CleaningReleasePriority;
+use App\Support\CleaningServiceClassification;
 use App\Services\RoomCleaningAvailabilityService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -64,19 +65,13 @@ class RoomCleaningReleaseController extends Controller
             ->where('end_date', '>', $today)
             ->first(['id', 'status', 'note']);
 
-        $staff = User::query()
-            ->whereHas('roles', fn($q) => $q->where('name', 'Housekeeping'))
-            ->orWhereHas('permissions', fn($q) => $q->where('name', self::HK_DAILY))
-            ->orderBy('name')
-            ->get(['id', 'name']);
-
         return response()->json([
             'room' => $room->load('roomType:id,name'),
             'booking' => $booking,
             'active_release' => $activeRelease,
             'dirty_block' => $dirtyBlock,
             'can_release' => (bool) Auth::user()?->can(self::HK_CLEANING_AVAILABILITY),
-            'staff' => $staff,
+            'staff' => $this->housekeepingAssignableStaff(),
         ]);
     }
 
@@ -91,9 +86,16 @@ class RoomCleaningReleaseController extends Controller
             'window_start' => 'required|date',
             'window_end' => 'required|date|after:window_start',
             'assigned_to' => 'nullable|exists:users,id',
-            'priority' => 'nullable|in:normal,urgent,vip,deep_clean',
+            'priority' => ['nullable', 'in:'.implode(',', CleaningReleasePriority::values())],
             'remarks' => 'nullable|string|max:5000',
+            'service_type' => ['nullable', 'in:'.implode(',', CleaningServiceClassification::types())],
+            'service_subtype' => ['nullable', 'in:'.implode(',', CleaningServiceClassification::otherSubtypes())],
+            'is_rerelease' => 'nullable|boolean',
         ]);
+
+        if (! empty($validated['assigned_to'])) {
+            $this->assertCanAssignHousekeepingStaff();
+        }
 
         try {
             $release = $this->availability->releaseForCleaning($validated);
@@ -110,6 +112,7 @@ class RoomCleaningReleaseController extends Controller
 
         $validated = $request->validate([
             'window_end' => 'required|date',
+            'priority' => ['nullable', 'in:'.implode(',', CleaningReleasePriority::values())],
             'remarks' => 'nullable|string|max:5000',
         ]);
 
@@ -134,6 +137,7 @@ class RoomCleaningReleaseController extends Controller
             'release_date' => 'required|date',
             'window_start' => 'required|date',
             'window_end' => 'required|date|after:window_start',
+            'priority' => ['nullable', 'in:'.implode(',', CleaningReleasePriority::values())],
             'remarks' => 'nullable|string|max:5000',
         ]);
 

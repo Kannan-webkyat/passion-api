@@ -39,6 +39,8 @@ class RoomCleaningRelease extends Model
         'window_end',
         'status',
         'priority',
+        'service_type',
+        'service_subtype',
         'assigned_to',
         'remarks',
         'started_at',

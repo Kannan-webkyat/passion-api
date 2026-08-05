@@ -15,6 +15,7 @@ class DailyRoomCleaning extends Model
         'status',
         'started_at',
         'completed_at',
+        'daily_cleaning_completed_at',
         'started_by',
         'completed_by',
         'assigned_to',
@@ -28,6 +29,7 @@ class DailyRoomCleaning extends Model
         'service_date' => 'date',
         'started_at' => 'datetime',
         'completed_at' => 'datetime',
+        'daily_cleaning_completed_at' => 'datetime',
         'front_desk_notified_at' => 'datetime',
         'checklist_done' => 'array',
     ];

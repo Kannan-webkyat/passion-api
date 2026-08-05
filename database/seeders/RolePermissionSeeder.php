@@ -45,6 +45,13 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-room-stock',
             'housekeeping-checklist-master',
             'housekeeping-cleaning-availability',
+            'housekeeping-assignable',
+            // Hospitality / rooms reports
+            'report-rooms-performance',
+            'report-front-office-flash',
+            'report-housekeeping-productivity',
+            'report-cleaning-adherence',
+            'report-channel-source-mix',
             'manage-inventory',
             // Inventory report permissions (granular)
             'inventory-report-summary',

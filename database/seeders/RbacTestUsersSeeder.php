@@ -18,6 +18,16 @@ class RbacTestUsersSeeder extends Seeder
         $cashierRole = Role::firstOrCreate(['name' => 'Cashier']);
         $waiterRole = Role::firstOrCreate(['name' => 'Waiter']);
         $kitchenRole = Role::firstOrCreate(['name' => 'Kitchen Staff']);
+        $housekeepingRole = Role::firstOrCreate(['name' => 'Housekeeping']);
+        $housekeepingRole->syncPermissions([
+            'housekeeping-dirty-rooms',
+            'housekeeping-checkout-inspection',
+            'housekeeping-cleaning-tasks',
+            'housekeeping-daily-room-cleaning',
+            'housekeeping-clean-rooms',
+            'housekeeping-laundry',
+            'housekeeping-room-stock',
+        ]);
 
         $admin = User::firstOrCreate(
             ['email' => 'admin@hotel.com'],
@@ -147,6 +157,27 @@ class RbacTestUsersSeeder extends Seeder
         }
         if ($bar) {
             $barWaiter->restaurants()->sync([$bar->id]);
+        }
+
+        // Housekeeping floor staff (assignable on cleaning / release flows)
+        $hkp = $dept('HKP');
+        $hkStaff = [
+            ['name' => 'HK Staff 1', 'email' => 'hk1@passions.local'],
+            ['name' => 'HK Staff 2', 'email' => 'hk2@passions.local'],
+            ['name' => 'HK Staff 3', 'email' => 'hk3@passions.local'],
+            ['name' => 'HK Staff 4', 'email' => 'hk4@passions.local'],
+            ['name' => 'HK Staff 5', 'email' => 'hk5@passions.local'],
+        ];
+        foreach ($hkStaff as $row) {
+            $user = User::create([
+                'name' => $row['name'],
+                'email' => $row['email'],
+                'password' => bcrypt('1'),
+            ]);
+            $user->assignRole($housekeepingRole);
+            if ($hkp) {
+                $user->departments()->sync([$hkp->id]);
+            }
         }
     }
 }

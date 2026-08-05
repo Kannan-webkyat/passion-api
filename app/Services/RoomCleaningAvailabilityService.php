@@ -10,12 +10,17 @@ use App\Models\Room;
 use App\Models\RoomCleaningRelease;
 use App\Models\RoomCleaningReleaseAudit;
 use App\Models\RoomStatusBlock;
+use App\Support\CleaningReleasePriority;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 
 class RoomCleaningAvailabilityService
 {
+    public function __construct(
+        private readonly DailyRoomCleaningClassificationService $classification,
+    ) {}
+
     /**
      * Mark overdue available windows as expired.
      */
@@ -70,6 +75,12 @@ class RoomCleaningAvailabilityService
             $bookingId = isset($data['booking_id']) ? (int) $data['booking_id'] : null;
             $blockId = $this->resolveDirtyBlockId($roomId, $releaseDate);
 
+            $classification = $this->classification->recordCleaning($roomId, $releaseDate, [
+                'service_type' => $data['service_type'] ?? null,
+                'service_subtype' => $data['service_subtype'] ?? null,
+                'is_rerelease' => (bool) ($data['is_rerelease'] ?? false),
+            ]);
+
             $cleaning = null;
             if ($this->roomIsOccupiedOnDate($roomId, Carbon::parse($releaseDate))) {
                 $cleaning = DailyRoomCleaning::firstOrCreate(
@@ -86,6 +97,7 @@ class RoomCleaningAvailabilityService
                     $cleaning->booking_id = $bookingId;
                     $cleaning->save();
                 }
+                $this->classification->prepareDailyCleaningForRelease($cleaning, $classification);
             }
 
             /** @var RoomCleaningRelease $release */
@@ -98,7 +110,9 @@ class RoomCleaningAvailabilityService
                 'window_start' => $windowStart,
                 'window_end' => $windowEnd,
                 'status' => RoomCleaningRelease::STATUS_AVAILABLE,
-                'priority' => (string) ($data['priority'] ?? 'normal'),
+                'priority' => CleaningReleasePriority::validate($data['priority'] ?? null),
+                'service_type' => $classification->serviceType,
+                'service_subtype' => $classification->serviceSubtype,
                 'assigned_to' => $data['assigned_to'] ?? null,
                 'remarks' => $data['remarks'] ?? null,
                 'is_active' => true,
@@ -110,20 +124,43 @@ class RoomCleaningAvailabilityService
                 $cleaning->save();
             }
 
-            $this->audit($release, RoomCleaningReleaseAudit::ACTION_RELEASED, $data['remarks'] ?? null, [
+            $auditMeta = [
                 'window_start' => $windowStart->toIso8601String(),
                 'window_end' => $windowEnd->toIso8601String(),
                 'priority' => $release->priority,
-            ]);
+                'service_type' => $release->service_type,
+                'service_subtype' => $release->service_subtype,
+            ];
+
+            $this->audit($release, RoomCleaningReleaseAudit::ACTION_RELEASED, $data['remarks'] ?? null, $auditMeta);
+
+            if ($classification->reclassified) {
+                $this->audit(
+                    $release,
+                    RoomCleaningReleaseAudit::ACTION_SERVICE_RECLASSIFIED,
+                    $data['remarks'] ?? null,
+                    array_merge($auditMeta, [
+                        'reason' => $classification->reason,
+                        'request' => [
+                            'service_type' => $data['service_type'] ?? null,
+                            'service_subtype' => $data['service_subtype'] ?? null,
+                            'is_rerelease' => (bool) ($data['is_rerelease'] ?? false),
+                        ],
+                    ]),
+                );
+            }
 
             HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'cleaning_released');
 
-            return $release->fresh([
+            $fresh = $release->fresh([
                 'room.roomType',
                 'booking',
                 'assignedUser:id,name',
                 'dailyRoomCleaning',
             ]);
+            $fresh->setAttribute('service_classification', $classification->toArray());
+
+            return $fresh;
         });
     }
 
@@ -244,10 +281,14 @@ class RoomCleaningAvailabilityService
         if ($release->status === RoomCleaningRelease::STATUS_EXPIRED) {
             $release->status = RoomCleaningRelease::STATUS_AVAILABLE;
         }
+        if (array_key_exists('priority', $data)) {
+            $release->priority = CleaningReleasePriority::validate($data['priority']);
+        }
         $release->save();
 
         $this->audit($release, RoomCleaningReleaseAudit::ACTION_WINDOW_EXTENDED, $data['remarks'] ?? null, [
             'window_end' => $windowEnd->toIso8601String(),
+            'priority' => $release->priority,
         ]);
 
         return $release->fresh(['room.roomType', 'assignedUser:id,name', 'startedByUser:id,name']);
@@ -272,12 +313,19 @@ class RoomCleaningAvailabilityService
         if ($release->status === RoomCleaningRelease::STATUS_EXPIRED) {
             $release->status = RoomCleaningRelease::STATUS_AVAILABLE;
         }
+        if (array_key_exists('priority', $data)) {
+            $release->priority = CleaningReleasePriority::validate($data['priority']);
+        }
+        if (array_key_exists('remarks', $data)) {
+            $release->remarks = $data['remarks'];
+        }
         $release->save();
 
         $this->audit($release, RoomCleaningReleaseAudit::ACTION_WINDOW_RESCHEDULED, $data['remarks'] ?? null, [
             'release_date' => $releaseDate,
             'window_start' => $windowStart->toIso8601String(),
             'window_end' => $windowEnd->toIso8601String(),
+            'priority' => $release->priority,
         ]);
 
         return $release->fresh(['room.roomType', 'assignedUser:id,name', 'startedByUser:id,name']);

@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers\Concerns;
 
+use App\Models\User;
+use Illuminate\Support\Collection;
+
 trait AuthorizesHousekeepingPermissions
 {
     public const HK_DIRTY = 'housekeeping-dirty-rooms';
@@ -22,6 +25,11 @@ trait AuthorizesHousekeepingPermissions
 
     public const HK_CLEANING_AVAILABILITY = 'housekeeping-cleaning-availability';
 
+    /** Permission to change staff assignment on room cleaning tasks. */
+    public const HK_ASSIGNABLE = 'housekeeping-assignable';
+
+    public const HK_STAFF_ROLE = 'Housekeeping';
+
     /** @return array<int, string> */
     private static function granularHousekeepingMenuPermissions(): array
     {
@@ -34,6 +42,24 @@ trait AuthorizesHousekeepingPermissions
             self::HK_LAUNDRY,
             self::HK_ROOM_STOCK,
         ];
+    }
+
+    /**
+     * Users who can be selected in room-cleaning assign dropdowns (Housekeeping role).
+     *
+     * @return Collection<int, User>
+     */
+    protected function housekeepingAssignableStaff(): Collection
+    {
+        return User::query()
+            ->whereHas('roles', fn ($q) => $q->where('name', self::HK_STAFF_ROLE))
+            ->orderBy('name')
+            ->get(['id', 'name']);
+    }
+
+    protected function assertCanAssignHousekeepingStaff(): void
+    {
+        $this->authorizePermissions([self::HK_ASSIGNABLE]);
     }
 
     /**

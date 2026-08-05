@@ -30,9 +30,10 @@ use App\Models\RoomStatusBlock;
 use App\Models\HousekeepingChecklistItem;
 use App\Models\RoomCleaningRelease;
 use App\Models\Setting;
-use App\Models\User;
+use App\Services\DailyRoomCleaningClassificationService;
 use App\Services\HousekeepingChecklistService;
 use App\Services\RoomCleaningAvailabilityService;
+use App\Support\CleaningServiceClassification;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\RoomParInventoryContext;
@@ -52,6 +53,7 @@ class HousekeepingController extends Controller
     public function __construct(
         private readonly HousekeepingChecklistService $checklists,
         private readonly RoomCleaningAvailabilityService $cleaningAvailability,
+        private readonly DailyRoomCleaningClassificationService $cleaningClassification,
     ) {}
 
     /**
@@ -2633,6 +2635,12 @@ class HousekeepingController extends Controller
                     'id' => (int) $release->id,
                     'status' => (string) $release->status,
                     'priority' => (string) $release->priority,
+                    'service_type' => (string) ($release->service_type ?? CleaningServiceClassification::TYPE_DAILY),
+                    'service_subtype' => $release->service_subtype,
+                    'service_label' => CleaningServiceClassification::label(
+                        (string) ($release->service_type ?? CleaningServiceClassification::TYPE_DAILY),
+                        $release->service_subtype,
+                    ),
                     'release_date' => $release->release_date?->toDateString(),
                     'window_start' => $release->window_start?->toIso8601String(),
                     'window_end' => $release->window_end?->toIso8601String(),
@@ -2650,6 +2658,7 @@ class HousekeepingController extends Controller
         return response()->json([
             'service_date' => $d,
             'rows' => $rows,
+            'staff' => $this->housekeepingAssignableStaff(),
             'checklist_template' => $this->housekeepingChecklistTemplate(HousekeepingChecklistItem::CATEGORY_DAILY_ROOM_CLEANING),
             'cleaning_availability_metrics' => $this->cleaningAvailability->dashboardMetrics(Carbon::parse($d)),
             'waiting_release_rooms' => $this->buildWaitingReleaseRooms(Carbon::parse($d)),
@@ -2735,6 +2744,11 @@ class HousekeepingController extends Controller
             }
 
             if (array_key_exists('assigned_to', $validated)) {
+                $nextAssigned = $validated['assigned_to'] !== null ? (int) $validated['assigned_to'] : null;
+                $prevAssigned = $cleaning->assigned_to !== null ? (int) $cleaning->assigned_to : null;
+                if ($nextAssigned !== $prevAssigned) {
+                    $this->assertCanAssignHousekeepingStaff();
+                }
                 $cleaning->assigned_to = $validated['assigned_to'];
             }
             if (array_key_exists('remarks', $validated)) {
@@ -2785,6 +2799,7 @@ class HousekeepingController extends Controller
             }
 
             $cleaning->save();
+            $this->cleaningClassification->markDailyCleaningCompleted($cleaning, $release);
             DB::commit();
 
             HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'daily_cleaning_status');
@@ -3162,6 +3177,52 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    private function releaseCleaningHistoryEntry(RoomCleaningRelease $release): array
+    {
+        $cleaning = $release->dailyRoomCleaning;
+        $occ = $release->completed_at ?? $release->started_at ?? $release->updated_at;
+        $staff = $release->completedByUser?->name
+            ?? $release->startedByUser?->name
+            ?? $release->assignedUser?->name;
+
+        $serviceType = (string) ($release->service_type ?? CleaningServiceClassification::TYPE_DAILY);
+        $label = CleaningServiceClassification::label($serviceType, $release->service_subtype);
+
+        $hkRemarks = trim((string) ($release->remarks ?? ''));
+        if ($hkRemarks === '' && $cleaning) {
+            $hkRemarks = trim((string) ($cleaning->remarks ?? ''));
+        }
+
+        $maintenanceNote = $cleaning ? trim((string) ($cleaning->maintenance_note ?? '')) : '';
+
+        return [
+            'source' => 'cleaning_release',
+            'record_id' => (int) $release->id,
+            'room_id' => (int) $release->room_id,
+            'source_label' => $label,
+            'service_type' => $serviceType,
+            'service_subtype' => $release->service_subtype,
+            'occurred_at' => $occ instanceof Carbon ? $occ->toIso8601String() : $occ,
+            'service_date' => $release->release_date?->toDateString(),
+            'cleaning_status' => 'Cleaned',
+            'staff_name' => $staff,
+            'remarks' => $hkRemarks !== '' ? $hkRemarks : null,
+            'inspection_status' => 'Supervisor approved',
+            'started_at' => $release->started_at?->toIso8601String(),
+            'completed_at' => $release->completed_at?->toIso8601String(),
+            'duration_minutes' => $this->cleaningHistoryDurationMinutes(
+                $release->started_at ?? $cleaning?->started_at,
+                $release->completed_at ?? $cleaning?->completed_at,
+            ),
+            'has_maintenance' => $maintenanceNote !== '',
+            'maintenance_note' => $maintenanceNote !== '' ? $maintenanceNote : null,
+            'has_issues' => false,
+        ];
+    }
+
+    /**
      * @param  \Illuminate\Support\Collection<int, DailyRoomCleaning>|\Illuminate\Database\Eloquent\Collection<int, DailyRoomCleaning>  $rows
      * @return array<string, RoomCleaningRelease>
      */
@@ -3205,30 +3266,24 @@ class HousekeepingController extends Controller
 
         $limit = min(120, max(1, (int) $request->query('limit', 60)));
 
-        $dailyRows = DailyRoomCleaning::query()
+        $readyReleases = RoomCleaningRelease::query()
             ->where('room_id', '=', $room->id, 'and')
+            ->where('status', '=', RoomCleaningRelease::STATUS_READY, 'and')
+            ->whereNotNull('daily_room_cleaning_id')
             ->with([
                 'assignedUser:id,name',
                 'startedByUser:id,name',
                 'completedByUser:id,name',
+                'dailyRoomCleaning',
             ])
-            ->orderByDesc('service_date')
+            ->orderByDesc('completed_at')
             ->orderByDesc('id')
             ->limit($limit)
             ->get();
 
-        $releasesByDate = $this->cleaningReleasesIndexedForDailyRows($dailyRows);
-        $dailyEntries = $dailyRows->map(function (DailyRoomCleaning $r) use ($releasesByDate) {
-            $dateStr = $r->service_date instanceof Carbon
-                ? $r->service_date->toDateString()
-                : Carbon::parse($r->service_date)->toDateString();
-
-            return $this->dailyCleaningHistoryEntry(
-                $r,
-                false,
-                $releasesByDate[$r->room_id . ':' . $dateStr] ?? null,
-            );
-        })->all();
+        $releaseEntries = $readyReleases
+            ->map(fn (RoomCleaningRelease $release) => $this->releaseCleaningHistoryEntry($release))
+            ->all();
 
         $jobs = HousekeepingJob::query()
             ->where('room_id', '=', $room->id, 'and')
@@ -3284,7 +3339,7 @@ class HousekeepingController extends Controller
             ];
         })->all();
 
-        $merged = array_merge($dailyEntries, $jobEntries);
+        $merged = array_merge($releaseEntries, $jobEntries);
         usort($merged, function ($a, $b) {
             return strcmp((string) ($b['occurred_at'] ?? ''), (string) ($a['occurred_at'] ?? ''));
         });
@@ -3304,12 +3359,37 @@ class HousekeepingController extends Controller
         $this->allowHousekeepingNav();
 
         $validated = $request->validate([
-            'source' => 'required|string|in:daily_service,turnover',
+            'source' => 'required|string|in:daily_service,turnover,cleaning_release',
             'id' => 'required|integer|min:1',
         ]);
 
         $source = (string) $validated['source'];
         $id = (int) $validated['id'];
+
+        if ($source === 'cleaning_release') {
+            /** @var RoomCleaningRelease|null $release */
+            $release = RoomCleaningRelease::query()
+                ->where('room_id', '=', $room->id, 'and')
+                ->where('id', '=', $id, 'and')
+                ->with([
+                    'assignedUser:id,name',
+                    'startedByUser:id,name',
+                    'completedByUser:id,name',
+                    'booking:id,first_name,last_name',
+                    'dailyRoomCleaning.consumptions.inventoryItem:id,name,sku',
+                    'dailyRoomCleaning.assignedUser:id,name',
+                    'dailyRoomCleaning.startedByUser:id,name',
+                    'dailyRoomCleaning.completedByUser:id,name',
+                    'dailyRoomCleaning.booking:id,first_name,last_name',
+                ])
+                ->first();
+
+            if (! $release) {
+                return response()->json(['message' => 'Cleaning record not found for this room.'], 404);
+            }
+
+            return response()->json($this->cleaningReleaseHistoryDetailPayload($release));
+        }
 
         if ($source === 'daily_service') {
             /** @var DailyRoomCleaning|null $record */
@@ -3487,6 +3567,90 @@ class HousekeepingController extends Controller
             'minibar' => $minibar,
             'assets' => $assets,
         ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function cleaningReleaseHistoryDetailPayload(RoomCleaningRelease $release): array
+    {
+        $record = $release->dailyRoomCleaning;
+        $serviceType = (string) ($release->service_type ?? CleaningServiceClassification::TYPE_DAILY);
+        $statusLabel = match ($release->status) {
+            RoomCleaningRelease::STATUS_READY => 'Cleaned',
+            RoomCleaningRelease::STATUS_INSPECTION_PENDING => 'Pending inspection',
+            RoomCleaningRelease::STATUS_IN_PROGRESS => 'In progress',
+            RoomCleaningRelease::STATUS_AVAILABLE => 'Available',
+            default => ucfirst(str_replace('_', ' ', (string) $release->status)),
+        };
+
+        $guestName = null;
+        $booking = $release->booking ?? $record?->booking;
+        if ($booking) {
+            $guestName = trim(((string) ($booking->first_name ?? '')).' '.((string) ($booking->last_name ?? '')));
+            if ($guestName === '') {
+                $guestName = null;
+            }
+        }
+
+        $remarks = trim((string) ($release->remarks ?? ''));
+        if ($remarks === '' && $record) {
+            $remarks = trim((string) ($record->remarks ?? ''));
+        }
+
+        $maintenanceNote = $record ? trim((string) ($record->maintenance_note ?? '')) : '';
+
+        return [
+            'source' => 'cleaning_release',
+            'record_id' => (int) $release->id,
+            'room_id' => (int) $release->room_id,
+            'service_date' => $release->release_date?->toDateString(),
+            'service_type' => $serviceType,
+            'service_subtype' => $release->service_subtype,
+            'service_label' => CleaningServiceClassification::label($serviceType, $release->service_subtype),
+            'priority' => (string) $release->priority,
+            'status' => (string) $release->status,
+            'status_label' => $statusLabel,
+            'started_at' => ($release->started_at ?? $record?->started_at)?->toIso8601String(),
+            'completed_at' => ($release->completed_at ?? $record?->completed_at)?->toIso8601String(),
+            'assigned_user' => $release->assignedUser
+                ? ['id' => (int) $release->assignedUser->id, 'name' => (string) $release->assignedUser->name]
+                : ($record?->assignedUser
+                    ? ['id' => (int) $record->assignedUser->id, 'name' => (string) $record->assignedUser->name]
+                    : null),
+            'started_by_user' => $release->startedByUser
+                ? ['id' => (int) $release->startedByUser->id, 'name' => (string) $release->startedByUser->name]
+                : ($record?->startedByUser
+                    ? ['id' => (int) $record->startedByUser->id, 'name' => (string) $record->startedByUser->name]
+                    : null),
+            'completed_by_user' => $release->completedByUser
+                ? ['id' => (int) $release->completedByUser->id, 'name' => (string) $release->completedByUser->name]
+                : ($record?->completedByUser
+                    ? ['id' => (int) $record->completedByUser->id, 'name' => (string) $record->completedByUser->name]
+                    : null),
+            'guest_name' => $guestName,
+            'booking_id' => $release->booking_id ? (int) $release->booking_id : ($record?->booking_id ? (int) $record->booking_id : null),
+            'remarks' => $remarks !== '' ? $remarks : null,
+            'maintenance_note' => $maintenanceNote !== '' ? $maintenanceNote : null,
+            'inspection_status' => $release->status === RoomCleaningRelease::STATUS_READY
+                ? 'Supervisor approved'
+                : null,
+            'window_start' => $release->window_start?->toIso8601String(),
+            'window_end' => $release->window_end?->toIso8601String(),
+            'checklist' => $record ? $this->checklists->dailyCleaningChecklistForRecord($record) : [],
+            'consumptions' => $record
+                ? $record->consumptions->map(fn ($c) => [
+                    'id' => (int) $c->id,
+                    'qty' => (float) $c->qty,
+                    'notes' => $c->notes ? (string) $c->notes : null,
+                    'inventory_item' => $c->inventoryItem ? [
+                        'id' => (int) $c->inventoryItem->id,
+                        'name' => (string) $c->inventoryItem->name,
+                        'sku' => (string) ($c->inventoryItem->sku ?? ''),
+                    ] : null,
+                ])->values()->all()
+                : [],
+        ];
     }
 
     /**

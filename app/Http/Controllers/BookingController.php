@@ -21,6 +21,7 @@ use App\Support\BookingRoomTransferService;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
+use App\Services\GuestIdentityImageService;
 use App\Support\SeasonalRoomPricing;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
@@ -115,7 +116,7 @@ class BookingController extends Controller
         $lines = [];
 
         $guestBits = [];
-        foreach (['first_name' => 'First name', 'last_name' => 'Last name', 'email' => 'Email', 'phone' => 'Phone', 'city' => 'City', 'country' => 'Country'] as $field => $label) {
+        foreach (['first_name' => 'First name', 'last_name' => 'Last name', 'email' => 'Email', 'phone' => 'Phone', 'city' => 'City', 'country' => 'Country', 'bill_to_name' => 'Bill to name', 'guest_gstin' => 'Guest GSTIN'] as $field => $label) {
             if (! array_key_exists($field, $validated)) {
                 continue;
             }
@@ -416,6 +417,8 @@ class BookingController extends Controller
             'phone' => $booking->phone,
             'city' => $booking->city,
             'country' => $booking->country,
+            'bill_to_name' => $booking->bill_to_name,
+            'guest_gstin' => $booking->guest_gstin,
             'guest_identity_types' => $booking->guest_identity_types,
             'guest_identities' => $booking->guest_identities,
         ]);
@@ -730,6 +733,15 @@ class BookingController extends Controller
             $this->allowReservationCreateSingle();
         }
 
+        if ($request->has('guest_gstin')) {
+            $gstin = strtoupper(trim((string) $request->input('guest_gstin')));
+            $request->merge(['guest_gstin' => $gstin !== '' ? $gstin : null]);
+        }
+        if ($request->has('bill_to_name')) {
+            $billTo = trim((string) $request->input('bill_to_name'));
+            $request->merge(['bill_to_name' => $billTo !== '' ? $billTo : null]);
+        }
+
         $validated = $request->validate([
             'room_ids' => 'nullable|array',
             'room_ids.*' => 'exists:rooms,id',
@@ -744,6 +756,8 @@ class BookingController extends Controller
             'guest_identities.*' => 'nullable|string', // Base64 or paths
             'city' => 'nullable|string|max:255',
             'country' => 'nullable|string|max:255',
+            'bill_to_name' => 'nullable|string|max:255',
+            'guest_gstin' => 'nullable|string|max:15|regex:/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/',
             'adults_count' => 'required|integer|min:1',
             'children_count' => 'nullable|integer|min:0',
             'child_ages' => 'nullable|array',
@@ -880,26 +894,26 @@ class BookingController extends Controller
 
         // Handle Identity Images
         $imagePaths = [];
+        $guestIdentityUploadMeta = [];
         if ($request->has('guest_identities')) {
             $images = $request->input('guest_identities') ?: [];
+            $identityService = app(GuestIdentityImageService::class);
             foreach ($images as $index => $imageData) {
                 if (! $imageData) {
                     continue;
                 }
 
-                if (str_starts_with($imageData, 'data:image')) {
-                    // Base64 from Camera or Upload
-                    $format = str_contains($imageData, 'png') ? 'png' : 'jpg';
-                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', $imageData));
-                    $fileName = 'guest_id_' . time() . '_' . $index . '.' . $format;
-                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
-                    $imagePaths[] = 'identities/' . $fileName;
+                if (str_starts_with((string) $imageData, 'data:image')) {
+                    $stored = $identityService->storeDataUrl((string) $imageData, (int) $index);
+                    $imagePaths[] = $stored['path'];
+                    $guestIdentityUploadMeta[] = array_merge(['index' => (int) $index], $stored);
                 } elseif ($request->hasFile("guest_identities.{$index}")) {
-                    // Direct File Upload (if sent as multipart/form-data)
-                    $imagePaths[] = $request->file("guest_identities.{$index}")->store('identities', 'public');
+                    $stored = $identityService->storeUploadedFile($request->file("guest_identities.{$index}"), (int) $index);
+                    $imagePaths[] = $stored['path'];
+                    $guestIdentityUploadMeta[] = array_merge(['index' => (int) $index], $stored);
                 } else {
-                    // Already uploaded path
-                    $imagePaths[] = $imageData;
+                    $stored = $identityService->storeExistingPath((string) $imageData);
+                    $imagePaths[] = $stored['path'];
                 }
             }
         }
@@ -1048,7 +1062,13 @@ class BookingController extends Controller
             $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
         }
 
-        return response()->json($isGroup ? $bookings : $bookings[0], 201);
+        if ($isGroup) {
+            return response()->json($bookings, 201);
+        }
+
+        $payload = $this->bookingJsonWithGuestIdentityMeta($bookings[0], $guestIdentityUploadMeta ?? []);
+
+        return response()->json($payload, 201);
     }
 
     /**
@@ -1133,6 +1153,17 @@ class BookingController extends Controller
     public function update(Request $request, Booking $booking)
     {
         $this->allowReservationEdit();
+        $guestIdentityUploadMeta = [];
+
+        if ($request->has('guest_gstin')) {
+            $gstin = strtoupper(trim((string) $request->input('guest_gstin')));
+            $request->merge(['guest_gstin' => $gstin !== '' ? $gstin : null]);
+        }
+        if ($request->has('bill_to_name')) {
+            $billTo = trim((string) $request->input('bill_to_name'));
+            $request->merge(['bill_to_name' => $billTo !== '' ? $billTo : null]);
+        }
+
         $validated = $request->validate([
             'room_id' => 'exists:rooms,id',
             'first_name' => 'string|max:255',
@@ -1141,6 +1172,8 @@ class BookingController extends Controller
             'phone' => 'nullable|string',
             'city' => 'nullable|string|max:255',
             'country' => 'nullable|string|max:255',
+            'bill_to_name' => 'nullable|string|max:255',
+            'guest_gstin' => 'nullable|string|max:15|regex:/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/',
             'adults_count' => 'integer|min:1',
             'children_count' => 'nullable|integer|min:0',
             'child_ages' => 'nullable|array',
@@ -1319,12 +1352,14 @@ class BookingController extends Controller
         }
 
         // Handle Identity Images (Update/Append): incoming array is indexed by guest slot; null clears.
+        $guestIdentityUploadMeta = [];
         if ($request->has('guest_identities')) {
             $incomingImages = $request->input('guest_identities');
             if (! is_array($incomingImages)) {
                 $incomingImages = [];
             }
             $newPaths = [];
+            $identityService = app(GuestIdentityImageService::class);
             foreach ($incomingImages as $index => $imageData) {
                 $i = (int) $index;
                 if ($imageData === null || $imageData === '') {
@@ -1334,18 +1369,16 @@ class BookingController extends Controller
                 }
 
                 if (str_starts_with((string) $imageData, 'data:image')) {
-                    // New Base64 from Camera or Upload
-                    $format = str_contains((string) $imageData, 'png') ? 'png' : 'jpg';
-                    $data = base64_decode(preg_replace('#^data:image/\w+;base64,#i', '', (string) $imageData));
-                    $fileName = 'guest_id_' . time() . '_' . $i . '.' . $format;
-                    \Illuminate\Support\Facades\Storage::disk('public')->put('identities/' . $fileName, $data);
-                    $newPaths[$i] = 'identities/' . $fileName;
+                    $stored = $identityService->storeDataUrl((string) $imageData, $i);
+                    $newPaths[$i] = $stored['path'];
+                    $guestIdentityUploadMeta[] = array_merge(['index' => $i], $stored);
                 } elseif ($request->hasFile("guest_identities.{$i}")) {
-                    // New Direct File Upload
-                    $newPaths[$i] = $request->file("guest_identities.{$i}")->store('identities', 'public');
+                    $stored = $identityService->storeUploadedFile($request->file("guest_identities.{$i}"), $i);
+                    $newPaths[$i] = $stored['path'];
+                    $guestIdentityUploadMeta[] = array_merge(['index' => $i], $stored);
                 } else {
-                    // Retain existing image path (string storage key)
-                    $newPaths[$i] = $imageData;
+                    $stored = $identityService->storeExistingPath((string) $imageData);
+                    $newPaths[$i] = $stored['path'];
                 }
             }
             ksort($newPaths);
@@ -1508,7 +1541,24 @@ class BookingController extends Controller
             }
         }
 
-        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
+        return response()->json($this->bookingJsonWithGuestIdentityMeta(
+            $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']),
+            $guestIdentityUploadMeta,
+        ));
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $guestIdentityUploadMeta
+     * @return array<string, mixed>
+     */
+    private function bookingJsonWithGuestIdentityMeta(Booking $booking, array $guestIdentityUploadMeta): array
+    {
+        $payload = $booking->toArray();
+        if ($guestIdentityUploadMeta !== []) {
+            $payload['guest_identity_upload_meta'] = $guestIdentityUploadMeta;
+        }
+
+        return $payload;
     }
 
     /**

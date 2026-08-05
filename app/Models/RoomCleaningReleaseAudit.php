@@ -29,6 +29,8 @@ class RoomCleaningReleaseAudit extends Model
 
     public const ACTION_ROOM_READY = 'room_ready';
 
+    public const ACTION_SERVICE_RECLASSIFIED = 'service_reclassified';
+
     protected $fillable = [
         'room_cleaning_release_id',
         'action',

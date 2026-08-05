@@ -390,6 +390,12 @@ final class ReservationInvoiceViewData
             (string) ($booking->country ?? ''),
         ])));
 
+        $billToNameRaw = trim((string) ($booking->bill_to_name ?? ''));
+        $billToName = $billToNameRaw !== ''
+            ? strtoupper($billToNameRaw)
+            : $guestName;
+        $guestGstin = strtoupper(trim((string) ($booking->guest_gstin ?? '')));
+
         $summaryLines = [
             ['label' => 'Total Charges(Rs)', 'value' => $fmt($st)],
             ['label' => 'Total Discount(Rs)', 'value' => $fmt($sd)],
@@ -421,12 +427,12 @@ final class ReservationInvoiceViewData
             'folioNo' => $folioNo,
             'resNo' => $resNo,
             'guestName' => $guestName,
-            'billToName' => $guestName,
+            'billToName' => $billToName,
             'billToAddress' => $billToAddress,
             'guestState' => trim((string) ($booking->city ?? '')) !== ''
                 ? trim((string) $booking->city)
                 : (string) ($booking->country ?? ''),
-            'guestGstin' => '',
+            'guestGstin' => $guestGstin,
             'bookingSource' => $bookingSource,
             'sourceOfSupply' => $sourceOfSupply,
             'grCardNo' => (string) $booking->id,

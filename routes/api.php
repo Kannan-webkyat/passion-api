@@ -10,6 +10,7 @@ use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\DietaryTypeController;
 use App\Http\Controllers\HousekeepingChecklistController;
 use App\Http\Controllers\HousekeepingController;
+use App\Http\Controllers\HospitalityReportController;
 use App\Http\Controllers\HousekeepingRoomStockController;
 use App\Http\Controllers\InventoryCategoryController;
 use App\Http\Controllers\InventoryController;
@@ -91,6 +92,14 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('housekeeping/dirty-rooms-board', [HousekeepingController::class, 'dirtyRoomsBoard']);
     Route::get('housekeeping/nav-counts', [HousekeepingController::class, 'navCounts']);
     Route::get('housekeeping/dashboard-summary', [HousekeepingController::class, 'dashboardSummary']);
+
+    // Hospitality / rooms & housekeeping reports
+    Route::get('reports/rooms-performance', [HospitalityReportController::class, 'roomsPerformance']);
+    Route::get('reports/front-office-daily-flash', [HospitalityReportController::class, 'frontOfficeDailyFlash']);
+    Route::get('reports/housekeeping-productivity', [HospitalityReportController::class, 'housekeepingProductivity']);
+    Route::get('reports/cleaning-schedule-adherence', [HospitalityReportController::class, 'cleaningScheduleAdherence']);
+    Route::get('reports/channel-source-mix', [HospitalityReportController::class, 'channelSourceMix']);
+
     Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
     Route::get('housekeeping/rooms/{room}/cleaning-history/detail', [HousekeepingController::class, 'roomCleaningHistoryDetail']);
     Route::get('housekeeping/catalog', [HousekeepingController::class, 'catalog']);
