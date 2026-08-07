@@ -15,6 +15,7 @@ class RoomStatusBlock extends Model
         'inspection_snapshot',
         'is_active',
         'created_by',
+        'assigned_to',
     ];
 
     protected $casts = [
@@ -32,5 +33,10 @@ class RoomStatusBlock extends Model
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function assignedUser()
+    {
+        return $this->belongsTo(User::class, 'assigned_to');
     }
 }

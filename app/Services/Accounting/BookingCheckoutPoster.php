@@ -4,7 +4,6 @@ namespace App\Services\Accounting;
 
 use App\Models\Booking;
 use App\Models\JournalEntry;
-use App\Models\Setting;
 use App\Support\BookingInvoiceRoomStay;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
@@ -14,6 +13,10 @@ use Illuminate\Support\Facades\Schema;
  *
  * Folio F&B (room_charge POS) is already recognized at POS settle (Dr AR / Cr sales).
  * This entry clears AR and recognizes room revenue + output GST on the room portion.
+ *
+ * {@see BookingInvoiceRoomStay::summarizeForInvoice} `room_inclusive_grand` is always
+ * tax-inclusive (rate card may be ex-GST, but the stored/recomputed grand already
+ * folds GST in). Split tax by extracting from that inclusive amount — never add GST again.
  */
 final class BookingCheckoutPoster
 {
@@ -34,33 +37,35 @@ final class BookingCheckoutPoster
             return null;
         }
 
-        $summary = BookingInvoiceRoomStay::summarizeForInvoice($booking);
         $folioAr = min(round(BookingInvoiceRoomStay::sumPosRoomChargePayments($booking), 2), $grand);
         $roomInclusive = max(0.0, round($grand - $folioAr, 2));
 
-        [$roomNet, $cgst, $sgst] = $this->splitRoomTax($booking, $roomInclusive);
+        [$roomNet, $cgst, $sgst] = $this->splitRoomTaxInclusive($booking, $roomInclusive);
 
-        $collected = round((float) ($booking->deposit_amount ?? 0), 2);
-        $refund = round((float) ($booking->refund_amount ?? 0), 2);
-        $netCash = round(max(0.0, $collected - $refund), 2);
+        $paid = round((float) ($booking->deposit_amount ?? 0), 2);
+        $refunded = round((float) ($booking->refund_amount ?? 0), 2);
+        $retained = round(max(0.0, $paid - $refunded), 2);
+
+        // Apply only what covers the bill; overpayment stays on the booking until refunded.
+        $appliedCash = round(min($retained, $grand), 2);
+        $shortfall = round(max(0.0, $grand - $retained), 2);
 
         $lines = [];
+        $tender = AccountCodes::tenderAccount((string) ($booking->payment_method ?? 'cash'));
 
-        if ($netCash > 0) {
-            $tender = AccountCodes::tenderAccount((string) ($booking->payment_method ?? 'cash'));
+        if ($appliedCash > 0) {
             $lines[] = [
                 'account_code' => $tender,
-                'debit' => $netCash,
+                'debit' => $appliedCash,
                 'meta' => ['booking_id' => $booking->id],
             ];
         }
 
-        if ($refund > 0) {
-            $refundTender = AccountCodes::tenderAccount((string) ($booking->refund_method ?? $booking->payment_method ?? 'cash'));
+        if ($shortfall > 0.01) {
             $lines[] = [
-                'account_code' => $refundTender,
-                'credit' => $refund,
-                'meta' => ['booking_id' => $booking->id, 'kind' => 'checkout_refund'],
+                'account_code' => AccountCodes::FOLIO_AR,
+                'debit' => $shortfall,
+                'meta' => ['booking_id' => $booking->id, 'kind' => 'checkout_shortfall'],
             ];
         }
 
@@ -121,25 +126,19 @@ final class BookingCheckoutPoster
     }
 
     /**
+     * Extract CGST/SGST from a tax-inclusive room amount.
+     *
      * @return array{0: float, 1: float, 2: float} roomNet, cgst, sgst
      */
-    private function splitRoomTax(Booking $booking, float $roomInclusive): array
+    private function splitRoomTaxInclusive(Booking $booking, float $roomInclusive): array
     {
         $taxRate = (float) ($booking->room?->roomType?->tax?->rate ?? 0);
         if ($roomInclusive <= 0 || $taxRate <= 0.004) {
             return [$roomInclusive, 0.0, 0.0];
         }
 
-        $ratesIncludeGst = filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
-
-        if ($ratesIncludeGst) {
-            $net = round($roomInclusive / (1 + ($taxRate / 100)), 2);
-            $tax = round($roomInclusive - $net, 2);
-        } else {
-            $net = round($roomInclusive, 2);
-            $tax = round($net * ($taxRate / 100), 2);
-        }
-
+        $net = round($roomInclusive / (1 + ($taxRate / 100)), 2);
+        $tax = round($roomInclusive - $net, 2);
         $half = round($tax / 2, 2);
         $other = round($tax - $half, 2);
 

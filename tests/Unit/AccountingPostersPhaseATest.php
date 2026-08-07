@@ -71,6 +71,45 @@ class AccountingPostersPhaseATest extends TestCase
         $this->assertNotNull($entry->lines->firstWhere('account_id', ChartOfAccount::where('code', AccountCodes::ROOM_REVENUE)->value('id')));
     }
 
+    public function test_booking_checkout_poster_balances_with_folio_and_gst_without_double_tax(): void
+    {
+        $tax = new \App\Models\Tax(['rate' => 12]);
+        $roomType = new \App\Models\RoomType([]);
+        $roomType->setRelation('tax', $tax);
+        $room = new \App\Models\Room([]);
+        $room->setRelation('roomType', $roomType);
+
+        // Inclusive room 1064 + folio extras 135; inflated deposit must not break the journal.
+        $booking = new Booking([
+            'id' => 9002,
+            'booking_unit' => 'hour_package',
+            'total_price' => 1064,
+            'extra_charges' => 135,
+            'deposit_amount' => 1334,
+            'payment_method' => 'cash',
+            'refund_amount' => 0,
+            'checkout_discount_amount' => 0,
+            'check_out' => '2026-08-07',
+        ]);
+        $booking->id = 9002;
+        $booking->setRelation('room', $room);
+
+        $entry = app(BookingCheckoutPoster::class)->post($booking);
+
+        $this->assertNotNull($entry);
+        $debit = round((float) $entry->lines->sum('debit'), 2);
+        $credit = round((float) $entry->lines->sum('credit'), 2);
+        $this->assertEqualsWithDelta($debit, $credit, 0.01, "debit={$debit} credit={$credit}");
+        $this->assertEqualsWithDelta(1199.0, $debit, 0.01);
+
+        $cgstId = (int) ChartOfAccount::where('code', AccountCodes::OUTPUT_CGST)->value('id');
+        $sgstId = (int) ChartOfAccount::where('code', AccountCodes::OUTPUT_SGST)->value('id');
+        $cgst = (float) $entry->lines->where('account_id', $cgstId)->sum('credit');
+        $sgst = (float) $entry->lines->where('account_id', $sgstId)->sum('credit');
+        $this->assertGreaterThan(0, $cgst + $sgst);
+        $this->assertEqualsWithDelta($cgst, $sgst, 0.02);
+    }
+
     public function test_pos_refund_poster_balances_proportional_reversal(): void
     {
         $order = new PosOrder([

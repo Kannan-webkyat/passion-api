@@ -30,6 +30,7 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 class BookingController extends Controller
@@ -787,8 +788,12 @@ class BookingController extends Controller
         $creatorId = Auth::id();
         $roomIds = $request->input('room_ids', [$request->input('room_id')]);
         $bookingUnit = $validated['booking_unit'] ?? 'day';
-        $checkInAt = Carbon::parse($validated['check_in']);
-        $checkOutAt = isset($validated['check_out']) ? Carbon::parse($validated['check_out']) : null;
+        // Normalize into APP_TIMEZONE wall time before persisting. Clients may send either a
+        // hotel-local naive datetime (preferred) or a UTC ISO instant; without this, UTC
+        // instants are stored as UTC wall-clock values and display shifts by the offset
+        // (e.g. 4:00 PM IST → 10:30Z → stored 10:30 → shown as 10:30 AM).
+        $checkInAt = $this->parseHotelDateTime($validated['check_in']);
+        $checkOutAt = isset($validated['check_out']) ? $this->parseHotelDateTime($validated['check_out']) : null;
         $status = $validated['status'] ?? 'confirmed';
 
         // New reservations only from today onward (hotel calendar day in app timezone).
@@ -1074,13 +1079,22 @@ class BookingController extends Controller
     }
 
     /**
+     * Parse a client datetime into the hotel (app) timezone for storage.
+     * Naive strings are interpreted in APP_TIMEZONE; zoned/UTC values are converted.
+     */
+    private function parseHotelDateTime(string $value): Carbon
+    {
+        return Carbon::parse($value)->timezone(config('app.timezone'));
+    }
+
+    /**
      * Hotel calendar arrival day for check-in rules (day stays use check_in, not UTC slice of check_in_at).
      */
     private function bookingArrivalCalendarDay(Booking $booking): string
     {
         $unit = (string) ($booking->booking_unit ?? 'day');
         if ($unit === 'hour_package' && $booking->check_in_at) {
-            return Carbon::parse($booking->check_in_at)->toDateString();
+            return Carbon::parse($booking->check_in_at)->timezone(config('app.timezone'))->toDateString();
         }
 
         return Carbon::parse($booking->check_in)->toDateString();
@@ -1388,11 +1402,24 @@ class BookingController extends Controller
         }
 
         // Keep legacy date columns aligned whenever datetime fields are sent.
+        // Normalize zoned/UTC payloads into APP_TIMEZONE wall times before persist.
         if (isset($validated['check_in_at'])) {
-            $validated['check_in'] = Carbon::parse($validated['check_in_at'])->toDateString();
+            $validated['check_in_at'] = $this->parseHotelDateTime((string) $validated['check_in_at']);
+            $validated['check_in'] = $validated['check_in_at']->toDateString();
         }
         if (isset($validated['check_out_at'])) {
-            $validated['check_out'] = Carbon::parse($validated['check_out_at'])->toDateString();
+            $validated['check_out_at'] = $this->parseHotelDateTime((string) $validated['check_out_at']);
+            $validated['check_out'] = $validated['check_out_at']->toDateString();
+        }
+        if (isset($validated['check_in']) && str_contains((string) $validated['check_in'], 'T')) {
+            $ci = $this->parseHotelDateTime((string) $validated['check_in']);
+            $validated['check_in_at'] = $ci;
+            $validated['check_in'] = $ci->toDateString();
+        }
+        if (isset($validated['check_out']) && str_contains((string) $validated['check_out'], 'T')) {
+            $co = $this->parseHotelDateTime((string) $validated['check_out']);
+            $validated['check_out_at'] = $co;
+            $validated['check_out'] = $co->toDateString();
         }
 
         $this->appendAuditNotesForBookingUpdate($booking, $validated, $request);
@@ -1411,18 +1438,18 @@ class BookingController extends Controller
             || isset($validated['extra_beds_count']);
 
         if ($datesChanging && ! in_array($validated['status'] ?? $booking->status, ['cancelled', 'checked_out'], true)) {
-            $nextCheckInAt = Carbon::parse(
+            $nextCheckInAt = $this->parseHotelDateTime((string) (
                 $validated['check_in_at']
                     ?? $validated['check_in']
                     ?? $booking->check_in_at
                     ?? $booking->check_in
-            );
-            $nextCheckOutAt = Carbon::parse(
+            ));
+            $nextCheckOutAt = $this->parseHotelDateTime((string) (
                 $validated['check_out_at']
                     ?? $validated['check_out']
                     ?? $booking->check_out_at
                     ?? $booking->check_out
-            );
+            ));
             $unit = $validated['booking_unit'] ?? $booking->booking_unit ?? 'day';
             if ($unit === 'day') {
                 $nextCheckInAt = $nextCheckInAt->copy()->startOfDay();
@@ -1463,14 +1490,17 @@ class BookingController extends Controller
             }
         }
 
-        $booking->update($validated);
+        // Keep status flip + ledger post atomic so a journal failure cannot leave checked_out without books.
+        DB::transaction(function () use ($booking, $validated, $isNewCheckout) {
+            $booking->update($validated);
 
-        if ($isNewCheckout) {
-            app(BookingCheckoutPoster::class)->post(
-                $booking->fresh(['room.roomType.tax']),
-                auth()->id(),
-            );
-        }
+            if ($isNewCheckout) {
+                app(BookingCheckoutPoster::class)->post(
+                    $booking->fresh(['room.roomType.tax']),
+                    auth()->id(),
+                );
+            }
+        });
 
         // Room chart renders occupancy from `booking_segments` first (`segment.adults_count ?? booking.adults_count`).
         // Keep segments aligned whenever guest mix or segment-level pricing fields change on the booking.

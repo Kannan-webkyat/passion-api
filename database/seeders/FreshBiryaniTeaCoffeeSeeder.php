@@ -258,11 +258,13 @@ class FreshBiryaniTeaCoffeeSeeder extends Seeder
             ['Chicken Biryani', 'MENU-CB-001', $catBiryani, $subChicken, 350, 'non-veg', 15, false, true],
             ['Mutton Biryani', 'MENU-MB-001', $catBiryani, $subMutton, 450, 'non-veg', 20, false, true],
             ['Veg Biryani', 'MENU-VB-001', $catBiryani, $subVeg, 250, 'veg', 12, false, true],
-            ['Tea', 'MENU-TE-001', $catBeverages, $subHot, 30, 'veg', 5, true, true],
-            ['Coffee', 'MENU-CF-001', $catBeverages, $subHot, 40, 'veg', 5, true, true],
-            ['Masala Chai', 'MENU-MC-001', $catBeverages, $subHot, 35, 'veg', 6, true, true],
-            ['Cold Coffee', 'MENU-CC-001', $catBeverages, $subCold, 50, 'veg', 5, true, true],
-            ['Iced Tea', 'MENU-IT-001', $catBeverages, $subCold, 45, 'veg', 5, true, true],
+            // Recipe MTO drinks: is_direct_sale=false so POS checks Kitchen ingredients (not Bar).
+            ['Tea', 'MENU-TE-001', $catBeverages, $subHot, 30, 'veg', 5, false, true],
+            ['Coffee', 'MENU-CF-001', $catBeverages, $subHot, 40, 'veg', 5, false, true],
+            ['Masala Chai', 'MENU-MC-001', $catBeverages, $subHot, 35, 'veg', 6, false, true],
+            ['Cold Coffee', 'MENU-CC-001', $catBeverages, $subCold, 50, 'veg', 5, false, true],
+            ['Iced Tea', 'MENU-IT-001', $catBeverages, $subCold, 45, 'veg', 5, false, true],
+            // Canned retail SKUs stay direct_sale (Bar / shelf stock).
             ['Pepsi (Can)', 'MENU-PP-001', $catBeverages, $subCold, 40, 'veg', 0, true, false],
             ['Sprite (Can)', 'MENU-SP-001', $catBeverages, $subCold, 40, 'veg', 0, true, false],
         ];

@@ -30,6 +30,7 @@ use App\Models\RoomStatusBlock;
 use App\Models\HousekeepingChecklistItem;
 use App\Models\RoomCleaningRelease;
 use App\Models\Setting;
+use App\Models\User;
 use App\Services\BusinessDateService;
 use App\Services\DailyRoomCleaningClassificationService;
 use App\Services\DayClosingService;
@@ -138,7 +139,7 @@ class HousekeepingController extends Controller
         if (! empty($validated['checkout_scope'])) {
             $this->allowHousekeepingViewSection([self::HK_CHECKOUT]);
             $scope = $validated['checkout_scope'];
-            $query = RoomStatusBlock::query()->with(['room.roomType']);
+            $query = RoomStatusBlock::query()->with(['room.roomType', 'assignedUser:id,name']);
 
             if ($scope === 'pending') {
                 $query->where('is_active', '=', true, 'and')
@@ -161,10 +162,22 @@ class HousekeepingController extends Controller
                 : $query->orderBy('room_id')->orderBy('id')->get();
 
             $blocks = $this->withCheckoutInspectionInspectorNames($blocks);
+            $blocks = $blocks->map(function (RoomStatusBlock $b) {
+                $b->setAttribute(
+                    'assigned_staff_name',
+                    $b->assignedUser?->name,
+                );
+
+                return $b;
+            });
 
             return response()->json([
                 'date' => $d,
                 'blocks' => $blocks,
+                'staff' => $this->housekeepingAssignableStaff()->map(fn (User $u) => [
+                    'id' => (int) $u->id,
+                    'name' => (string) $u->name,
+                ])->values()->all(),
             ]);
         }
 
@@ -220,7 +233,7 @@ class HousekeepingController extends Controller
         $dNext = Carbon::tomorrow()->toDateString();
 
         $query = RoomStatusBlock::query()
-            ->with(['room.roomType'])
+            ->with(['room.roomType', 'assignedUser:id,name'])
             ->where('is_active', '=', true, 'and')
             ->whereIn('status', ['dirty', 'cleaning', 'inspected']);
 
@@ -352,6 +365,8 @@ class HousekeepingController extends Controller
                 $priority = 'soon';
             }
 
+            $assignedUser = $block->assignedUser;
+
             return [
                 'id' => (int) $block->id,
                 'room_id' => $roomId,
@@ -366,9 +381,14 @@ class HousekeepingController extends Controller
                 'checkout_at' => $checkoutAt instanceof Carbon ? $checkoutAt->toIso8601String() : null,
                 'next_arrival_at' => $nextArrivalAt instanceof Carbon ? $nextArrivalAt->toIso8601String() : null,
                 'next_arrival_guest' => $nextGuest !== '' ? $nextGuest : null,
-                'assigned_staff_name' => $job?->startedByUser?->name,
+                'assigned_to' => $block->assigned_to ? (int) $block->assigned_to : null,
+                'assigned_user' => $assignedUser
+                    ? ['id' => (int) $assignedUser->id, 'name' => (string) $assignedUser->name]
+                    : null,
+                'assigned_staff_name' => $assignedUser?->name ?? $job?->startedByUser?->name,
                 'priority' => $priority,
                 'is_vip' => $isVip,
+                'can_start_cleaning' => $block->status === 'dirty' && $block->assigned_to,
             ];
         })->values();
 
@@ -385,6 +405,10 @@ class HousekeepingController extends Controller
                 'ready' => $ready,
                 'priority' => $priority,
             ],
+            'staff' => $this->housekeepingAssignableStaff()->map(fn (User $u) => [
+                'id' => (int) $u->id,
+                'name' => (string) $u->name,
+            ])->values()->all(),
         ]);
     }
 
@@ -1310,6 +1334,8 @@ class HousekeepingController extends Controller
 
     /**
      * Transition dirty → cleaning (room chart shows Cleaning).
+     * Turnover dirty rooms can start without a front-office cleaning release,
+     * but a housekeeping staff member must be assigned first.
      */
     public function startCleaning(RoomStatusBlock $roomStatusBlock)
     {
@@ -1325,24 +1351,72 @@ class HousekeepingController extends Controller
             ], 422);
         }
 
-        $release = $this->cleaningAvailability->activeReleaseForRoom((int) $roomStatusBlock->room_id);
-        if (! $release) {
+        if (! $roomStatusBlock->assigned_to) {
             return response()->json([
-                'message' => 'Room has not been released for cleaning. Front office must release the room first.',
+                'message' => 'Assign a housekeeping staff member before starting cleaning.',
             ], 422);
-        }
-        $startError = $this->cleaningAvailability->assertCanStartCleaning($release);
-        if ($startError !== null) {
-            return response()->json(['message' => $startError], 422);
         }
 
         $roomStatusBlock->update(['status' => 'cleaning']);
         Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'cleaning']);
-        $this->cleaningAvailability->markCleaningStarted($release);
+
+        $release = $this->cleaningAvailability->activeReleaseForRoom((int) $roomStatusBlock->room_id);
+        if ($release && in_array($release->status, [
+            RoomCleaningRelease::STATUS_AVAILABLE,
+            RoomCleaningRelease::STATUS_IN_PROGRESS,
+        ], true)) {
+            $this->cleaningAvailability->markCleaningStarted($release);
+        }
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'start_cleaning');
 
-        return response()->json($roomStatusBlock->load('room.roomType'));
+        return response()->json($roomStatusBlock->load(['room.roomType', 'assignedUser:id,name']));
+    }
+
+    /**
+     * Assign housekeeping staff to a dirty / in-cleaning turnover block,
+     * or to a pending checkout inspection.
+     */
+    public function assignCleaningStaff(Request $request, RoomStatusBlock $roomStatusBlock)
+    {
+        $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING, self::HK_CHECKOUT]);
+        $this->assertCanAssignHousekeepingStaff();
+
+        if (! $roomStatusBlock->is_active) {
+            return response()->json(['message' => 'This status block is no longer active.'], 422);
+        }
+
+        if (! in_array($roomStatusBlock->status, ['dirty', 'cleaning', 'pending_inspection'], true)) {
+            return response()->json([
+                'message' => 'Staff can only be assigned while the room is dirty, in cleaning, or pending checkout inspection.',
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'assigned_to' => 'nullable|exists:users,id',
+        ]);
+
+        $assignedTo = array_key_exists('assigned_to', $validated) && $validated['assigned_to'] !== null
+            ? (int) $validated['assigned_to']
+            : null;
+
+        if ($assignedTo !== null) {
+            $allowedIds = $this->housekeepingAssignableStaff()->pluck('id')->map(fn ($id) => (int) $id);
+            if (! $allowedIds->contains($assignedTo)) {
+                return response()->json([
+                    'message' => 'Selected user is not assignable housekeeping staff.',
+                ], 422);
+            }
+        }
+
+        $roomStatusBlock->update(['assigned_to' => $assignedTo]);
+
+        $event = $roomStatusBlock->status === 'pending_inspection'
+            ? 'assign_inspection_staff'
+            : 'assign_cleaning_staff';
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], $event);
+
+        return response()->json($roomStatusBlock->fresh()->load(['room.roomType', 'assignedUser:id,name']));
     }
 
     /**

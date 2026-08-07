@@ -120,6 +120,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('housekeeping/room-stock/requests', [HousekeepingRoomStockController::class, 'requestHistory']);
     Route::get('housekeeping/rooms/{room}/checkout-inspection-context', [HousekeepingController::class, 'checkoutInspectionContext']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/start-cleaning', [HousekeepingController::class, 'startCleaning']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/assign-staff', [HousekeepingController::class, 'assignCleaningStaff']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/job', [HousekeepingController::class, 'upsertJob']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/finish', [HousekeepingController::class, 'finish']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/clear', [HousekeepingController::class, 'checkoutInspectionClear']);
