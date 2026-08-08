@@ -150,10 +150,13 @@ class PosController extends Controller
     }
 
     /** Kitchen KOT lines (bulk send, hold, fire). */
-    private function orderItemRequiresKot(PosOrderItem $item): bool
+    private function orderItemRequiresKot(PosOrderItem $item, ?RestaurantMaster $restaurant = null): bool
     {
         if ($item->status !== 'active') {
             return false;
+        }
+        if ($restaurant?->kot_include_all_items) {
+            return true;
         }
         if ($item->combo_id) {
             return true;
@@ -165,6 +168,57 @@ class PosController extends Controller
         }
 
         return true;
+    }
+
+    /** Whether this outlet puts every cart line on BOT/KOT (bars: liquor + food). */
+    private function restaurantIncludesAllItemsOnKot(?RestaurantMaster $restaurant): bool
+    {
+        return (bool) ($restaurant?->kot_include_all_items);
+    }
+
+    /**
+     * Void abandoned empty counter orders (walk-in / takeaway / delivery with no lines).
+     * Scoped to the current user so another cashier's fresh empty draft is not discarded.
+     */
+    private function discardEmptyCounterOrders(int $restaurantId, ?string $orderType = null): int
+    {
+        $types = $orderType
+            ? [$orderType]
+            : ['walk_in', 'takeaway', 'delivery'];
+        $types = array_values(array_intersect($types, ['walk_in', 'takeaway', 'delivery']));
+        if ($types === []) {
+            return 0;
+        }
+
+        $userId = auth()->id();
+        $empties = PosOrder::query()
+            ->where('restaurant_id', $restaurantId)
+            ->whereIn('order_type', $types)
+            ->where('status', 'open')
+            ->when($userId, fn ($q) => $q->where('opened_by', $userId))
+            ->where(function ($q) {
+                $q->where('total_amount', '<=', 0)
+                    ->orWhereNull('total_amount');
+            })
+            ->whereDoesntHave('items', fn ($iq) => $iq->where('status', 'active'))
+            // Leave a short grace so a draft just opened on another tab isn't nuked instantly.
+            ->where('created_at', '<', now()->subSeconds(30))
+            ->get();
+
+        $count = 0;
+        foreach ($empties as $empty) {
+            $empty->update([
+                'status' => 'void',
+                'closed_at' => now(),
+                'void_reason' => 'Other',
+                'void_notes' => 'Empty draft auto-discarded',
+                'voided_by' => $userId,
+                'voided_at' => now(),
+            ]);
+            $count++;
+        }
+
+        return $count;
     }
 
     /** Batches where every active KOT line has the given timestamp column set. */
@@ -208,11 +262,12 @@ class PosController extends Controller
     /** Active KOT lines (kitchen) — total / ready / served counts for waiter-facing summaries. */
     private function kotLineCounts(PosOrder $order): array
     {
-        $order->loadMissing('items.menuItem');
+        $order->loadMissing('items.menuItem', 'restaurant');
+        $restaurant = $order->restaurant;
         $kotLines = $order->items
             ->where('status', 'active')
             ->where('kot_sent', true)
-            ->filter(fn($i) => $this->orderItemRequiresKot($i))
+            ->filter(fn($i) => $this->orderItemRequiresKot($i, $restaurant))
             ->values();
         $total = $kotLines->count();
         $ready = $kotLines->filter(fn($i) => $i->kitchen_ready_at)->count();
@@ -342,6 +397,11 @@ class PosController extends Controller
             ->where('restaurant_id', '=', $request->restaurant_id)
             ->whereIn('order_type', ['takeaway', 'room_service', 'delivery', 'walk_in'])
             ->whereIn('status', ['open', 'billed'])
+            // Drop abandoned empty drafts (0 items) so settle/new-order lists stay clean.
+            ->where(function ($q) {
+                $q->whereHas('items', fn ($iq) => $iq->where('status', 'active'))
+                    ->orWhere('total_amount', '>', 0);
+            })
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(function ($order) {
@@ -5596,6 +5656,11 @@ class PosController extends Controller
         $businessDate = $validated['business_date'] ?? $automaticBusinessDate;
         $isBusinessDateOverride = $businessDate !== $automaticBusinessDate;
 
+        // Clear abandoned empty walk-in / takeaway / delivery shells before opening a new one.
+        if (in_array($orderType, ['walk_in', 'takeaway', 'delivery'], true)) {
+            $this->discardEmptyCounterOrders((int) $validated['restaurant_id'], $orderType);
+        }
+
         if ($isBusinessDateOverride) {
             $this->checkPermission('pos-business-date-override');
         }
@@ -6384,33 +6449,41 @@ class PosController extends Controller
         }
         $this->assertBusinessDateOpenForPos($order);
 
-        DB::transaction(function () use ($order) {
+        $order->loadMissing('restaurant');
+        $includeAll = $this->restaurantIncludesAllItemsOnKot($order->restaurant);
+
+        DB::transaction(function () use ($order, $includeAll) {
             // Lock the order to prevent concurrent simultaneous KOT triggers issuing the same batch number
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
 
-            // Only items that require production (not just simple stock deductions) go to KOT display
+            // Production items always go to KOT. Bar outlets (kot_include_all_items) also
+            // send direct-sale liquor so every beer gets a BOT batch.
             $kotQuery = $order->items()
                 ->where('status', 'active')
                 ->where('kot_sent', false)
-                ->where('kot_hold', false)
-                ->where(function ($q) {
+                ->where('kot_hold', false);
+            if (! $includeAll) {
+                $kotQuery->where(function ($q) {
                     $q->whereNull('menu_item_id')
                         ->orWhereHas('menuItem', fn($mq) => $mq->where('requires_production', true));
                 });
+            }
 
             if ($kotQuery->exists()) {
                 $order->increment('current_kot_batch');
                 $batch = $order->current_kot_batch;
 
-                $order->items()
+                $updateQuery = $order->items()
                     ->where('status', 'active')
                     ->where('kot_sent', false)
-                    ->where('kot_hold', false)
-                    ->where(function ($q) {
+                    ->where('kot_hold', false);
+                if (! $includeAll) {
+                    $updateQuery->where(function ($q) {
                         $q->whereNull('menu_item_id')
                             ->orWhereHas('menuItem', fn($mq) => $mq->where('requires_production', true));
-                    })
-                    ->update(['kot_sent' => true, 'kot_batch' => $batch]);
+                    });
+                }
+                $updateQuery->update(['kot_sent' => true, 'kot_batch' => $batch]);
 
                 if (! in_array($order->kitchen_status, ['pending', 'preparing'])) {
                     $order->update(['kitchen_status' => 'pending']);
@@ -6447,6 +6520,7 @@ class PosController extends Controller
         ]);
 
         $items = PosOrderItem::whereIn('id', $validated['order_item_ids'])->get();
+        $order->loadMissing('restaurant');
         foreach ($items as $item) {
             if ($item->order_id !== $order->id) {
                 return response()->json(['message' => 'Invalid order line.'], 422);
@@ -6454,7 +6528,7 @@ class PosController extends Controller
             if ($item->status !== 'active' || $item->kot_sent) {
                 return response()->json(['message' => 'Only unsent active lines can be held or released.'], 422);
             }
-            if (! $this->orderItemRequiresKot($item)) {
+            if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
                 return response()->json(['message' => 'This line does not use kitchen KOT.'], 422);
             }
         }
@@ -6663,6 +6737,7 @@ class PosController extends Controller
 
         $ids = array_values(array_unique($validated['order_item_ids']));
         $items = PosOrderItem::whereIn('id', $ids)->orderBy('id')->get();
+        $order->loadMissing('restaurant');
 
         foreach ($items as $item) {
             if ($item->order_id !== $order->id) {
@@ -6674,7 +6749,7 @@ class PosController extends Controller
             if (! $item->kot_hold) {
                 return response()->json(['message' => 'Only held lines can be fired.'], 422);
             }
-            if (! $this->orderItemRequiresKot($item)) {
+            if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
                 return response()->json(['message' => 'This line does not use kitchen KOT.'], 422);
             }
         }
@@ -6912,6 +6987,10 @@ class PosController extends Controller
         );
 
         $fresh = $order->fresh();
+        // Drop empty walk-in/takeaway shells left behind during the shift.
+        if (in_array($fresh->order_type, ['walk_in', 'takeaway', 'delivery'], true)) {
+            $this->discardEmptyCounterOrders((int) $fresh->restaurant_id, $fresh->order_type);
+        }
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
         $roomChargePosted = (float) collect($validated['payments'] ?? [])
@@ -7658,6 +7737,7 @@ class PosController extends Controller
 
         return DB::transaction(function () use ($order, $validated) {
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            $order->loadMissing('restaurant');
             $item = PosOrderItem::where('id', $validated['order_item_id'])->first();
             if (! $item || $item->order_id !== $order->id) {
                 return response()->json(['message' => 'Invalid order line.'], 422);
@@ -7665,7 +7745,7 @@ class PosController extends Controller
             if ($item->status !== 'active' || ! $item->kot_sent) {
                 return response()->json(['message' => 'Line is not active or not sent to kitchen.'], 422);
             }
-            if (! $this->orderItemRequiresKot($item)) {
+            if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
                 return response()->json(['message' => 'This line does not use kitchen KOT.'], 422);
             }
             if ($item->kitchen_ready_at) {
@@ -8842,6 +8922,7 @@ class PosController extends Controller
                 'name' => $i->combo_id ? ($i->combo?->name ?? 'Combo') : (
                     $i->menu_item_variant_id ? ($i->menuItem?->name ?? 'Unknown') . ' — ' . ($i->variant?->size_label ?? '') : ($i->menuItem?->name ?? 'Unknown')
                 ),
+                'size_label' => $i->menu_item_variant_id ? ($i->variant?->size_label ?? null) : null,
                 'category' => $i->menuItem?->category?->name ?? ($i->combo_id ? 'Combo' : null),
                 'type' => $i->combo_id ? 'combo' : ($i->menuItem?->type ?? null),
                 'quantity' => $i->quantity,
@@ -8862,6 +8943,7 @@ class PosController extends Controller
                 'kitchen_ready_at' => $i->kitchen_ready_at?->toIso8601String(),
                 'kitchen_served_at' => $i->kitchen_served_at?->toIso8601String(),
                 'notes' => $i->notes,
+                'status' => $i->status,
             ]),
             'cancellations' => $order->items->where('status', 'cancelled')->values()->map(fn($i) => [
                 'id' => $i->id,

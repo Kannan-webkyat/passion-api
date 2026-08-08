@@ -9,12 +9,21 @@ class RestaurantMaster extends Model
     protected $fillable = [
         'name', 'floor', 'description', 'is_active', 'department_id', 'kitchen_location_id', 'bar_location_id', 'business_day_cutoff_time',
         'receipt_show_tax_breakdown',
+        'auto_print_kot',
+        'auto_print_bot',
+        'kot_ticket_label',
+        'auto_print_payment_receipt',
+        'kot_include_all_items',
         'address', 'email', 'phone', 'gstin', 'fssai', 'sac_code', 'logo_path',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
         'receipt_show_tax_breakdown' => 'boolean',
+        'auto_print_kot' => 'boolean',
+        'auto_print_bot' => 'boolean',
+        'auto_print_payment_receipt' => 'boolean',
+        'kot_include_all_items' => 'boolean',
     ];
 
     public function tables()
