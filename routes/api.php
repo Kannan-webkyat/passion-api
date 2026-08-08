@@ -307,6 +307,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('reports/purchase-history', [InventoryReportController::class, 'purchaseHistory']);
         Route::get('reports/excise-bar', [InventoryReportController::class, 'exciseBar']);
         Route::get('reports/excise-bar/export', [InventoryReportController::class, 'exciseBarExport']);
+        Route::get('reports/excise-bar/category-order', [InventoryReportController::class, 'exciseCategoryOrder']);
+        Route::put('reports/excise-bar/category-order', [InventoryReportController::class, 'updateExciseCategoryOrder']);
         Route::apiResource('items', InventoryController::class);
         Route::apiResource('categories', InventoryCategoryController::class);
         Route::apiResource('uoms', InventoryUomController::class);
