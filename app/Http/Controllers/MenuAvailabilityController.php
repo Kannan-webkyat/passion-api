@@ -21,7 +21,8 @@ class MenuAvailabilityController extends Controller
     private function checkPermission(string $permission): void
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can($permission)) {
+        if ($user && ! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can($permission)
+            && ! ($permission === 'menu-availability' && $user->can('manage-menu'))) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -31,7 +32,7 @@ class MenuAvailabilityController extends Controller
      */
     public function index(Request $request)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-availability');
 
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
@@ -205,7 +206,7 @@ class MenuAvailabilityController extends Controller
      */
     public function update(Request $request)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-availability');
 
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',

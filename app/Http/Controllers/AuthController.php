@@ -24,7 +24,7 @@ class AuthController extends Controller
 
         LoginAttempt::create([
             'email' => strtolower(trim((string) $request->email)),
-            'successful' => $successful,
+            'successful' => $successful && (bool) ($user->is_active ?? true),
             'ip_address' => $request->ip(),
             'user_agent' => substr((string) $request->userAgent(), 0, 500),
             'created_at' => now(),
@@ -33,6 +33,12 @@ class AuthController extends Controller
         if (! $successful) {
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials are incorrect.'],
+            ]);
+        }
+
+        if (! (bool) ($user->is_active ?? true)) {
+            throw ValidationException::withMessages([
+                'email' => ['This account has been deactivated. Contact an administrator.'],
             ]);
         }
 

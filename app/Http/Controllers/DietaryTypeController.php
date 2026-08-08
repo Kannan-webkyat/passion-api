@@ -16,7 +16,7 @@ class DietaryTypeController extends Controller
         if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
             return;
         }
-        if (! $user->can($permission)) {
+        if (! $user->can($permission) && ! ($permission === 'menu-configuration' && $user->can('manage-menu'))) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -28,7 +28,7 @@ class DietaryTypeController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'is_active' => 'boolean',
@@ -46,7 +46,7 @@ class DietaryTypeController extends Controller
 
     public function update(Request $request, DietaryType $menuDietaryType)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'is_active' => 'boolean',
@@ -59,7 +59,7 @@ class DietaryTypeController extends Controller
 
     public function destroy(DietaryType $menuDietaryType)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $menuDietaryType->delete();
 
         return response()->json(null, 204);

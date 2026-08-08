@@ -500,7 +500,12 @@ class RecipeController extends Controller
             abort(401, 'Unauthenticated.');
         }
         if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
-            if (! $user->can('manage-menu') && ! $user->can('kitchen-production') && ! $user->can('manage-inventory')) {
+            if (
+                ! $user->can('manage-menu')
+                && ! $user->can('menu-configuration')
+                && ! $user->can('kitchen-production')
+                && ! $user->can('manage-inventory')
+            ) {
                 abort(403, 'Unauthorized action.');
             }
         }
@@ -513,7 +518,12 @@ class RecipeController extends Controller
             abort(401, 'Unauthenticated.');
         }
         if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin')) {
-            if (! $user->can('manage-menu') && ! $user->can('kitchen-production') && ! $user->can('manage-inventory')) {
+            if (
+                ! $user->can('manage-menu')
+                && ! $user->can('menu-configuration')
+                && ! $user->can('kitchen-production')
+                && ! $user->can('manage-inventory')
+            ) {
                 abort(403, 'Unauthorized action.');
             }
         }

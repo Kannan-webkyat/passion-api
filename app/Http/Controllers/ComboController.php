@@ -16,14 +16,19 @@ class ComboController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (
+            $user
+            && ! $user->hasRole('Admin')
+            && ! $user->can($permission)
+            && ! ($permission === 'menu-configuration' && $user->can('manage-menu'))
+        ) {
             abort(403, 'Unauthorized action.');
         }
     }
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'price' => 'nullable|numeric|min:0',
@@ -57,7 +62,7 @@ class ComboController extends Controller
 
     public function update(Request $request, Combo $menuCombo)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $validated = $request->validate([
             'name' => 'sometimes|required|string|max:255',
             'price' => 'nullable|numeric|min:0',
@@ -90,7 +95,7 @@ class ComboController extends Controller
 
     public function destroy(Combo $menuCombo)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         try {
             $menuCombo->delete();
 

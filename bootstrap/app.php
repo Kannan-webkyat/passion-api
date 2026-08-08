@@ -16,7 +16,7 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withBroadcasting(
         __DIR__.'/../routes/channels.php',
-        ['middleware' => ['api', 'auth:sanctum']],
+        ['middleware' => ['api', 'auth:sanctum', 'active']],
     )
     ->withMiddleware(function (Middleware $middleware): void {
         // API-only app: never redirect guests to a web "login" route (causes 500).
@@ -26,6 +26,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'role' => \Spatie\Permission\Middleware\RoleMiddleware::class,
             'permission' => \Spatie\Permission\Middleware\PermissionMiddleware::class,
             'role_or_permission' => \Spatie\Permission\Middleware\RoleOrPermissionMiddleware::class,
+            'active' => \App\Http\Middleware\EnsureUserIsActive::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
