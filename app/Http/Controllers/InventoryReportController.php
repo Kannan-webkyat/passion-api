@@ -1083,7 +1083,6 @@ class InventoryReportController extends Controller
             $splitBottlePeg,
             $pegMl
         ) {
-            $uom = strtolower((string) ($item->issueUom?->short_name ?? ''));
             $bottleMl = (float) ($item->conversion_factor ?: 0);
 
             $nowQty = (float) ($qtyNowByItemId[$item->id] ?? 0);
@@ -1098,16 +1097,28 @@ class InventoryReportController extends Controller
             $after = $txAggAfter->get($item->id);
             $afterNet = (float) ($after?->in_qty ?? 0) - (float) ($after?->out_qty ?? 0);
 
-            // current = opening + netDay + afterNet → opening from live stock
+            // current = opening + netDay + afterNet → opening / end-of-day from live stock
             $openingQty = $nowQty - $netDay - $afterNet;
-            // Register: Total = Opening + Receipts(purchases); Closing = Total − Sales
+            $closingQty = $nowQty - $afterNet; // stock at end of selected date (matches book)
+
+            // Register columns: Receipts = GRN only; Sales = POS only.
+            // Other day movements (adjustments, wastage, transfers net, etc.) explain
+            // Opening + Receipts − Sales ≠ Closing when present.
             $receiptsQty = $purchaseIn;
-            $totalQty = $openingQty + $receiptsQty;
             $salesQty = $posOut;
-            $closingQty = $totalQty - $salesQty;
+            $otherDayNet = ($dayIn - $purchaseIn) - ($dayOut - $posOut); // non-GRN in − non-POS out
+            $totalQty = $openingQty + $receiptsQty;
+
+            $uomRaw = strtolower(trim((string) ($item->issueUom?->short_name ?? '')));
+            $uomName = strtolower(trim((string) ($item->issueUom?->name ?? '')));
+            $isMl = $uomRaw === 'ml'
+                || $uomRaw === 'millilitre'
+                || $uomRaw === 'milliliter'
+                || str_contains($uomName, 'millilitre')
+                || str_contains($uomName, 'milliliter');
 
             // Spirits-like (ml tracked): sealed bottles + open stock as pegs
-            if ($uom === 'ml' && $bottleMl > 0) {
+            if ($isMl && $bottleMl > 0) {
                 $opening = $splitBottlePeg($openingQty, $bottleMl, $pegMl);
                 $receipts = $splitBottlePeg($receiptsQty, $bottleMl, $pegMl);
                 $total = $splitBottlePeg($totalQty, $bottleMl, $pegMl);
@@ -1137,7 +1148,9 @@ class InventoryReportController extends Controller
                         'receipts_purchase_ml' => round($receiptsQty, 3),
                         'total_qty_ml' => round($totalQty, 3),
                         'pos_out_ml' => round($salesQty, 3),
+                        'other_day_net_ml' => round($otherDayNet, 3),
                         'closing_qty_ml' => round($closingQty, 3),
+                        'now_qty_ml' => round($nowQty, 3),
                         'peg_ml' => $pegMl,
                     ],
                 ];
@@ -1167,7 +1180,9 @@ class InventoryReportController extends Controller
                     'receipts_purchase' => round($receiptsQty, 3),
                     'total_qty' => round($totalQty, 3),
                     'pos_out' => round($salesQty, 3),
+                    'other_day_net' => round($otherDayNet, 3),
                     'closing_qty' => round($closingQty, 3),
+                    'now_qty' => round($nowQty, 3),
                 ],
             ];
         })->values();
