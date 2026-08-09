@@ -48,6 +48,7 @@
                 <th class="text-right">Tax</th>
                 <th class="text-right">Svc Chg</th>
                 <th class="text-right">Tips</th>
+                <th class="text-right">Packing</th>
                 <th class="text-right">Refunded</th>
                 <th class="text-right">Paid</th>
                 <th class="text-right">CGST</th>
@@ -72,6 +73,7 @@
                 <td class="text-right num">₹{{ number_format((float) $c->total_tax, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $c->total_service_charge, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $c->total_tip, 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) ($c->total_packing_charge ?? 0), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) ($c->total_refunded ?? 0), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $c->total_paid, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) ($c->cgst_amount ?? 0), 2) }}</td>
@@ -86,7 +88,7 @@
             </tr>
             @empty
             <tr>
-                <td colspan="19" style="text-align: center; padding: 20px; color: #888;">No closings in this range.</td>
+                <td colspan="20" style="text-align: center; padding: 20px; color: #888;">No closings in this range.</td>
             </tr>
             @endforelse
             @if($closings->count() > 0)
@@ -99,6 +101,7 @@
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('total_tax'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('total_service_charge'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('total_tip'), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) $closings->sum('total_packing_charge'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('total_refunded'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('total_paid'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('cgst_amount'), 2) }}</td>

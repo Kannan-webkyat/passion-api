@@ -651,7 +651,8 @@ class PosController extends Controller
             DB::raw('SUM(discount_amount) as discount_amount'),
             DB::raw('SUM(service_charge_amount) as service_charge_amount'),
             DB::raw('SUM(tip_amount) as tip_amount'),
-            DB::raw('SUM(delivery_charge) as delivery_charge')
+            DB::raw('SUM(delivery_charge) as delivery_charge'),
+            DB::raw('SUM(COALESCE(packing_charge, 0)) as packing_charge')
         )->first();
 
         $voidedQ = DB::table('pos_orders')
@@ -707,6 +708,7 @@ class PosController extends Controller
             'service_charge_amount' => 0,
             'tip_amount' => 0,
             'delivery_charge' => 0,
+            'packing_charge' => 0,
         ];
         $aggTotal = (float) $aggData->total_amount;
         $summary = [
@@ -723,6 +725,7 @@ class PosController extends Controller
             'service_charge_amount' => (float) $aggData->service_charge_amount,
             'tip_amount' => (float) $aggData->tip_amount,
             'delivery_charge' => (float) $aggData->delivery_charge,
+            'packing_charge' => (float) ($aggData->packing_charge ?? 0),
             'total_amount' => $aggTotal,
             'voided_count' => $voidedCount,
             'voided_amount' => $voidedAmount,
@@ -2908,7 +2911,7 @@ class PosController extends Controller
      *
      * Line gross uses stored pos_order_items.line_total (final line before bill discount; modifiers in combo/line are already included).
      * Refunds: order-level refund total is allocated by line share — not item-level refund attribution.
-     * POS sheet_adjustments: internal reconciliation only (svc+tip+delivery+rounding shares), not a statutory tax line.
+     * POS sheet_adjustments: internal reconciliation only (svc+tip+delivery+packing+rounding shares), not a statutory tax line.
      * Refunds: order-level only until item-linked refunds exist in pos_order_refunds (future: map cancels to lines).
      *
      * @return array<string, float|bool|string>
@@ -2970,8 +2973,9 @@ class PosController extends Controller
         $del = ($order->order_type === 'delivery')
             ? round((float) ($order->delivery_charge ?? 0) * $share, 2)
             : 0.0;
+        $pack = round((float) ($order->packing_charge ?? 0) * $share, 2);
         $rnd = round((float) ($order->rounding_amount ?? 0) * $share, 2);
-        $sheetAdjustments = round($svc + $tip + $del + $rnd, 2);
+        $sheetAdjustments = round($svc + $tip + $del + $pack + $rnd, 2);
 
         $taxInclusive = $this->linePriceTaxInclusive($item, $order);
 
@@ -2988,6 +2992,7 @@ class PosController extends Controller
             'service_charge_alloc' => $svc,
             'tip_alloc' => $tip,
             'delivery_alloc' => $del,
+            'packing_alloc' => $pack,
             'rounding_alloc' => $rnd,
             'sheet_adjustments' => $sheetAdjustments,
             'tax_inclusive' => $taxInclusive,
@@ -3044,6 +3049,7 @@ class PosController extends Controller
             'service_charge_alloc' => 0.0,
             'tip_alloc' => 0.0,
             'delivery_alloc' => 0.0,
+            'packing_alloc' => 0.0,
             'rounding_alloc' => 0.0,
             'sheet_adjustments' => 0.0,
             'tax_inclusive' => $taxInclusive,
@@ -6975,6 +6981,7 @@ class PosController extends Controller
             'tax_exempt' => 'nullable|boolean',
             'tip_amount' => 'nullable|numeric|min:0',
             'delivery_charge' => 'nullable|numeric|min:0',
+            'packing_charge' => 'nullable|numeric|min:0',
             'is_complimentary' => 'nullable|boolean',
             'complimentary_note' => 'nullable|string|max:500',
             'payments' => 'required_unless:is_complimentary,true|array',
@@ -7035,11 +7042,12 @@ class PosController extends Controller
                     }
                 }
 
-                // Apply discount, service charge, tax exempt, delivery charge
+                // Apply discount, service charge, tax exempt, delivery / packing charge
                 $deliveryCharge = (float) ($validated['delivery_charge'] ?? 0);
                 if ($order->order_type !== 'delivery') {
                     $deliveryCharge = 0;
                 }
+                $packingCharge = (float) ($validated['packing_charge'] ?? 0);
 
                 $isComplimentary = (bool) ($validated['is_complimentary'] ?? false);
 
@@ -7052,6 +7060,7 @@ class PosController extends Controller
                     'tax_exempt' => (bool) ($validated['tax_exempt'] ?? $order->tax_exempt),
                     'tip_amount' => (float) ($validated['tip_amount'] ?? 0),
                     'delivery_charge' => $deliveryCharge,
+                    'packing_charge' => $packingCharge,
                     'is_complimentary' => $isComplimentary,
                     'notes' => $isComplimentary ? ($validated['complimentary_note'] ?? $order->notes) : $order->notes,
                 ]);
@@ -7400,6 +7409,7 @@ class PosController extends Controller
                 'service_charge_amount' => $order->service_charge_amount,
                 'tip_amount' => $order->tip_amount,
                 'delivery_charge' => $order->delivery_charge,
+                'packing_charge' => $order->packing_charge,
                 'total_amount' => $order->total_amount,
             ] : null;
 
@@ -8960,12 +8970,15 @@ class PosController extends Controller
 
         $tipAmount = (float) ($order->tip_amount ?? 0);
         $deliveryCharge = $order->order_type === 'delivery' ? (float) ($order->delivery_charge ?? 0) : 0;
+        $packingCharge = (float) ($order->packing_charge ?? 0);
 
         // 5. Final Total Order Amount
         if ($order->is_complimentary) {
             $finalTotal = 0.0;
             $serviceChargeAmount = 0;
             $tipAmount = 0;
+            $deliveryCharge = 0;
+            $packingCharge = 0;
             $totalTaxAmount = 0;
             $cgstAmount = 0;
             $sgstAmount = 0;
@@ -8990,7 +9003,7 @@ class PosController extends Controller
                 $billPaySum = $activeItems->sum(fn ($i) => floatval($i->line_total) * (1 - $discountRatio));
             }
 
-            $finalTotal = round($billPaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge, 2);
+            $finalTotal = round($billPaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge + $packingCharge, 2);
         }
 
         $order->update([
@@ -9005,6 +9018,8 @@ class PosController extends Controller
             'service_charge_amount' => round($serviceChargeAmount, 2),
             'discount_amount' => round($discountAmount, 2),
             'tip_amount' => $tipAmount,
+            'delivery_charge' => round($deliveryCharge, 2),
+            'packing_charge' => round($packingCharge, 2),
             'rounding_amount' => 0,
             'total_amount' => $finalTotal,
         ]);
@@ -9186,6 +9201,7 @@ class PosController extends Controller
             'tip_amount' => (float) ($order->tip_amount ?? 0),
             'rounding_amount' => (float) ($order->rounding_amount ?? 0),
             'delivery_charge' => (float) ($order->delivery_charge ?? 0),
+            'packing_charge' => (float) ($order->packing_charge ?? 0),
             'is_complimentary' => (bool) $order->is_complimentary,
             'discount_approved_by' => $order->discount_approved_by,
             'discount_approved_by_user' => $order->discountApprovedBy ? ['id' => $order->discountApprovedBy->id, 'name' => $order->discountApprovedBy->name] : null,

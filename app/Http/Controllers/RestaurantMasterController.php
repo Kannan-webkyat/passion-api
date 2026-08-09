@@ -93,6 +93,7 @@ class RestaurantMasterController extends Controller
             'kot_ticket_label' => 'nullable|string|in:KOT,BOT',
             'auto_print_payment_receipt' => 'boolean',
             'kot_include_all_items' => 'boolean',
+            'default_packing_charge' => 'nullable|numeric|min:0',
         ];
 
         $validated = $request->validate($rules);

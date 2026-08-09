@@ -14,6 +14,7 @@ class RestaurantMaster extends Model
         'kot_ticket_label',
         'auto_print_payment_receipt',
         'kot_include_all_items',
+        'default_packing_charge',
         'address', 'email', 'phone', 'gstin', 'fssai', 'sac_code', 'logo_path',
     ];
 
@@ -24,6 +25,7 @@ class RestaurantMaster extends Model
         'auto_print_bot' => 'boolean',
         'auto_print_payment_receipt' => 'boolean',
         'kot_include_all_items' => 'boolean',
+        'default_packing_charge' => 'decimal:2',
     ];
 
     public function tables()

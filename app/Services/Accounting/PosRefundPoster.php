@@ -49,6 +49,7 @@ final class PosRefundPoster
         $this->addDebitScaled($lines, AccountCodes::OUTPUT_VAT, (float) $order->vat_tax_amount, $ratio, $order->id, $refund->id, 'output_vat');
         $this->addDebitScaled($lines, AccountCodes::SERVICE_CHARGE, (float) $order->service_charge_amount, $ratio, $order->id, $refund->id);
         $this->addDebitScaled($lines, AccountCodes::DELIVERY_CHARGE, (float) $order->delivery_charge, $ratio, $order->id, $refund->id);
+        $this->addDebitScaled($lines, AccountCodes::PACKING_CHARGE, (float) ($order->packing_charge ?? 0), $ratio, $order->id, $refund->id);
         $this->addDebitScaled($lines, AccountCodes::TIPS_PAYABLE, (float) $order->tip_amount, $ratio, $order->id, $refund->id);
 
         $rounding = round((float) $order->rounding_amount, 2);

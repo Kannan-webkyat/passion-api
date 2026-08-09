@@ -32,6 +32,8 @@ class AccountingPostersPhaseATest extends TestCase
             ['2211', 'Output SGST', 'liability'],
             ['4100', 'Room Revenue', 'income'],
             ['4210', 'Restaurant Sales', 'income'],
+            ['4310', 'Delivery Charge Income', 'income'],
+            ['4311', 'Packing / Parcel Charge Income', 'income'],
             ['4900', 'Sales Discounts', 'contra_income'],
             ['5200', 'Wastage', 'expense'],
             ['5210', 'Staff Meals', 'expense'],
@@ -85,8 +87,9 @@ class AccountingPostersPhaseATest extends TestCase
             'discount_amount' => 0,
             'service_charge_amount' => 0,
             'delivery_charge' => 0,
+            'packing_charge' => 10,
             'tip_amount' => 0,
-            'rounding_amount' => 11.2,
+            'rounding_amount' => 1.2,
         ]);
         $order->id = 501;
 
@@ -109,6 +112,58 @@ class AccountingPostersPhaseATest extends TestCase
             (float) $entry->lines->sum('credit'),
             0.01
         );
+        $packLine = $entry->lines->firstWhere(
+            'account_id',
+            ChartOfAccount::where('code', AccountCodes::PACKING_CHARGE)->value('id')
+        );
+        $this->assertNotNull($packLine);
+        $this->assertEqualsWithDelta(5.0, (float) $packLine->debit, 0.01);
+    }
+
+    public function test_pos_settle_poster_credits_packing_charge(): void
+    {
+        $order = new PosOrder([
+            'id' => 502,
+            'total_amount' => 115,
+            'gst_net_taxable' => 100,
+            'vat_net_taxable' => 0,
+            'cgst_amount' => 2.5,
+            'sgst_amount' => 2.5,
+            'igst_amount' => 0,
+            'vat_tax_amount' => 0,
+            'discount_amount' => 0,
+            'service_charge_amount' => 0,
+            'delivery_charge' => 0,
+            'packing_charge' => 10,
+            'tip_amount' => 0,
+            'rounding_amount' => 0,
+            'business_date' => '2026-08-09',
+            'is_complimentary' => false,
+        ]);
+        $order->id = 502;
+        $order->setRelation('payments', collect([
+            new \App\Models\PosPayment([
+                'id' => 1,
+                'order_id' => 502,
+                'method' => 'cash',
+                'amount' => 115,
+            ]),
+        ]));
+
+        $entry = app(\App\Services\Accounting\PosSettlePoster::class)->post($order);
+
+        $this->assertNotNull($entry);
+        $this->assertEqualsWithDelta(
+            (float) $entry->lines->sum('debit'),
+            (float) $entry->lines->sum('credit'),
+            0.01
+        );
+        $packLine = $entry->lines->firstWhere(
+            'account_id',
+            ChartOfAccount::where('code', AccountCodes::PACKING_CHARGE)->value('id')
+        );
+        $this->assertNotNull($packLine);
+        $this->assertEqualsWithDelta(10.0, (float) $packLine->credit, 0.01);
     }
 
     public function test_inventory_adjustment_poster_posts_wastage(): void

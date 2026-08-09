@@ -836,20 +836,21 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * Bar locations for excise: typed bar_store, classic "Bar Store",
-     * then outlet bar_location_id links (common when stores are typed sub_store).
+     * Locations for excise liquor register: Main Store + all bar stores /
+     * outlet bar locations. Combined so opening, GRN purchases (at main),
+     * and bar POS sales appear on one dated register.
      *
      * @return list<array{id:int,name:string,type:?string}>
      */
-    private function resolveExciseBarLocations(): array
+    private function resolveExciseLocations(): array
     {
         $byId = [];
 
         foreach (
             InventoryLocation::query()
                 ->where(function ($q) {
-                    $q->where('type', 'bar_store')
-                        ->orWhere('name', 'Bar Store');
+                    $q->whereIn('type', ['main_store', 'bar_store'])
+                        ->orWhereIn('name', ['Main Store', 'Bar Store']);
                 })
                 ->orderBy('id')
                 ->get(['id', 'name', 'type']) as $loc
@@ -885,18 +886,21 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * Excise (Bar) Report
+     * Excise liquor register (Main Store + Bar)
      *
      * Excel-style output:
-     * - Opening: bottles + loose litres
-     * - Receipts: bottles + loose litres
-     * - Sales: bottles + pegs (1 peg = 60ml by default)
+     * - Opening: bottles + loose litres (hotel liquor stock at main + bars)
+     * - Receipts: GRN purchases into those locations on the selected date
+     * - Sales: bottles + pegs (1 peg = 60ml by default) — POS outs from bars
      * - Closing: bottles + loose litres
+     *
+     * Internal main→bar transfers are not counted as receipts (would double-count).
      *
      * Assumptions:
      * - Spirits are tracked in ml (issue UOM = ml, conversion_factor = bottle ml)
      * - Beer is tracked in pcs (issue UOM = Pcs, conversion_factor = 1)
      * - POS generates inventory_transactions out rows with reason 'POS Order'
+     * - Supplier receipts post as reason 'GRN Receipt' at Main Store
      */
     public function exciseBar(Request $request)
     {
@@ -907,11 +911,11 @@ class InventoryReportController extends Controller
             return response()->json(['message' => 'date is required (YYYY-MM-DD).'], 422);
         }
 
-        $barLocations = $this->resolveExciseBarLocations();
-        $locationIds = array_column($barLocations, 'id');
+        $exciseLocations = $this->resolveExciseLocations();
+        $locationIds = array_column($exciseLocations, 'id');
         if ($locationIds === []) {
             return response()->json([
-                'message' => 'No bar store location found. Link a store on the outlet (bar location) or create a bar_store location.',
+                'message' => 'No Main Store or bar location found. Configure Main Store and link bar stores on outlets.',
                 'meta' => [
                     'locations' => [],
                 ],
@@ -924,7 +928,7 @@ class InventoryReportController extends Controller
         $start = \Carbon\Carbon::parse($date)->startOfDay();
         $end = \Carbon\Carbon::parse($date)->endOfDay();
 
-        // Items present in any bar store (even zero, we still allow report)
+        // Items present in main and/or bar (even zero, we still allow report)
         $qtyNowByItemId = DB::table('inventory_item_locations')
             ->whereIn('inventory_location_id', $locationIds)
             ->selectRaw('inventory_item_id, SUM(COALESCE(quantity, 0)) as qty')
@@ -939,7 +943,9 @@ class InventoryReportController extends Controller
                     'date' => $start->toDateString(),
                     'location_ids' => $locationIds,
                     'peg_ml' => $pegMl,
-                    'locations' => $barLocations,
+                    'locations' => $exciseLocations,
+                    'receipts_reasons' => ['GRN Receipt'],
+                    'scope' => 'main_and_bar',
                 ],
                 'summary' => [
                     'rows' => 0,
@@ -995,7 +1001,9 @@ class InventoryReportController extends Controller
                     'date' => $start->toDateString(),
                     'location_ids' => $locationIds,
                     'peg_ml' => $pegMl,
-                    'locations' => $barLocations,
+                    'locations' => $exciseLocations,
+                    'receipts_reasons' => ['GRN Receipt'],
+                    'scope' => 'main_and_bar',
                 ],
                 'summary' => [
                     'rows' => 0,
@@ -1006,8 +1014,8 @@ class InventoryReportController extends Controller
         $qtyNowByItemId = $qtyNowByItemId->only($itemIds->all());
 
         // Aggregate transactions for the day and after the day (to reverse from current stock).
-        // Receipts = purchases / stock received into bar that day (not opening stock / adjustments).
-        $purchaseReasons = ['GRN Receipt', 'Store Receipt', 'Transfer'];
+        // Receipts = supplier GRN into Main (or bar) that day — not internal store transfers.
+        $purchaseReasons = ['GRN Receipt'];
         $purchaseReasonList = collect($purchaseReasons)
             ->map(fn ($r) => "'".str_replace("'", "''", $r)."'")
             ->implode(',');
@@ -1170,8 +1178,9 @@ class InventoryReportController extends Controller
                 'date' => $start->toDateString(),
                 'location_ids' => $locationIds,
                 'peg_ml' => $pegMl,
-                'locations' => $barLocations,
+                'locations' => $exciseLocations,
                 'receipts_reasons' => $purchaseReasons,
+                'scope' => 'main_and_bar',
             ],
             'summary' => [
                 'rows' => $rows->count(),
