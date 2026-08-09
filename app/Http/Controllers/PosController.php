@@ -6632,13 +6632,27 @@ class PosController extends Controller
             ], 422);
         }
 
-        $fresh = $order->fresh();
+        $fresh = $order->fresh()->load(
+            'items.menuItem.tax',
+            'items.menuItem.category',
+            'items.combo',
+            'items.variant',
+            'payments',
+            'room',
+            'table',
+            'waiter',
+            'openedBy',
+            'voidedBy',
+            'discountApprovedBy'
+        );
         $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
 
         return response()->json([
             'message' => 'KOT sent.',
             'kitchen_status' => $fresh->kitchen_status,
             'kot_batch' => $fresh->current_kot_batch,
+            // Include order so POS can print immediately without a second GET race.
+            'order' => $this->formatOrder($fresh),
         ]);
     }
 
