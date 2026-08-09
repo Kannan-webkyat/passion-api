@@ -219,25 +219,6 @@ class PosController extends Controller
         return $blocking->isNotEmpty() ? $blocking : collect($kotItems)->values();
     }
 
-    /** True when outlet department is a bar station (code BAR or whole-word "bar"). */
-    private function isBarStationDepartment(?object $dept): bool
-    {
-        if (! $dept) {
-            return false;
-        }
-        $code = strtoupper(trim((string) ($dept->code ?? '')));
-        if ($code === 'BAR') {
-            return true;
-        }
-        $name = strtolower(trim((string) ($dept->name ?? '')));
-        if ($name === '') {
-            return false;
-        }
-
-        // Whole-word "bar" only — avoid false positives like "Barbecue"
-        return (bool) preg_match('/(?:^|[^a-z])bar(?:[^a-z]|$)/', $name);
-    }
-
     /** Sync kitchen_status after voids / batch changes. Ready = production; served = all KOT. */
     private function syncOrderKitchenStatusFromKotItems(PosOrder $order): void
     {
@@ -7607,16 +7588,8 @@ class PosController extends Controller
 
         $orders = $query->orderBy('opened_at')->get();
 
-        // Station type comes from the selected outlet, not the user's departments
-        // (dual kitchen+bar staff would otherwise always see bar-only lines).
-        $isBarKds = false;
-        if ($restaurantId) {
-            $outlet = RestaurantMaster::with('department')->find((int) $restaurantId);
-            $isBarKds = $this->isBarStationDepartment($outlet?->department);
-        }
-
         $orders = $orders
-            ->map(function ($order) use ($restaurantId, $isBarKds) {
+            ->map(function ($order) {
                 $label = match ($order->order_type ?? 'dine_in') {
                     'takeaway' => 'Takeaway' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
                     'walk_in' => 'Walk-in' . ($order->customer_name ? ' — ' . $order->customer_name : ''),
@@ -7625,15 +7598,15 @@ class PosController extends Controller
                     default => 'Table ' . ($order->table?->table_number ?? '?'),
                 };
 
-                // Filtering only happens when a SPECIFIC outlet station is selected.
-                // If viewing 'All Outlets', we show EVERYTHING for maximum oversight.
-                $passesKdsStation = function ($item) use ($restaurantId, $isBarKds, $order) {
+                // KDS is kitchen food only — never BOT / direct-sale / non-production bar lines.
+                // Bar uses thermal BOT print; liquor must not appear on Kitchen Display
+                // (including All outlets).
+                $passesKdsStation = function ($item) use ($order) {
                     if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
                         return false;
                     }
 
-                    // Master / all-outlets view: show every KOT/BOT line
-                    if (! $restaurantId) {
+                    if ($item->combo_id) {
                         return true;
                     }
 
@@ -7642,16 +7615,6 @@ class PosController extends Controller
                             $item->menu_item_id
                             && ! (bool) ($item->menuItem?->requires_production ?? true)
                         );
-
-                    if ($isBarKds) {
-                        // Bar station: BOT / direct-sale / non-production lines only
-                        return $isBarLine;
-                    }
-
-                    // Kitchen station: production / combo food lines (not liquor BOT)
-                    if ($item->combo_id) {
-                        return true;
-                    }
 
                     return ! $isBarLine;
                 };
