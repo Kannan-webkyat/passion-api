@@ -30,9 +30,11 @@ class DefaultHotelRolesSeeder extends Seeder
             'Cashier' => [
                 'pos-order',
                 'pos-settle',
+                'pos-refund',
             ],
             'Kitchen Staff' => [
                 'kitchen-production',
+                'menu-availability',
                 'create-requisition',
                 'view-dashboard',
             ],
@@ -55,6 +57,7 @@ class DefaultHotelRolesSeeder extends Seeder
                 'pos-day-closing-unlock',
                 'pos-business-date-override',
                 'pos-void-item',
+                'pos-refund',
                 'pos-discount',
                 'pos-reopen-order',
                 'report-sales',

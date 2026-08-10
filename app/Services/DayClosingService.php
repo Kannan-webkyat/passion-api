@@ -202,8 +202,8 @@ class DayClosingService
                 'count' => $pendingReq,
                 'blocking' => true,
                 'detail' => $pendingReq === 0
-                    ? 'No pending requisitions or transfers.'
-                    : 'Complete or cancel pending store requests.',
+                    ? 'No pending requisitions for this outlet store.'
+                    : 'Complete or cancel pending requests for this outlet store (bar store for bar outlets; kitchen store for kitchen-only outlets). Shared kitchen transfers do not block bar day-close.',
             ],
         ];
 

@@ -8,7 +8,7 @@ class PosOrder extends Model
 {
     protected $fillable = [
         'order_type', 'table_id', 'restaurant_id', 'business_date', 'waiter_id', 'opened_by',
-        'room_id', 'booking_id', 'customer_name', 'customer_phone', 'customer_gstin', 'delivery_address', 'delivery_channel', 'delivery_charge',
+        'room_id', 'booking_id', 'customer_name', 'customer_phone', 'customer_gstin', 'delivery_address', 'delivery_channel', 'delivery_charge', 'packing_charge',
         'covers', 'status', 'kitchen_status', 'current_kot_batch',
         'discount_type', 'discount_value', 'service_charge_type', 'service_charge_value', 'service_charge_amount',
         'subtotal', 'tax_amount', 'cgst_amount', 'sgst_amount', 'igst_amount', 'vat_tax_amount', 'gst_net_taxable', 'vat_net_taxable', 'discount_amount', 'tip_amount', 'rounding_amount', 'total_amount', 'opened_at', 'closed_at', 'notes', 'tax_exempt', 'prices_tax_inclusive', 'receipt_show_tax_breakdown', 'is_complimentary',
@@ -37,6 +37,7 @@ class PosOrder extends Model
         'tip_amount' => 'decimal:2',
         'rounding_amount' => 'decimal:2',
         'delivery_charge' => 'decimal:2',
+        'packing_charge' => 'decimal:2',
         'total_amount' => 'decimal:2',
         'tax_exempt' => 'boolean',
         'prices_tax_inclusive' => 'boolean',

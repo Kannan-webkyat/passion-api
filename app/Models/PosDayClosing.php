@@ -9,7 +9,8 @@ class PosDayClosing extends Model
     protected $fillable = [
         'restaurant_id', 'closed_date', 'closed_at', 'closed_by',
         'opening_balance', 'closing_balance',
-        'total_sales', 'total_discount', 'total_tax', 'total_service_charge', 'total_tip', 'total_paid',
+        'total_sales', 'total_discount', 'total_tax', 'total_service_charge', 'total_tip',
+        'total_packing_charge', 'total_paid',
         'total_refunded', 'gst_net_taxable', 'vat_net_taxable',
         'cgst_amount', 'sgst_amount', 'igst_amount', 'vat_tax_amount',
         'cash_total', 'card_total', 'upi_total', 'room_charge_total',
@@ -26,6 +27,7 @@ class PosDayClosing extends Model
         'total_tax' => 'decimal:2',
         'total_service_charge' => 'decimal:2',
         'total_tip' => 'decimal:2',
+        'total_packing_charge' => 'decimal:2',
         'total_refunded' => 'decimal:2',
         'total_paid' => 'decimal:2',
         'gst_net_taxable' => 'decimal:2',

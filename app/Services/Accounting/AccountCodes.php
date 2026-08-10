@@ -50,6 +50,8 @@ final class AccountCodes
 
     public const DELIVERY_CHARGE = '4310';
 
+    public const PACKING_CHARGE = '4311';
+
     public const SALES_DISCOUNTS = '4900';
 
     public const COGS_RESTAURANT = '5100';

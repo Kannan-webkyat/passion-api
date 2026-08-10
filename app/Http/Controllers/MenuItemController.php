@@ -32,7 +32,12 @@ class MenuItemController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (
+            $user
+            && ! $user->hasRole('Admin')
+            && ! $user->can($permission)
+            && ! ($permission === 'menu-configuration' && $user->can('manage-menu'))
+        ) {
             abort(403, 'Unauthorized action.');
         }
     }
@@ -50,7 +55,7 @@ class MenuItemController extends Controller
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
         $request->merge([
             'menu_sub_category_id' => $request->input('menu_sub_category_id') ?: null,
@@ -117,7 +122,7 @@ class MenuItemController extends Controller
 
     public function update(Request $request, MenuItem $menuItem)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $request->merge(['tax_id' => $request->input('tax_id') ?: null]);
         $request->merge([
             'menu_sub_category_id' => $request->input('menu_sub_category_id') ?: null,
@@ -179,7 +184,7 @@ class MenuItemController extends Controller
 
     public function destroy(MenuItem $menuItem)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         try {
             $menuItem->delete();
 

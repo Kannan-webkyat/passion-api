@@ -85,6 +85,7 @@ final class PosSettlePoster
         $this->addCredit($lines, AccountCodes::OUTPUT_VAT, (float) $order->vat_tax_amount, $order->id, 'output_vat');
         $this->addCredit($lines, AccountCodes::SERVICE_CHARGE, (float) $order->service_charge_amount, $order->id);
         $this->addCredit($lines, AccountCodes::DELIVERY_CHARGE, (float) $order->delivery_charge, $order->id);
+        $this->addCredit($lines, AccountCodes::PACKING_CHARGE, (float) ($order->packing_charge ?? 0), $order->id);
         $this->addCredit($lines, AccountCodes::TIPS_PAYABLE, (float) $order->tip_amount, $order->id);
 
         $rounding = round((float) $order->rounding_amount, 2);

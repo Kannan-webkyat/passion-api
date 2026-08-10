@@ -176,19 +176,37 @@ class InventoryDeductionStoreResolver
      */
     public function mtoRecipeIsSoldOut(Recipe $recipe, MenuItem $menuItem, array $stockMap): bool
     {
+        return $this->mtoMaxMakeablePortions($recipe, $stockMap) <= 0;
+    }
+
+    /**
+     * How many whole portions can be made from the given stock map (after any reservations).
+     *
+     * @param  array<int, float>  $stockMap
+     */
+    public function mtoMaxMakeablePortions(Recipe $recipe, array $stockMap): int
+    {
         $multiplier = 1 / max(0.001, (float) $recipe->yield_quantity);
         $requirements = $this->bomExpander->flattenedRequirements($recipe, $multiplier);
 
         if ($requirements === []) {
-            return true;
+            return 0;
         }
 
+        $max = PHP_FLOAT_MAX;
         foreach ($requirements as $itemId => $needQty) {
-            if (($stockMap[$itemId] ?? 0) < $needQty) {
-                return true;
+            $need = (float) $needQty;
+            if ($need <= 0.0001) {
+                continue;
             }
+            $have = (float) ($stockMap[$itemId] ?? 0);
+            $max = min($max, floor($have / $need));
         }
 
-        return false;
+        if ($max === PHP_FLOAT_MAX) {
+            return 0;
+        }
+
+        return (int) max(0, $max);
     }
 }

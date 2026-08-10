@@ -51,7 +51,7 @@ use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
 
-Route::middleware(['auth:sanctum'])->group(function () {
+Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
@@ -322,6 +322,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('reports/purchase-history', [InventoryReportController::class, 'purchaseHistory']);
         Route::get('reports/excise-bar', [InventoryReportController::class, 'exciseBar']);
         Route::get('reports/excise-bar/export', [InventoryReportController::class, 'exciseBarExport']);
+        Route::get('reports/excise-bar/category-order', [InventoryReportController::class, 'exciseCategoryOrder']);
+        Route::put('reports/excise-bar/category-order', [InventoryReportController::class, 'updateExciseCategoryOrder']);
         Route::apiResource('items', InventoryController::class);
         Route::apiResource('categories', InventoryCategoryController::class);
         Route::apiResource('uoms', InventoryUomController::class);

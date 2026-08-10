@@ -88,11 +88,33 @@ class RestaurantMasterController extends Controller
             'sac_code' => 'nullable|string|max:20',
             'business_day_cutoff_time' => 'nullable|date_format:H:i:s',
             'receipt_show_tax_breakdown' => 'boolean',
+            'auto_print_kot' => 'boolean',
+            'auto_print_bot' => 'boolean',
+            'kot_ticket_label' => 'nullable|string|in:KOT,BOT',
+            'auto_print_payment_receipt' => 'boolean',
+            'kot_include_all_items' => 'boolean',
+            'default_packing_charge' => 'nullable|numeric|min:0',
         ];
 
         $validated = $request->validate($rules);
         if (array_key_exists('business_day_cutoff_time', $validated) && $validated['business_day_cutoff_time'] === null) {
             $validated['business_day_cutoff_time'] = '04:00:00';
+        }
+        if (array_key_exists('kot_ticket_label', $validated)) {
+            $validated['kot_ticket_label'] = strtoupper(trim((string) ($validated['kot_ticket_label'] ?: 'KOT')));
+            if (! in_array($validated['kot_ticket_label'], ['KOT', 'BOT'], true)) {
+                $validated['kot_ticket_label'] = 'KOT';
+            }
+        } else {
+            $bot = (bool) ($validated['auto_print_bot'] ?? false);
+            $kot = (bool) ($validated['auto_print_kot'] ?? false);
+            if ($bot && ! $kot) {
+                $validated['kot_ticket_label'] = 'BOT';
+            } elseif ($kot && ! $bot) {
+                $validated['kot_ticket_label'] = 'KOT';
+            } elseif ($bot) {
+                $validated['kot_ticket_label'] = 'BOT';
+            }
         }
 
         return $validated;

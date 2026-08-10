@@ -6,7 +6,11 @@ use Illuminate\Database\Eloquent\Model;
 
 class InventoryCategory extends Model
 {
-    protected $fillable = ['name', 'description', 'parent_id'];
+    protected $fillable = ['name', 'description', 'parent_id', 'excise_sort_order'];
+
+    protected $casts = [
+        'excise_sort_order' => 'integer',
+    ];
 
     public function parent()
     {

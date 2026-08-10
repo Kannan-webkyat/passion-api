@@ -19,7 +19,10 @@ class UserController extends Controller
 
     public function index()
     {
-        return User::with(['roles', 'departments', 'restaurants'])->get();
+        return User::with(['roles', 'departments', 'restaurants'])
+            ->orderByDesc('is_active')
+            ->orderBy('name')
+            ->get();
     }
 
     public function store(Request $request)
@@ -32,12 +35,14 @@ class UserController extends Controller
             'roles' => 'nullable|array',
             'departments' => 'nullable|array',
             'restaurant_ids' => 'nullable|array',
+            'is_active' => 'nullable|boolean',
         ]);
 
         $user = User::create([
             'name' => $validated['name'],
             'email' => $validated['email'],
             'password' => Hash::make($validated['password']),
+            'is_active' => $validated['is_active'] ?? true,
         ]);
 
         if (isset($validated['roles'])) {
@@ -74,7 +79,12 @@ class UserController extends Controller
             'roles' => 'nullable|array',
             'departments' => 'nullable|array',
             'restaurant_ids' => 'nullable|array',
+            'is_active' => 'nullable|boolean',
         ]);
+
+        if (array_key_exists('is_active', $validated) && $validated['is_active'] === false) {
+            return $this->deactivateUser($user);
+        }
 
         if (isset($validated['name'])) {
             $user->name = $validated['name'];
@@ -84,6 +94,9 @@ class UserController extends Controller
         }
         if (isset($validated['password'])) {
             $user->password = Hash::make($validated['password']);
+        }
+        if (array_key_exists('is_active', $validated) && $validated['is_active'] === true) {
+            $user->is_active = true;
         }
 
         $user->save();
@@ -113,17 +126,35 @@ class UserController extends Controller
 
     public function destroy(User $user)
     {
+        return $this->deactivateUser($user);
+    }
+
+    private function deactivateUser(User $user)
+    {
         $this->checkPermission('manage-users');
+
+        if ((int) $user->id === (int) auth()->id()) {
+            return response()->json(['message' => 'You cannot deactivate your own account.'], 422);
+        }
+
         if ($user->hasRole('Admin') && ! auth()->user()->hasRole('Admin')) {
-            abort(403, 'Only Admins can delete other Admins.');
+            abort(403, 'Only Admins can deactivate other Admins.');
         }
 
-        if ($user->hasRole('Admin') && User::role('Admin')->count() <= 1) {
-            return response()->json(['message' => 'Cannot delete the last admin.'], 403);
+        if ($user->hasRole('Admin') && (bool) $user->is_active) {
+            $otherActiveAdmins = User::role('Admin')
+                ->where('users.is_active', true)
+                ->where('users.id', '!=', $user->id)
+                ->count();
+            if ($otherActiveAdmins < 1) {
+                return response()->json(['message' => 'Cannot deactivate the last active admin.'], 422);
+            }
         }
 
-        $user->delete();
+        $user->is_active = false;
+        $user->save();
+        $user->tokens()->delete();
 
-        return response()->json(null, 204);
+        return response()->json($user->load(['roles', 'departments', 'restaurants']));
     }
 }

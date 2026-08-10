@@ -15,6 +15,12 @@ use App\Services\ConsumptionActualsService;
 use App\Services\RecipeBomExpander;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
+use PhpOffice\PhpSpreadsheet\Spreadsheet;
+use PhpOffice\PhpSpreadsheet\Style\Alignment;
+use PhpOffice\PhpSpreadsheet\Style\Border;
+use PhpOffice\PhpSpreadsheet\Style\Fill;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 class InventoryReportController extends Controller
 {
@@ -830,18 +836,71 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * Excise (Bar) Report
+     * Locations for excise liquor register: Main Store + all bar stores /
+     * outlet bar locations. Combined so opening, GRN purchases (at main),
+     * and bar POS sales appear on one dated register.
+     *
+     * @return list<array{id:int,name:string,type:?string}>
+     */
+    private function resolveExciseLocations(): array
+    {
+        $byId = [];
+
+        foreach (
+            InventoryLocation::query()
+                ->where(function ($q) {
+                    $q->whereIn('type', ['main_store', 'bar_store'])
+                        ->orWhereIn('name', ['Main Store', 'Bar Store']);
+                })
+                ->orderBy('id')
+                ->get(['id', 'name', 'type']) as $loc
+        ) {
+            $byId[(int) $loc->id] = [
+                'id' => (int) $loc->id,
+                'name' => (string) $loc->name,
+                'type' => $loc->type,
+            ];
+        }
+
+        $linkedIds = DB::table('restaurant_masters')
+            ->whereNotNull('bar_location_id')
+            ->distinct()
+            ->pluck('bar_location_id');
+
+        if ($linkedIds->isNotEmpty()) {
+            foreach (
+                InventoryLocation::query()
+                    ->whereIn('id', $linkedIds)
+                    ->orderBy('id')
+                    ->get(['id', 'name', 'type']) as $loc
+            ) {
+                $byId[(int) $loc->id] = [
+                    'id' => (int) $loc->id,
+                    'name' => (string) $loc->name,
+                    'type' => $loc->type,
+                ];
+            }
+        }
+
+        return array_values($byId);
+    }
+
+    /**
+     * Excise liquor register (Main Store + Bar)
      *
      * Excel-style output:
-     * - Opening: bottles + loose litres
-     * - Receipts: bottles + loose litres
-     * - Sales: bottles + pegs (1 peg = 60ml by default)
+     * - Opening: bottles + loose litres (hotel liquor stock at main + bars)
+     * - Receipts: GRN purchases into those locations on the selected date
+     * - Sales: bottles + pegs (1 peg = 60ml by default) — POS outs from bars
      * - Closing: bottles + loose litres
+     *
+     * Internal main→bar transfers are not counted as receipts (would double-count).
      *
      * Assumptions:
      * - Spirits are tracked in ml (issue UOM = ml, conversion_factor = bottle ml)
      * - Beer is tracked in pcs (issue UOM = Pcs, conversion_factor = 1)
      * - POS generates inventory_transactions out rows with reason 'POS Order'
+     * - Supplier receipts post as reason 'GRN Receipt' at Main Store
      */
     public function exciseBar(Request $request)
     {
@@ -852,13 +911,15 @@ class InventoryReportController extends Controller
             return response()->json(['message' => 'date is required (YYYY-MM-DD).'], 422);
         }
 
-        $locationId = $request->query('location_id');
-        if (! $locationId || $locationId === 'auto') {
-            $locationId = InventoryLocation::query()->where('type', 'bar_store')->orderBy('id')->value('id')
-                ?? InventoryLocation::query()->where('name', 'Bar Store')->orderBy('id')->value('id');
-        }
-        if (! $locationId) {
-            return response()->json(['message' => 'No bar store location found.'], 422);
+        $exciseLocations = $this->resolveExciseLocations();
+        $locationIds = array_column($exciseLocations, 'id');
+        if ($locationIds === []) {
+            return response()->json([
+                'message' => 'No Main Store or bar location found. Configure Main Store and link bar stores on outlets.',
+                'meta' => [
+                    'locations' => [],
+                ],
+            ], 422);
         }
 
         $pegMl = (float) ($request->query('peg_ml') ?? 60);
@@ -867,10 +928,11 @@ class InventoryReportController extends Controller
         $start = \Carbon\Carbon::parse($date)->startOfDay();
         $end = \Carbon\Carbon::parse($date)->endOfDay();
 
-        // Items present in this bar store (even zero, we still allow report)
+        // Items present in main and/or bar (even zero, we still allow report)
         $qtyNowByItemId = DB::table('inventory_item_locations')
-            ->where('inventory_location_id', $locationId)
-            ->selectRaw('inventory_item_id, COALESCE(quantity, 0) as qty')
+            ->whereIn('inventory_location_id', $locationIds)
+            ->selectRaw('inventory_item_id, SUM(COALESCE(quantity, 0)) as qty')
+            ->groupBy('inventory_item_id')
             ->pluck('qty', 'inventory_item_id');
 
         $itemIds = $qtyNowByItemId->keys();
@@ -879,8 +941,11 @@ class InventoryReportController extends Controller
                 'data' => [],
                 'meta' => [
                     'date' => $start->toDateString(),
-                    'location_id' => (int) $locationId,
+                    'location_ids' => $locationIds,
                     'peg_ml' => $pegMl,
+                    'locations' => $exciseLocations,
+                    'receipts_reasons' => ['GRN Receipt'],
+                    'scope' => 'main_and_bar',
                 ],
                 'summary' => [
                     'rows' => 0,
@@ -888,19 +953,81 @@ class InventoryReportController extends Controller
             ]);
         }
 
-        $items = InventoryItem::with(['issueUom', 'category'])
+        // Excise register is alcohol only (exclude water, soft drinks, mixers, etc.)
+        // Sort: main → sub → product name group → bottle size (1000 → 750 → 375) → item name
+        $items = InventoryItem::with(['issueUom', 'category.parent'])
             ->whereIn('id', $itemIds)
-            ->orderBy('name')
-            ->get();
+            ->where('is_alcohol', true)
+            ->get()
+            ->sortBy(function (InventoryItem $i) {
+                $cat = $i->category;
+                if (! $cat) {
+                    return '9999-9999-zzz-99999-zzz';
+                }
+                $mainOrder = $cat->parent_id
+                    ? ($cat->parent?->excise_sort_order ?? 9999)
+                    : ($cat->excise_sort_order ?? 9999);
+                // Items on a main category sit before that main's subcategories
+                $subOrder = $cat->parent_id
+                    ? ($cat->excise_sort_order ?? 9999)
+                    : 0;
+
+                $rawName = (string) $i->name;
+                // Group variants: "Mansion House (MH) 1000ml" → "mansion house (mh)"
+                $baseName = preg_replace('/\s*[—\-]?\s*\d+(?:\.\d+)?\s*ml\s*$/iu', '', $rawName) ?? $rawName;
+                $baseName = mb_strtolower(trim(preg_replace('/\s{2,}/u', ' ', $baseName) ?? $baseName));
+
+                $bottleMl = (int) round((float) ($i->conversion_factor ?: 0));
+                // Larger bottle first within the name group
+                $bottleRank = $bottleMl > 0 ? (99999 - $bottleMl) : 99999;
+
+                return sprintf(
+                    '%05d-%05d-%s-%s-%05d-%s',
+                    (int) $mainOrder,
+                    (int) $subOrder,
+                    mb_strtolower((string) ($cat->name ?? 'zzz')),
+                    $baseName !== '' ? $baseName : 'zzz',
+                    $bottleRank,
+                    mb_strtolower($rawName)
+                );
+            })
+            ->values();
+
+        $itemIds = $items->pluck('id');
+        if ($itemIds->isEmpty()) {
+            return response()->json([
+                'data' => [],
+                'meta' => [
+                    'date' => $start->toDateString(),
+                    'location_ids' => $locationIds,
+                    'peg_ml' => $pegMl,
+                    'locations' => $exciseLocations,
+                    'receipts_reasons' => ['GRN Receipt'],
+                    'scope' => 'main_and_bar',
+                ],
+                'summary' => [
+                    'rows' => 0,
+                ],
+            ]);
+        }
+
+        $qtyNowByItemId = $qtyNowByItemId->only($itemIds->all());
 
         // Aggregate transactions for the day and after the day (to reverse from current stock).
+        // Receipts = supplier GRN into Main (or bar) that day — not internal store transfers.
+        $purchaseReasons = ['GRN Receipt'];
+        $purchaseReasonList = collect($purchaseReasons)
+            ->map(fn ($r) => "'".str_replace("'", "''", $r)."'")
+            ->implode(',');
+
         $txAggDay = InventoryTransaction::query()
             ->whereIn('inventory_item_id', $itemIds)
-            ->where('inventory_location_id', $locationId)
+            ->whereIn('inventory_location_id', $locationIds)
             ->whereBetween('created_at', [$start, $end])
             ->selectRaw("inventory_item_id,
                 SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END) as in_qty,
                 SUM(CASE WHEN type = 'out' THEN quantity ELSE 0 END) as out_qty,
+                SUM(CASE WHEN type = 'in' AND reason IN ({$purchaseReasonList}) THEN quantity ELSE 0 END) as purchase_in_qty,
                 SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty
             ")
             ->groupBy('inventory_item_id')
@@ -909,7 +1036,7 @@ class InventoryReportController extends Controller
 
         $txAggAfter = InventoryTransaction::query()
             ->whereIn('inventory_item_id', $itemIds)
-            ->where('inventory_location_id', $locationId)
+            ->whereIn('inventory_location_id', $locationIds)
             ->where('created_at', '>', $end)
             ->selectRaw("inventory_item_id,
                 SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END) as in_qty,
@@ -919,27 +1046,32 @@ class InventoryReportController extends Controller
             ->get()
             ->keyBy('inventory_item_id');
 
-        $splitBottleLoose = function (float $qty, float $bottleMl): array {
+        $splitBottlePeg = function (float $qtyMl, float $bottleMl, float $pegMl): array {
             if ($bottleMl <= 0.0001) {
-                return ['bottles' => 0.0, 'loose_litres' => 0.0];
-            }
-            $bottles = floor($qty / $bottleMl);
-            $looseMl = max(0.0, $qty - ($bottles * $bottleMl));
-            return [
-                'bottles' => $bottles,
-                'loose_litres' => round($looseMl / 1000, 3),
-            ];
-        };
-
-        $splitSalesBottlePeg = function (float $qtyMl, float $bottleMl, float $pegMl) : array {
-            if ($bottleMl <= 0.0001 || $pegMl <= 0.0001) {
                 return ['bottles' => 0.0, 'pegs' => 0.0];
             }
+            // Full sealed bottles + open remainder as pegs.
+            // Peg scale (peg_ml=60): 0.5 = 30ml, 1 = 60ml, 1.5 = 90ml — always half-peg steps.
             $bottles = floor($qtyMl / $bottleMl);
             $remMl = max(0.0, $qtyMl - ($bottles * $bottleMl));
-            $pegs = $remMl / $pegMl;
+            if ($pegMl <= 0.0001 || $remMl < 0.0001) {
+                return ['bottles' => (float) $bottles, 'pegs' => 0.0];
+            }
+            $halfPegMl = $pegMl / 2; // 30ml when peg = 60ml
+            $halfPegs = (int) round($remMl / $halfPegMl);
+            $pegs = $halfPegs / 2; // 0, 0.5, 1, 1.5, …
+
+            // If rounding pushes remainder to a full bottle, roll into bottles
+            $maxHalfInBottle = (int) floor($bottleMl / $halfPegMl);
+            if ($halfPegs >= $maxHalfInBottle && $maxHalfInBottle > 0) {
+                $extraBottles = intdiv($halfPegs, $maxHalfInBottle);
+                $halfPegs = $halfPegs % $maxHalfInBottle;
+                $bottles += $extraBottles;
+                $pegs = $halfPegs / 2;
+            }
+
             return [
-                'bottles' => $bottles,
+                'bottles' => (float) $bottles,
                 'pegs' => round($pegs, 2),
             ];
         };
@@ -948,11 +1080,9 @@ class InventoryReportController extends Controller
             $qtyNowByItemId,
             $txAggDay,
             $txAggAfter,
-            $splitBottleLoose,
-            $splitSalesBottlePeg,
+            $splitBottlePeg,
             $pegMl
         ) {
-            $uom = strtolower((string) ($item->issueUom?->short_name ?? ''));
             $bottleMl = (float) ($item->conversion_factor ?: 0);
 
             $nowQty = (float) ($qtyNowByItemId[$item->id] ?? 0);
@@ -960,66 +1090,99 @@ class InventoryReportController extends Controller
             $day = $txAggDay->get($item->id);
             $dayIn = (float) ($day?->in_qty ?? 0);
             $dayOut = (float) ($day?->out_qty ?? 0);
+            $purchaseIn = (float) ($day?->purchase_in_qty ?? 0);
             $posOut = (float) ($day?->pos_out_qty ?? 0);
             $netDay = $dayIn - $dayOut;
 
             $after = $txAggAfter->get($item->id);
             $afterNet = (float) ($after?->in_qty ?? 0) - (float) ($after?->out_qty ?? 0);
 
-            // current = opening + netDay + afterNet
+            // current = opening + netDay + afterNet → opening / end-of-day from live stock
             $openingQty = $nowQty - $netDay - $afterNet;
-            $closingQty = $openingQty + $netDay;
+            $closingQty = $nowQty - $afterNet; // stock at end of selected date (matches book)
 
-            // Spirits-like (ml tracked)
-            if ($uom === 'ml' && $bottleMl > 0) {
-                $opening = $splitBottleLoose($openingQty, $bottleMl);
-                $receipts = $splitBottleLoose($dayIn, $bottleMl);
-                $sales = $splitSalesBottlePeg($posOut, $bottleMl, $pegMl);
-                $closing = $splitBottleLoose($closingQty, $bottleMl);
+            // Register columns: Receipts = GRN only; Sales = POS only.
+            // Other day movements (adjustments, wastage, transfers net, etc.) explain
+            // Opening + Receipts − Sales ≠ Closing when present.
+            $receiptsQty = $purchaseIn;
+            $salesQty = $posOut;
+            $otherDayNet = ($dayIn - $purchaseIn) - ($dayOut - $posOut); // non-GRN in − non-POS out
+            $totalQty = $openingQty + $receiptsQty;
+
+            $uomRaw = strtolower(trim((string) ($item->issueUom?->short_name ?? '')));
+            $uomName = strtolower(trim((string) ($item->issueUom?->name ?? '')));
+            $isMl = $uomRaw === 'ml'
+                || $uomRaw === 'millilitre'
+                || $uomRaw === 'milliliter'
+                || str_contains($uomName, 'millilitre')
+                || str_contains($uomName, 'milliliter');
+
+            // Spirits-like (ml tracked): sealed bottles + open stock as pegs
+            if ($isMl && $bottleMl > 0) {
+                $opening = $splitBottlePeg($openingQty, $bottleMl, $pegMl);
+                $receipts = $splitBottlePeg($receiptsQty, $bottleMl, $pegMl);
+                $total = $splitBottlePeg($totalQty, $bottleMl, $pegMl);
+                $sales = $splitBottlePeg($salesQty, $bottleMl, $pegMl);
+                $closing = $splitBottlePeg($closingQty, $bottleMl, $pegMl);
 
                 return [
                     'item_id' => $item->id,
                     'item_name' => $item->name,
                     'category' => $item->category?->name ?? '—',
+                    'category_id' => $item->category_id,
+                    'excise_sort_order' => $item->category?->excise_sort_order,
                     'uom' => $item->issueUom?->short_name ?? '—',
                     'bottle_ml' => (int) round($bottleMl),
                     'opening_bottles' => (float) $opening['bottles'],
-                    'opening_loose_litres' => (float) $opening['loose_litres'],
+                    'opening_pegs' => (float) $opening['pegs'],
                     'receipts_bottles' => (float) $receipts['bottles'],
-                    'receipts_loose_litres' => (float) $receipts['loose_litres'],
+                    'receipts_pegs' => (float) $receipts['pegs'],
+                    'total_bottles' => (float) $total['bottles'],
+                    'total_pegs' => (float) $total['pegs'],
                     'sales_bottles' => (float) $sales['bottles'],
                     'sales_pegs' => (float) $sales['pegs'],
                     'closing_bottles' => (float) $closing['bottles'],
-                    'closing_loose_litres' => (float) $closing['loose_litres'],
+                    'closing_pegs' => (float) $closing['pegs'],
                     'debug' => [
                         'opening_qty_ml' => round($openingQty, 3),
-                        'receipts_in_ml' => round($dayIn, 3),
-                        'pos_out_ml' => round($posOut, 3),
+                        'receipts_purchase_ml' => round($receiptsQty, 3),
+                        'total_qty_ml' => round($totalQty, 3),
+                        'pos_out_ml' => round($salesQty, 3),
+                        'other_day_net_ml' => round($otherDayNet, 3),
                         'closing_qty_ml' => round($closingQty, 3),
+                        'now_qty_ml' => round($nowQty, 3),
+                        'peg_ml' => $pegMl,
                     ],
                 ];
             }
 
-            // Beer / pcs-like
+            // Beer / pcs-like — count only (no pegs)
             return [
                 'item_id' => $item->id,
                 'item_name' => $item->name,
                 'category' => $item->category?->name ?? '—',
+                'category_id' => $item->category_id,
+                'excise_sort_order' => $item->category?->excise_sort_order,
                 'uom' => $item->issueUom?->short_name ?? '—',
                 'bottle_ml' => null,
                 'opening_bottles' => round($openingQty, 2),
-                'opening_loose_litres' => null,
-                'receipts_bottles' => round($dayIn, 2),
-                'receipts_loose_litres' => null,
-                'sales_bottles' => round($posOut, 2),
+                'opening_pegs' => null,
+                'receipts_bottles' => round($receiptsQty, 2),
+                'receipts_pegs' => null,
+                'total_bottles' => round($totalQty, 2),
+                'total_pegs' => null,
+                'sales_bottles' => round($salesQty, 2),
                 'sales_pegs' => null,
                 'closing_bottles' => round($closingQty, 2),
-                'closing_loose_litres' => null,
+                'closing_pegs' => null,
                 'debug' => [
                     'opening_qty' => round($openingQty, 3),
-                    'receipts_in' => round($dayIn, 3),
-                    'pos_out' => round($posOut, 3),
+                    'receipts_purchase' => round($receiptsQty, 3),
+                    'total_qty' => round($totalQty, 3),
+                    'pos_out' => round($salesQty, 3),
+                    'other_day_net' => round($otherDayNet, 3),
                     'closing_qty' => round($closingQty, 3),
+                    'now_qty' => round($nowQty, 3),
                 ],
             ];
         })->values();
@@ -1028,8 +1191,11 @@ class InventoryReportController extends Controller
             'data' => $rows,
             'meta' => [
                 'date' => $start->toDateString(),
-                'location_id' => (int) $locationId,
+                'location_ids' => $locationIds,
                 'peg_ml' => $pegMl,
+                'locations' => $exciseLocations,
+                'receipts_reasons' => $purchaseReasons,
+                'scope' => 'main_and_bar',
             ],
             'summary' => [
                 'rows' => $rows->count(),
@@ -1038,7 +1204,118 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * CSV export of excise bar register (Kerala excise stock register prep).
+     * Alcohol categories for excise register sort setup (main → sub tree).
+     */
+    public function exciseCategoryOrder(Request $request)
+    {
+        $this->checkPermission('inventory-report-summary');
+
+        $alcoholParentId = InventoryCategory::query()
+            ->where('name', 'Alcohol')
+            ->whereNull('parent_id')
+            ->value('id');
+
+        // Relevant leaves/mids: alcohol items + Alcohol children (even if empty)
+        $relevant = InventoryCategory::query()
+            ->where(function ($q) use ($alcoholParentId) {
+                $q->whereHas('items', fn ($i) => $i->where('is_alcohol', true));
+                if ($alcoholParentId) {
+                    $q->orWhere('parent_id', $alcoholParentId);
+                }
+            })
+            ->get(['id', 'name', 'parent_id', 'excise_sort_order']);
+
+        $mainIds = collect();
+        foreach ($relevant as $cat) {
+            if ($cat->parent_id) {
+                $mainIds->push((int) $cat->parent_id);
+            } else {
+                $mainIds->push((int) $cat->id);
+            }
+        }
+        if ($alcoholParentId) {
+            $mainIds->push((int) $alcoholParentId);
+        }
+        $mainIds = $mainIds->unique()->values();
+
+        $mains = InventoryCategory::query()
+            ->whereIn('id', $mainIds)
+            ->whereNull('parent_id')
+            ->orderByRaw('CASE WHEN excise_sort_order IS NULL THEN 1 ELSE 0 END')
+            ->orderBy('excise_sort_order')
+            ->orderBy('name')
+            ->get(['id', 'name', 'parent_id', 'excise_sort_order']);
+
+        $childrenByParent = $relevant
+            ->filter(fn ($c) => $c->parent_id !== null)
+            ->groupBy(fn ($c) => (int) $c->parent_id);
+
+        $sortCats = static function ($cats) {
+            return $cats
+                ->sortBy(function ($c) {
+                    return sprintf(
+                        '%d-%05d-%s',
+                        $c->excise_sort_order === null ? 1 : 0,
+                        (int) ($c->excise_sort_order ?? 9999),
+                        mb_strtolower((string) $c->name)
+                    );
+                })
+                ->values();
+        };
+
+        $data = $mains->map(function ($main) use ($childrenByParent, $sortCats) {
+            $children = $sortCats($childrenByParent->get((int) $main->id, collect()));
+
+            return [
+                'id' => $main->id,
+                'name' => $main->name,
+                'excise_sort_order' => $main->excise_sort_order,
+                'children' => $children->map(fn ($c) => [
+                    'id' => $c->id,
+                    'name' => $c->name,
+                    'parent_id' => $c->parent_id,
+                    'excise_sort_order' => $c->excise_sort_order,
+                ])->values(),
+            ];
+        })->values();
+
+        return response()->json([
+            'data' => $data,
+        ]);
+    }
+
+    /**
+     * Persist main + sub excise category display order.
+     */
+    public function updateExciseCategoryOrder(Request $request)
+    {
+        $this->checkPermission('manage-inventory');
+
+        $validated = $request->validate([
+            'groups' => 'required|array|min:1',
+            'groups.*.id' => 'required|integer|exists:inventory_categories,id',
+            'groups.*.children' => 'nullable|array',
+            'groups.*.children.*' => 'integer|exists:inventory_categories,id',
+        ]);
+
+        DB::transaction(function () use ($validated) {
+            foreach ($validated['groups'] as $mainIndex => $group) {
+                InventoryCategory::where('id', $group['id'])->update([
+                    'excise_sort_order' => ($mainIndex + 1) * 10,
+                ]);
+                foreach (array_values($group['children'] ?? []) as $subIndex => $childId) {
+                    InventoryCategory::where('id', $childId)->update([
+                        'excise_sort_order' => ($subIndex + 1) * 10,
+                    ]);
+                }
+            }
+        });
+
+        return $this->exciseCategoryOrder($request);
+    }
+
+    /**
+     * Excel export of excise bar register with merged, centered stage headers.
      */
     public function exciseBarExport(Request $request)
     {
@@ -1049,41 +1326,175 @@ class InventoryReportController extends Controller
         $meta = $payload['meta'] ?? [];
         $date = $meta['date'] ?? now()->toDateString();
 
-        $filename = "excise-bar-register-{$date}.csv";
+        $filename = "excise-bar-{$date}.xlsx";
 
-        return response()->streamDownload(function () use ($rows) {
-            $out = fopen('php://output', 'w');
-            fputcsv($out, [
-                'Item',
-                'Category',
-                'UOM',
-                'Opening Bottles',
-                'Opening Loose (L)',
-                'Receipts Bottles',
-                'Receipts Loose (L)',
-                'Sales Bottles',
-                'Sales Pegs',
-                'Closing Bottles',
-                'Closing Loose (L)',
-            ]);
-            foreach ($rows as $row) {
-                fputcsv($out, [
-                    $row['item_name'] ?? '',
-                    $row['category'] ?? '',
-                    $row['uom'] ?? '',
-                    $row['opening_bottles'] ?? 0,
-                    $row['opening_loose_litres'] ?? '',
-                    $row['receipts_bottles'] ?? 0,
-                    $row['receipts_loose_litres'] ?? '',
-                    $row['sales_bottles'] ?? 0,
-                    $row['sales_pegs'] ?? '',
-                    $row['closing_bottles'] ?? 0,
-                    $row['closing_loose_litres'] ?? '',
-                ]);
+        $toPeg = static function ($pegs) {
+            if ($pegs === null || $pegs === '') {
+                return null;
             }
-            fclose($out);
+            $p = (float) $pegs;
+            if (abs($p) < 0.005) {
+                return null;
+            }
+
+            return round($p, 2);
+        };
+
+        $toBtl = static function ($bottles) {
+            if (! is_numeric($bottles)) {
+                return null;
+            }
+            $b = 0 + $bottles;
+            if (abs($b) < 0.005) {
+                return null;
+            }
+
+            return $b;
+        };
+
+        $spreadsheet = new Spreadsheet;
+        $sheet = $spreadsheet->getActiveSheet();
+        $sheet->setTitle('Excise Bar');
+
+        // Row 1 stage titles · Row 2 Bottle | Peg
+        $sheet->setCellValue('A1', 'Item');
+        $sheet->setCellValue('B1', 'Bottle');
+        $sheet->setCellValue('C1', 'Opening');
+        $sheet->setCellValue('E1', 'Receipts');
+        $sheet->setCellValue('G1', 'Total');
+        $sheet->setCellValue('I1', 'Sales');
+        $sheet->setCellValue('K1', 'Closing');
+
+        $sheet->mergeCells('A1:A2');
+        $sheet->setCellValue('B2', 'ml');
+        $sheet->mergeCells('C1:D1');
+        $sheet->mergeCells('E1:F1');
+        $sheet->mergeCells('G1:H1');
+        $sheet->mergeCells('I1:J1');
+        $sheet->mergeCells('K1:L1');
+
+        $sub = ['Bottle', 'Peg', 'Bottle', 'Peg', 'Bottle', 'Peg', 'Bottle', 'Peg', 'Bottle', 'Peg'];
+        foreach ($sub as $i => $label) {
+            $col = Coordinate::stringFromColumnIndex($i + 3);
+            $sheet->setCellValue("{$col}2", $label);
+        }
+
+        $headerRange = 'A1:L2';
+        $sheet->getStyle($headerRange)->applyFromArray([
+            'font' => ['bold' => true, 'size' => 11],
+            'alignment' => [
+                'horizontal' => Alignment::HORIZONTAL_CENTER,
+                'vertical' => Alignment::VERTICAL_CENTER,
+                'wrapText' => true,
+            ],
+            'fill' => [
+                'fillType' => Fill::FILL_SOLID,
+                'startColor' => ['rgb' => 'F3F4F6'],
+            ],
+            'borders' => [
+                'allBorders' => [
+                    'borderStyle' => Border::BORDER_THIN,
+                    'color' => ['rgb' => 'D1D5DB'],
+                ],
+            ],
+        ]);
+
+        foreach (['C1:D1', 'E1:F1', 'G1:H1', 'I1:J1', 'K1:L1'] as $range) {
+            $sheet->getStyle($range)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_CENTER);
+        }
+
+        $r = 3;
+        $lastCategory = null;
+        foreach ($rows as $row) {
+            $category = (string) ($row['category'] ?? '—');
+
+            if ($category !== $lastCategory) {
+                // Category separator row (like UI section headers)
+                $sheet->mergeCells("A{$r}:L{$r}");
+                $sheet->setCellValue("A{$r}", mb_strtoupper($category));
+                $sheet->getStyle("A{$r}:L{$r}")->applyFromArray([
+                    'font' => [
+                        'bold' => true,
+                        'size' => 10,
+                        'color' => ['rgb' => '374151'],
+                    ],
+                    'alignment' => [
+                        'horizontal' => Alignment::HORIZONTAL_LEFT,
+                        'vertical' => Alignment::VERTICAL_CENTER,
+                    ],
+                    'fill' => [
+                        'fillType' => Fill::FILL_SOLID,
+                        'startColor' => ['rgb' => 'E5E7EB'],
+                    ],
+                    'borders' => [
+                        'allBorders' => [
+                            'borderStyle' => Border::BORDER_THIN,
+                            'color' => ['rgb' => 'D1D5DB'],
+                        ],
+                    ],
+                ]);
+                $sheet->getRowDimension($r)->setRowHeight(20);
+                $lastCategory = $category;
+                $r++;
+            }
+
+            $sheet->setCellValue("A{$r}", $row['item_name'] ?? '');
+            $bottleMl = $row['bottle_ml'] ?? null;
+            if (is_numeric($bottleMl) && (float) $bottleMl > 0) {
+                $sheet->setCellValue("B{$r}", (int) $bottleMl);
+            } else {
+                $sheet->setCellValue("B{$r}", null);
+            }
+
+            $vals = [
+                $toBtl($row['opening_bottles'] ?? 0),
+                $toPeg($row['opening_pegs'] ?? null),
+                $toBtl($row['receipts_bottles'] ?? 0),
+                $toPeg($row['receipts_pegs'] ?? null),
+                $toBtl($row['total_bottles'] ?? 0),
+                $toPeg($row['total_pegs'] ?? null),
+                $toBtl($row['sales_bottles'] ?? 0),
+                $toPeg($row['sales_pegs'] ?? null),
+                $toBtl($row['closing_bottles'] ?? 0),
+                $toPeg($row['closing_pegs'] ?? null),
+            ];
+            foreach ($vals as $i => $v) {
+                $col = Coordinate::stringFromColumnIndex($i + 3);
+                if ($v === null) {
+                    $sheet->setCellValue("{$col}{$r}", null);
+                } else {
+                    $sheet->setCellValue("{$col}{$r}", $v);
+                }
+            }
+
+            $sheet->getStyle("B{$r}:L{$r}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+            $sheet->getStyle("A{$r}:L{$r}")->applyFromArray([
+                'borders' => [
+                    'allBorders' => [
+                        'borderStyle' => Border::BORDER_THIN,
+                        'color' => ['rgb' => 'E5E7EB'],
+                    ],
+                ],
+            ]);
+            $r++;
+        }
+
+        $sheet->getColumnDimension('A')->setWidth(42);
+        $sheet->getColumnDimension('B')->setWidth(10);
+        foreach (range('C', 'L') as $col) {
+            $sheet->getColumnDimension($col)->setWidth(10);
+        }
+        $sheet->getRowDimension(1)->setRowHeight(22);
+        $sheet->getRowDimension(2)->setRowHeight(18);
+        $sheet->freezePane('C3');
+
+        return response()->streamDownload(function () use ($spreadsheet) {
+            $writer = new Xlsx($spreadsheet);
+            $writer->save('php://output');
         }, $filename, [
-            'Content-Type' => 'text/csv',
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Cache-Control' => 'must-revalidate',
+            'Pragma' => 'public',
         ]);
     }
 

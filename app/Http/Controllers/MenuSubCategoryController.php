@@ -15,14 +15,19 @@ class MenuSubCategoryController extends Controller
     private function checkPermission(string $permission)
     {
         $user = auth()->user();
-        if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
+        if (
+            $user
+            && ! $user->hasRole('Admin')
+            && ! $user->can($permission)
+            && ! ($permission === 'menu-configuration' && $user->can('manage-menu'))
+        ) {
             abort(403, 'Unauthorized action.');
         }
     }
 
     public function store(Request $request)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $validated = $request->validate([
             'menu_category_id' => 'required|exists:menu_categories,id',
             'name' => 'required|string|max:255',
@@ -42,7 +47,7 @@ class MenuSubCategoryController extends Controller
 
     public function update(Request $request, MenuSubCategory $menuSubCategory)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         $validated = $request->validate([
             'menu_category_id' => 'sometimes|required|exists:menu_categories,id',
             'name' => 'sometimes|required|string|max:255',
@@ -57,7 +62,7 @@ class MenuSubCategoryController extends Controller
 
     public function destroy(MenuSubCategory $menuSubCategory)
     {
-        $this->checkPermission('manage-menu');
+        $this->checkPermission('menu-configuration');
         
         try {
             $menuSubCategory->delete();

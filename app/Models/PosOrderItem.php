@@ -8,7 +8,7 @@ class PosOrderItem extends Model
 {
     protected $fillable = [
         'order_id', 'menu_item_id', 'menu_item_variant_id', 'combo_id', 'quantity', 'unit_price',
-        'tax_rate', 'tax_regime', 'price_tax_inclusive', 'line_total', 'kot_sent', 'kot_hold', 'status', 'kot_batch', 'kot_started_at', 'kitchen_ready_at', 'kitchen_served_at', 'notes', 'inventory_deducted',
+        'tax_rate', 'tax_regime', 'price_tax_inclusive', 'line_total', 'kot_sent', 'kot_sent_at', 'kot_hold', 'status', 'kot_batch', 'kot_started_at', 'kitchen_ready_at', 'kitchen_served_at', 'notes', 'inventory_deducted',
         'cancel_reason', 'cancel_notes', 'cancelled_by', 'cancelled_at',
     ];
 
@@ -19,6 +19,7 @@ class PosOrderItem extends Model
         'line_total' => 'decimal:2',
         'kot_sent' => 'boolean',
         'kot_hold' => 'boolean',
+        'kot_sent_at' => 'datetime',
         'kot_started_at' => 'datetime',
         'kitchen_ready_at' => 'datetime',
         'kitchen_served_at' => 'datetime',

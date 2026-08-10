@@ -69,7 +69,10 @@ class RolePermissionSeeder extends Seeder
             'manage-tables',
             // Outlet / menu master configuration
             'manage-outlets',
-            'manage-menu',
+            'manage-menu', // legacy umbrella — still accepted by APIs alongside the three below
+            'menu-configuration',
+            'menu-pricing',
+            'menu-availability',
             // POS / Finance report permissions (granular)
             'report-sales',
             'report-day-closings',
@@ -86,6 +89,7 @@ class RolePermissionSeeder extends Seeder
             'pos-order',
             'pos-settle',
             'pos-void-item',
+            'pos-refund',
             'pos-discount',
             'pos-reopen-order',
             'pos-day-closing',
@@ -120,6 +124,24 @@ class RolePermissionSeeder extends Seeder
                 'name' => $permission,
                 'guard_name' => $guardName,
             ]);
+        }
+
+        // Roles that already had manage-menu keep access to the split screens
+        $split = ['menu-configuration', 'menu-pricing', 'menu-availability'];
+        $rolesWithMenu = \Spatie\Permission\Models\Role::permission('manage-menu')->get();
+        foreach ($rolesWithMenu as $role) {
+            $role->givePermissionTo($split);
+        }
+        $admin = \Spatie\Permission\Models\Role::where('name', 'Admin')->where('guard_name', $guardName)->first();
+        if ($admin) {
+            $admin->givePermissionTo($split);
+            $admin->givePermissionTo('pos-refund');
+        }
+
+        // Roles that could void (previous refund gate) also get dedicated refund access
+        $rolesWithVoid = \Spatie\Permission\Models\Role::permission('pos-void-item')->get();
+        foreach ($rolesWithVoid as $role) {
+            $role->givePermissionTo('pos-refund');
         }
     }
 }

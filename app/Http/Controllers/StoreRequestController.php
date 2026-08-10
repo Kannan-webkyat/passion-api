@@ -93,7 +93,34 @@ class StoreRequestController extends Controller
             $query->whereIn('department_id', $userDeptIds);
         }
 
-        return response()->json($query->get());
+        return response()->json($query->get()->map(fn ($sr) => $this->appendSourceAvailability($sr)));
+    }
+
+    /**
+     * Attach store (source) on-hand qty per line for commit UI.
+     */
+    private function appendSourceAvailability(StoreRequest $storeRequest): StoreRequest
+    {
+        $storeRequest->loadMissing(['items.item', 'toLocation']);
+        $storeId = (int) $storeRequest->to_location_id;
+        if ($storeId <= 0 || $storeRequest->items->isEmpty()) {
+            return $storeRequest;
+        }
+
+        $itemIds = $storeRequest->items->pluck('inventory_item_id')->unique()->filter()->values()->all();
+        $stockByItem = DB::table('inventory_item_locations')
+            ->where('inventory_location_id', $storeId)
+            ->whereIn('inventory_item_id', $itemIds)
+            ->pluck('quantity', 'inventory_item_id');
+
+        $storeRequest->items->each(function ($line) use ($stockByItem) {
+            $line->setAttribute(
+                'source_available',
+                round((float) ($stockByItem[$line->inventory_item_id] ?? 0), 3)
+            );
+        });
+
+        return $storeRequest;
     }
 
     public function store(Request $request)
@@ -251,7 +278,11 @@ class StoreRequestController extends Controller
                     ->first();
 
                 if (! $sourceStock || (float) $sourceStock->quantity < $qtyToCommit) {
-                    throw new \Exception('Insufficient stock in source location for item ' . $requestItem->item->name);
+                    $available = round((float) ($sourceStock->quantity ?? 0), 3);
+                    throw new \Exception(
+                        'Insufficient stock in source location for item '.$requestItem->item->name
+                        .' (available: '.$available.', commit: '.$qtyToCommit.')'
+                    );
                 }
 
                 $requestItem->increment('quantity_pending_acceptance', $qtyToCommit);
@@ -262,11 +293,11 @@ class StoreRequestController extends Controller
 
             DB::commit();
 
-            return response()->json($storeRequest->load('items.item'));
+            return response()->json($this->appendSourceAvailability($storeRequest->load('items.item')));
         } catch (\Exception $e) {
             DB::rollBack();
 
-            return response()->json(['message' => $e->getMessage()], 500);
+            return response()->json(['message' => $e->getMessage()], 422);
         }
     }
 
@@ -307,7 +338,11 @@ class StoreRequestController extends Controller
                     ->first();
 
                 if (! $sourceStock || (float) $sourceStock->quantity < $qtyToMove) {
-                    throw new \Exception('Insufficient stock in source location for item ' . $requestItem->item->name);
+                    $available = round((float) ($sourceStock->quantity ?? 0), 3);
+                    throw new \Exception(
+                        'Insufficient stock in source location for item '.$requestItem->item->name
+                        .' (available: '.$available.', needed: '.$qtyToMove.')'
+                    );
                 }
 
                 DB::table('inventory_item_locations')
