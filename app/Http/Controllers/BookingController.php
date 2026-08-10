@@ -26,6 +26,7 @@ use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
 use App\Services\GuestIdentityImageService;
+use App\Support\ExtraBedPricing;
 use App\Support\SeasonalRoomPricing;
 use App\Services\Accounting\BookingCheckoutPoster;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -306,8 +307,15 @@ class BookingController extends Controller
         return $isMidnight ? $dt->toDateString() : $dt->copy()->addDay()->toDateString();
     }
 
-    private function computeHourlyPackageTotal(Room $room, int $ratePlanId, Carbon $checkInAt, Carbon $checkOutAt, int $extraBeds = 0): array
-    {
+    private function computeHourlyPackageTotal(
+        Room $room,
+        int $ratePlanId,
+        Carbon $checkInAt,
+        Carbon $checkOutAt,
+        int $extraBeds = 0,
+        ?int $adults = null,
+        ?int $children = null,
+    ): array {
         $rt = $room->roomType;
         $plan = $rt?->ratePlans?->firstWhere('id', $ratePlanId);
         if (! $rt || ! $plan) {
@@ -333,9 +341,10 @@ class BookingController extends Controller
         $total = $base;
 
         // Hourly package: extra bed is charged once per booking/package window.
-        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
-        if ($extraBeds > 0 && $extraBedCost > 0) {
-            $total += $extraBeds * $extraBedCost;
+        if ($extraBeds > 0) {
+            $adl = $adults ?? 1;
+            $chd = $children ?? 0;
+            $total += ExtraBedPricing::perNightCharge($rt, $adl, $chd, $extraBeds);
         }
 
         // Optional overtime charging
@@ -472,7 +481,7 @@ class BookingController extends Controller
                 ->where('check_out_at', '>', $rangeStartAt)
                 ->whereNotIn('status', ['cancelled'])
                 ->with(['booking', 'ratePlan']);
-        }])->get();
+        }])->where('is_active', true)->get();
 
         $this->enrichCheckoutInspectionInspectorNamesOnRooms($rooms);
 
@@ -973,7 +982,15 @@ class BookingController extends Controller
                 }
 
                 $extraBedsForRoom = (int) ($bookingData['extra_beds_count'] ?? 0);
-                $calc = $this->computeHourlyPackageTotal($room, $planId, $finalCheckInAt, $finalCheckOutAt, $extraBedsForRoom);
+                $calc = $this->computeHourlyPackageTotal(
+                    $room,
+                    $planId,
+                    $finalCheckInAt,
+                    $finalCheckOutAt,
+                    $extraBedsForRoom,
+                    (int) ($bookingData['adults_count'] ?? 1),
+                    (int) ($bookingData['children_count'] ?? 0),
+                );
                 if (! $calc['ok']) {
                     return response()->json(['message' => $calc['message']], 422);
                 }
@@ -988,14 +1005,17 @@ class BookingController extends Controller
                         $effectiveCheckOutAt = $finalCheckOutAt ? $finalCheckOutAt->copy() : $finalCheckInAt->copy()->addDay();
                         $basePerNight = (float) ($plan->base_price ?? 0);
                         $extraBeds = (int) ($bookingData['extra_beds_count'] ?? 0);
-                        $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
+                        $adults = (int) ($bookingData['adults_count'] ?? 1);
+                        $children = (int) ($bookingData['children_count'] ?? 0);
                         $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
                             $basePerNight,
-                            $extraBedCost,
                             $extraBeds,
                             $finalCheckInAt->copy()->startOfDay(),
                             $effectiveCheckOutAt->copy()->startOfDay(),
-                            $room->roomType?->seasons ?? []
+                            $room->roomType?->seasons ?? [],
+                            $room->roomType,
+                            $adults,
+                            $children,
                         );
                         $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
                         $roomRatesIncludeGst = filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
@@ -2119,10 +2139,12 @@ class BookingController extends Controller
             }
 
             $basePrice = $ratePlan ? $ratePlan->base_price : $rt->base_price;
-            $extraBedCost = $rt->extra_bed_cost ?? 0;
-            $extraBeds = $booking->extra_beds_count ?? 0;
+            $extraBeds = (int) ($booking->extra_beds_count ?? 0);
+            $adults = (int) ($booking->adults_count ?? 1);
+            $children = (int) ($booking->children_count ?? 0);
+            $extraBedPerNight = ExtraBedPricing::perNightCharge($rt, $adults, $children, $extraBeds);
 
-            $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+            $nightlyRoomCost = $basePrice + $extraBedPerNight;
 
             // Breakfast inclusion
             if ($ratePlan && $ratePlan->includes_breakfast) {
@@ -2204,9 +2226,10 @@ class BookingController extends Controller
         }
 
         $basePrice = $ratePlan ? (float) $ratePlan->base_price : (float) ($rt->base_price ?? 0);
-        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $nightlyRoom = $basePrice + ($extraBedCost * $extraBeds);
+        $adults = (int) ($booking->adults_count ?? 1);
+        $children = (int) ($booking->children_count ?? 0);
+        $nightlyRoom = $basePrice + ExtraBedPricing::perNightCharge($rt, $adults, $children, $extraBeds);
 
         $mealSubtotal = 0.0;
         if ($includeMeals && $ratePlan && $ratePlan->includes_breakfast) {
@@ -2526,7 +2549,15 @@ class BookingController extends Controller
         }
 
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $calc = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $newCheckOutAt, $extraBeds);
+        $calc = $this->computeHourlyPackageTotal(
+            $room,
+            $planId,
+            $checkInAt,
+            $newCheckOutAt,
+            $extraBeds,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+        );
         if (! $calc['ok']) {
             return response()->json(['message' => $calc['message']], 422);
         }
@@ -2609,12 +2640,28 @@ class BookingController extends Controller
         }
 
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $calcCurrent = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $currentCheckOutAt, $extraBeds);
+        $calcCurrent = $this->computeHourlyPackageTotal(
+            $room,
+            $planId,
+            $checkInAt,
+            $currentCheckOutAt,
+            $extraBeds,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+        );
         if (! $calcCurrent['ok']) {
             return response()->json(['message' => $calcCurrent['message']], 422);
         }
 
-        $calcNew = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $newCheckOutAt, $extraBeds);
+        $calcNew = $this->computeHourlyPackageTotal(
+            $room,
+            $planId,
+            $checkInAt,
+            $newCheckOutAt,
+            $extraBeds,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+        );
         if (! $calcNew['ok']) {
             return response()->json(['message' => $calcNew['message']], 422);
         }
@@ -2662,15 +2709,15 @@ class BookingController extends Controller
         $segmentTotal = 0.0;
         if (! $complimentaryUpgrade) {
             $basePrice = $ratePlan ? $ratePlan->base_price : ($rt->base_price ?? 0);
-            $extraBedCost = $rt->extra_bed_cost ?? 0;
-            $extraBeds = $booking->extra_beds_count ?? 0;
+            $extraBeds = (int) ($booking->extra_beds_count ?? 0);
+            $adults = (int) ($booking->adults_count ?? 1);
+            $children = (int) ($booking->children_count ?? 0);
+            $extraBedPerNight = ExtraBedPricing::perNightCharge($rt, $adults, $children, $extraBeds);
 
-            $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+            $nightlyRoomCost = $basePrice + $extraBedPerNight;
 
             // Breakfast inclusion
             if ($ratePlan && $ratePlan->includes_breakfast) {
-                $adults = $booking->adults_count ?? 1;
-                $children = $booking->children_count ?? 0;
                 $nightlyRoomCost += (($rt->breakfast_price ?? 0) * $adults) + (($rt->child_breakfast_price ?? 0) * $children);
             }
 

@@ -99,15 +99,18 @@ final class BookingInvoiceRoomStay
 
         $basePerNight = (float) ($plan->base_price ?? 0);
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $extraBedCost = (float) ($roomType->extra_bed_cost ?? 0);
+        $adults = (int) ($booking->adults_count ?? 1);
+        $children = (int) ($booking->children_count ?? 0);
 
         $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
             $basePerNight,
-            $extraBedCost,
             $extraBeds,
             $checkInAt->copy()->startOfDay(),
             $checkOutAt->copy()->startOfDay(),
-            $roomType->seasons ?? []
+            $roomType->seasons ?? [],
+            $roomType,
+            $adults,
+            $children,
         );
 
         $beforeTax += self::mealPreTaxAddOns($booking, $roomType, $plan, $checkInAt, $checkOutAt);

@@ -63,12 +63,23 @@ final class SeasonalRoomPricing
      */
     public static function sumDayRoomRentWithSeasons(
         float $basePerNight,
-        float $extraBedCost,
         int $extraBeds,
         Carbon $checkInStart,
         Carbon $checkOutStart,
-        $seasons
+        $seasons,
+        ?\App\Models\RoomType $roomType = null,
+        ?int $adults = null,
+        ?int $children = null,
     ): float {
+        $extraPerNight = 0.0;
+        if ($extraBeds > 0) {
+            if ($roomType !== null && $adults !== null && $children !== null) {
+                $extraPerNight = ExtraBedPricing::perNightCharge($roomType, $adults, $children, $extraBeds);
+            } else {
+                $extraPerNight = $extraBeds * (float) ($roomType?->extra_bed_cost ?? 0);
+            }
+        }
+
         $start = $checkInStart->copy()->startOfDay();
         $end = $checkOutStart->copy()->startOfDay();
         $nights = max(1, $start->diffInDays($end));
@@ -77,7 +88,7 @@ final class SeasonalRoomPricing
             $night = $start->copy()->addDays($i);
             $season = self::seasonForDate($seasons, $night);
             $nightly = self::applyToBase($basePerNight, $season);
-            $sum += $nightly + ($extraBeds * $extraBedCost);
+            $sum += $nightly + $extraPerNight;
         }
 
         return $sum;

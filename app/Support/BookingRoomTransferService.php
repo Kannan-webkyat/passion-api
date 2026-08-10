@@ -384,7 +384,15 @@ final class BookingRoomTransferService
             if ($rateMode === 'apply_new_category') {
                 $planId = self::resolveRatePlanId($room, $planId);
             }
-            $calc = self::computeHourlyTotal($room, $planId, $from, $to, (int) ($booking->extra_beds_count ?? 0));
+            $calc = self::computeHourlyTotal(
+                $room,
+                $planId,
+                $from,
+                $to,
+                (int) ($booking->extra_beds_count ?? 0),
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+            );
             if (! $calc['ok']) {
                 $warnings[] = $calc['message'];
 
@@ -439,14 +447,17 @@ final class BookingRoomTransferService
     {
         $basePerNight = (float) ($plan->base_price ?? 0);
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
+        $adults = (int) ($booking->adults_count ?? 1);
+        $children = (int) ($booking->children_count ?? 0);
         $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
             $basePerNight,
-            $extraBedCost,
             $extraBeds,
             $from->copy()->startOfDay(),
             $to->copy()->startOfDay(),
-            $room->roomType?->seasons ?? []
+            $room->roomType?->seasons ?? [],
+            $room->roomType,
+            $adults,
+            $children,
         );
 
         if ($plan->includes_breakfast ?? false) {
@@ -467,8 +478,15 @@ final class BookingRoomTransferService
     /**
      * @return array{ok: bool, message?: string, total?: float}
      */
-    private static function computeHourlyTotal(Room $room, int $ratePlanId, Carbon $checkInAt, Carbon $checkOutAt, int $extraBeds): array
-    {
+    private static function computeHourlyTotal(
+        Room $room,
+        int $ratePlanId,
+        Carbon $checkInAt,
+        Carbon $checkOutAt,
+        int $extraBeds,
+        int $adults = 1,
+        int $children = 0,
+    ): array {
         $rt = $room->roomType;
         $plan = $rt?->ratePlans?->firstWhere('id', $ratePlanId);
         if (! $rt || ! $plan || ($plan->billing_unit ?? 'day') !== 'hour_package') {
@@ -487,9 +505,8 @@ final class BookingRoomTransferService
         $base = SeasonalRoomPricing::applyToBase($base, $season);
         $total = $base;
 
-        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
-        if ($extraBeds > 0 && $extraBedCost > 0) {
-            $total += $extraBeds * $extraBedCost;
+        if ($extraBeds > 0) {
+            $total += ExtraBedPricing::perNightCharge($rt, $adults, $children, $extraBeds);
         }
 
         if ($checkOutAt->gt($packageEnd)) {

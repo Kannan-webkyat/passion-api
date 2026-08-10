@@ -93,6 +93,7 @@ class RoomTypeController extends Controller
             'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
             'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
             'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
+            'rate_plans.*.is_active' => 'nullable|boolean',
         ]);
 
         $this->validateCapacity($validated);
@@ -178,6 +179,7 @@ class RoomTypeController extends Controller
             'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
             'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
             'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
+            'rate_plans.*.is_active' => 'nullable|boolean',
         ]);
 
         // Merge with existing values to handle partial updates
@@ -215,6 +217,7 @@ class RoomTypeController extends Controller
                         'grace_minutes' => $planData['grace_minutes'] ?? 0,
                         'overtime_step_minutes' => $planData['overtime_step_minutes'] ?? 60,
                         'overtime_hour_price' => $planData['overtime_hour_price'] ?? null,
+                        'is_active' => (bool) ($planData['is_active'] ?? true),
                     ]);
                 } else {
                     $roomType->ratePlans()->create([
@@ -227,6 +230,7 @@ class RoomTypeController extends Controller
                         'grace_minutes' => $planData['grace_minutes'] ?? 0,
                         'overtime_step_minutes' => $planData['overtime_step_minutes'] ?? 60,
                         'overtime_hour_price' => $planData['overtime_hour_price'] ?? null,
+                        'is_active' => (bool) ($planData['is_active'] ?? true),
                     ]);
                 }
             }
