@@ -501,13 +501,18 @@ class DayClosingController extends Controller
 
         $orderIds = (clone $paidOrders)->pluck('id');
 
+        // packing_charge may be missing until packing migrations are applied on this DB
+        $packingSelect = \Illuminate\Support\Facades\Schema::hasColumn('pos_orders', 'packing_charge')
+            ? 'COALESCE(SUM(COALESCE(packing_charge, 0)), 0) as total_packing_charge,'
+            : '0 as total_packing_charge,';
+
         $totals = (clone $paidOrders)->selectRaw(
             'COALESCE(SUM(subtotal), 0) as total_sales,
              COALESCE(SUM(discount_amount), 0) as total_discount,
              COALESCE(SUM(tax_amount), 0) as total_tax,
              COALESCE(SUM(service_charge_amount), 0) as total_service_charge,
              COALESCE(SUM(tip_amount), 0) as total_tip,
-             COALESCE(SUM(COALESCE(packing_charge, 0)), 0) as total_packing_charge,
+             '.$packingSelect.'
              COALESCE(SUM(total_amount), 0) as total_paid,
              COALESCE(SUM(gst_net_taxable), 0) as gst_net_taxable,
              COALESCE(SUM(vat_net_taxable), 0) as vat_net_taxable,
@@ -651,14 +656,21 @@ class DayClosingController extends Controller
             ->limit(25)
             ->get(['id', 'request_number', 'status', 'from_location_id', 'to_location_id', 'requested_at']);
 
-        $pendingList = $pendingRequests->map(fn ($r) => [
-            'id' => $r->id,
-            'request_number' => $r->request_number,
-            'status' => $r->status,
-            'from' => $r->fromLocation?->name ?? '#'.$r->from_location_id,
-            'to' => $r->toLocation?->name ?? '#'.$r->to_location_id,
-            'requested_at' => $r->requested_at?->toIso8601String(),
-        ])->values()->all();
+        $pendingList = $pendingRequests->map(function ($r) {
+            $requestedAt = $r->requested_at;
+            if (is_string($requestedAt) && $requestedAt !== '') {
+                $requestedAt = \Carbon\Carbon::parse($requestedAt);
+            }
+
+            return [
+                'id' => $r->id,
+                'request_number' => $r->request_number,
+                'status' => $r->status,
+                'from' => $r->fromLocation?->name ?? '#'.$r->from_location_id,
+                'to' => $r->toLocation?->name ?? '#'.$r->to_location_id,
+                'requested_at' => $requestedAt?->toIso8601String(),
+            ];
+        })->values()->all();
 
         $kitchenId = $restaurant?->kitchen_location_id;
 
@@ -831,13 +843,12 @@ class DayClosingController extends Controller
     /** @param  array<string, mixed>  $summary */
     private function closingPayloadFromSummary(array $summary, array $validated): array
     {
-        return [
+        $payload = [
             'total_sales' => $summary['total_sales'],
             'total_discount' => $summary['total_discount'],
             'total_tax' => $summary['total_tax'],
             'total_service_charge' => $summary['total_service_charge'],
             'total_tip' => $summary['total_tip'],
-            'total_packing_charge' => $summary['total_packing_charge'] ?? 0,
             'total_refunded' => $summary['total_refunded'] ?? 0,
             'total_paid' => $summary['total_paid'],
             'gst_net_taxable' => $summary['gst_net_taxable'] ?? 0,
@@ -853,5 +864,11 @@ class DayClosingController extends Controller
             'order_count' => $summary['order_count'],
             'void_count' => $summary['void_count'],
         ];
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn('pos_day_closings', 'total_packing_charge')) {
+            $payload['total_packing_charge'] = $summary['total_packing_charge'] ?? 0;
+        }
+
+        return $payload;
     }
 }

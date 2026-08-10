@@ -15,6 +15,13 @@ class StoreRequest extends Model
         'requested_at', 'approved_at', 'issued_at',
     ];
 
+    protected $casts = [
+        'required_date' => 'date',
+        'requested_at' => 'datetime',
+        'approved_at' => 'datetime',
+        'issued_at' => 'datetime',
+    ];
+
     public function department()
     {
         return $this->belongsTo(Department::class);
