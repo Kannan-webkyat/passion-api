@@ -610,9 +610,17 @@ class DayClosingController extends Controller
             ->select(['id', 'department_id', 'kitchen_location_id', 'bar_location_id'])
             ->find($restaurantId);
 
+        // Negative stock / production: kitchen + bar for this outlet.
         $locIds = array_values(array_filter([
             $restaurant?->kitchen_location_id,
             $restaurant?->bar_location_id,
+        ], fn ($v) => $v !== null && $v !== ''));
+
+        // Pending requisitions: only this outlet's own store.
+        // Bar outlets (bar_location_id set) must not be blocked by shared kitchen
+        // transfers — those belong to kitchen day-close / kitchen ops.
+        $reqLocIds = array_values(array_filter([
+            $restaurant?->bar_location_id ?: $restaurant?->kitchen_location_id,
         ], fn ($v) => $v !== null && $v !== ''));
 
         $negativeItems = collect();
@@ -637,16 +645,11 @@ class DayClosingController extends Controller
             ->with(['fromLocation:id,name', 'toLocation:id,name'])
             ->whereIn('status', $incompleteStatuses);
 
-        if (! empty($locIds)) {
-            $pendingReqQuery->where(function ($q) use ($locIds, $restaurant) {
-                $q->whereIn('from_location_id', $locIds)
-                    ->orWhereIn('to_location_id', $locIds);
-                if ($restaurant?->department_id) {
-                    $q->orWhere('department_id', $restaurant->department_id);
-                }
+        if (! empty($reqLocIds)) {
+            $pendingReqQuery->where(function ($q) use ($reqLocIds) {
+                $q->whereIn('from_location_id', $reqLocIds)
+                    ->orWhereIn('to_location_id', $reqLocIds);
             });
-        } elseif ($restaurant?->department_id) {
-            $pendingReqQuery->where('department_id', $restaurant->department_id);
         } else {
             $pendingReqQuery->whereRaw('1 = 0');
         }
