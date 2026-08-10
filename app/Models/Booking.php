@@ -47,6 +47,10 @@ class Booking extends Model
         'deposit_amount',
         'refund_amount',
         'refund_method',
+        'cancellation_fee_amount',
+        'cancellation_reason',
+        'cancellation_notes',
+        'cancelled_at',
         'extra_charges',
         'checkout_discount_amount',
         'checkout_discount_reason',
@@ -86,6 +90,11 @@ class Booking extends Model
         return $this->hasMany(LaundryRequest::class);
     }
 
+    public function payments()
+    {
+        return $this->hasMany(BookingPayment::class)->orderBy('paid_at')->orderBy('id');
+    }
+
     // Accessor for full name
     public function getGuestNameAttribute()
     {
@@ -102,6 +111,8 @@ class Booking extends Model
         'check_in_at' => 'datetime',
         'check_out_at' => 'datetime',
         'refund_amount' => 'decimal:2',
+        'cancellation_fee_amount' => 'decimal:2',
+        'cancelled_at' => 'datetime',
         'checkout_discount_amount' => 'decimal:2',
     ];
 }

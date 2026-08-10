@@ -163,11 +163,16 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
     Route::post('bookings/{booking}/preview-early-checkout', [BookingController::class, 'previewEarlyCheckout']);
     Route::post('bookings/{booking}/early-checkout', [BookingController::class, 'applyEarlyCheckout']);
+    Route::post('bookings/{booking}/preview-cancellation', [BookingController::class, 'previewCancellation']);
+    Route::post('bookings/{booking}/cancel', [BookingController::class, 'cancelReservation']);
     Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);
     Route::post('bookings/{booking}/preview-extend-hours', [BookingController::class, 'previewHourlyExtension']);
     Route::get('bookings/{booking}/voucher', [BookingController::class, 'reservationVoucher']);
     Route::get('bookings/{booking}/billing', [BookingController::class, 'reservationBilling']);
     Route::get('bookings/{booking}/folio-postings', [BookingController::class, 'folioPostings']);
+    Route::get('bookings/{booking}/payments', [BookingController::class, 'listPayments']);
+    Route::post('bookings/{booking}/payments', [BookingController::class, 'storePayment']);
+    Route::post('bookings/{booking}/payments/{payment}/void', [BookingController::class, 'voidPayment']);
     Route::get('bookings/{booking}/inspection-charges', [BookingController::class, 'inspectionCharges']);
     Route::get('bookings/{booking}/folio-orders/{order}', [BookingController::class, 'folioOrderDetail'])->whereNumber('order');
     Route::post('bookings/{booking}/split-stay', [BookingController::class, 'splitStay']);

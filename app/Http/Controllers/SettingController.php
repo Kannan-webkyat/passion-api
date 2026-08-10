@@ -137,6 +137,9 @@ class SettingController extends Controller
             'check_in_time' => $normalizeClock(Setting::get('standard_check_in_time', '14:00'), '14:00'),
             'check_out_time' => $normalizeClock(Setting::get('standard_check_out_time', '11:00'), '11:00'),
             'room_rates_include_gst' => filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN),
+            'cancellation_free_hours_before' => (int) Setting::get('cancellation_free_hours_before', 24),
+            'cancellation_fee_type' => (string) Setting::get('cancellation_fee_type', 'first_night'),
+            'cancellation_fee_value' => (float) Setting::get('cancellation_fee_value', 100),
         ]);
     }
 
@@ -147,12 +150,30 @@ class SettingController extends Controller
             'check_in_time' => 'required|date_format:H:i',
             'check_out_time' => 'required|date_format:H:i',
             'room_rates_include_gst' => 'sometimes|boolean',
+            'cancellation_free_hours_before' => 'sometimes|integer|min:0|max:8760',
+            'cancellation_fee_type' => 'sometimes|string|in:none,percent,first_night,fixed',
+            'cancellation_fee_value' => 'sometimes|numeric|min:0',
         ]);
 
         Setting::set('standard_check_in_time', $validated['check_in_time']);
         Setting::set('standard_check_out_time', $validated['check_out_time']);
         if (array_key_exists('room_rates_include_gst', $validated)) {
             Setting::set('room_rates_include_gst', $validated['room_rates_include_gst'] ? '1' : '0');
+        }
+        if (array_key_exists('cancellation_free_hours_before', $validated)) {
+            Setting::set('cancellation_free_hours_before', (string) (int) $validated['cancellation_free_hours_before']);
+        }
+        if (array_key_exists('cancellation_fee_type', $validated)) {
+            Setting::set('cancellation_fee_type', $validated['cancellation_fee_type']);
+        }
+        if (array_key_exists('cancellation_fee_value', $validated)) {
+            $feeType = $validated['cancellation_fee_type']
+                ?? (string) Setting::get('cancellation_fee_type', 'first_night');
+            $feeValue = (float) $validated['cancellation_fee_value'];
+            if ($feeType === 'percent' && $feeValue > 100) {
+                $feeValue = 100;
+            }
+            Setting::set('cancellation_fee_value', (string) round($feeValue, 2));
         }
 
         return response()->json([
@@ -161,6 +182,9 @@ class SettingController extends Controller
                 'check_in_time' => $validated['check_in_time'],
                 'check_out_time' => $validated['check_out_time'],
                 'room_rates_include_gst' => filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN),
+                'cancellation_free_hours_before' => (int) Setting::get('cancellation_free_hours_before', 24),
+                'cancellation_fee_type' => (string) Setting::get('cancellation_fee_type', 'first_night'),
+                'cancellation_fee_value' => (float) Setting::get('cancellation_fee_value', 100),
             ],
         ]);
     }

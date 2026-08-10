@@ -5,6 +5,7 @@ namespace App\Services\Accounting;
 use App\Models\Booking;
 use App\Models\JournalEntry;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingPaymentLedger;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
 
@@ -51,9 +52,33 @@ final class BookingCheckoutPoster
         $shortfall = round(max(0.0, $grand - $retained), 2);
 
         $lines = [];
-        $tender = AccountCodes::tenderAccount((string) ($booking->payment_method ?? 'cash'));
 
-        if ($appliedCash > 0) {
+        // Prefer ledger split by tender method when available.
+        $byMethod = BookingPaymentLedger::netByMethod($booking);
+        if ($byMethod !== [] && $appliedCash > 0.004) {
+            $methodTotal = array_sum($byMethod);
+            $allocated = 0.0;
+            $methods = array_keys($byMethod);
+            $lastIdx = count($methods) - 1;
+            foreach ($methods as $i => $method) {
+                $share = $methodTotal > 0.004
+                    ? round($appliedCash * ((float) $byMethod[$method] / $methodTotal), 2)
+                    : 0.0;
+                if ($i === $lastIdx) {
+                    $share = round($appliedCash - $allocated, 2);
+                }
+                $allocated = round($allocated + $share, 2);
+                if ($share <= 0.004) {
+                    continue;
+                }
+                $lines[] = [
+                    'account_code' => AccountCodes::tenderAccount($method),
+                    'debit' => $share,
+                    'meta' => ['booking_id' => $booking->id, 'method' => $method],
+                ];
+            }
+        } elseif ($appliedCash > 0) {
+            $tender = AccountCodes::tenderAccount((string) ($booking->payment_method ?? 'cash'));
             $lines[] = [
                 'account_code' => $tender,
                 'debit' => $appliedCash,

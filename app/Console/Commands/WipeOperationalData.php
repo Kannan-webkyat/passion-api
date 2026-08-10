@@ -67,6 +67,7 @@ class WipeOperationalData extends Command
 
     /** @var list<string> */
     private array $hotelOpTables = [
+        'booking_payments',
         'booking_extra_charges',
         'booking_room_transfers',
         'booking_segments',

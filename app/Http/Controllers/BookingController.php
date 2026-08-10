@@ -7,6 +7,7 @@ use App\Events\HousekeepingStateUpdated;
 use App\Models\Booking;
 use App\Models\BookingExtraCharge;
 use App\Models\BookingGroup;
+use App\Models\BookingPayment;
 use App\Models\BookingSegment;
 use App\Models\DailyRoomCleaning;
 use App\Models\PosOrder;
@@ -15,8 +16,10 @@ use App\Models\Room;
 use App\Models\RoomCleaningRelease;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
+use App\Support\BookingCancellationPolicy;
 use App\Support\BookingInspectionChargeLines;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingPaymentLedger;
 use App\Support\BookingRoomAvailability;
 use App\Support\BookingRoomTransferService;
 use App\Support\CheckoutInspectionInspector;
@@ -1067,6 +1070,24 @@ class BookingController extends Controller
             }
 
             $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
+
+            // Seed payment ledger from initial deposit (group: only first room keeps deposit).
+            if (BookingPaymentLedger::enabled()) {
+                $seedDeposit = round((float) ($booking->deposit_amount ?? 0), 2);
+                if ($seedDeposit > 0.004) {
+                    // Clear scalar first so sync matches a single ledger row (create already wrote deposit_amount).
+                    $booking->forceFill(['deposit_amount' => 0])->save();
+                    BookingPaymentLedger::recordPayment($booking, [
+                        'amount' => $seedDeposit,
+                        'method' => (string) ($booking->payment_method ?: 'cash'),
+                        'source' => 'booking_create',
+                        'notes' => 'Initial deposit at booking',
+                        'bill_total' => (float) ($booking->total_price ?? 0),
+                        'received_by' => Auth::id(),
+                    ]);
+                    $booking->refresh();
+                }
+            }
         }
 
         if ($isGroup) {
@@ -1236,6 +1257,16 @@ class BookingController extends Controller
             ], 422);
         }
         unset($validated['force_room_change']);
+
+        if (
+            array_key_exists('status', $validated)
+            && $validated['status'] === 'cancelled'
+            && $booking->status !== 'cancelled'
+        ) {
+            return response()->json([
+                'message' => 'Use POST /bookings/{id}/cancel to cancel a reservation (policy fee, deposit forfeit, and refund).',
+            ], 422);
+        }
 
         $checkoutScope = $validated['checkout_scope'] ?? 'group';
         unset($validated['checkout_scope']);
@@ -1420,6 +1451,73 @@ class BookingController extends Controller
             $co = $this->parseHotelDateTime((string) $validated['check_out']);
             $validated['check_out_at'] = $co;
             $validated['check_out'] = $co->toDateString();
+        }
+
+        // Dual-write: absolute deposit/refund patches become ledger postings (keeps history).
+        if (BookingPaymentLedger::enabled()) {
+            $billHint = null;
+            if (array_key_exists('total_price', $validated) || array_key_exists('extra_charges', $validated)) {
+                $tmpTotal = (float) ($validated['total_price'] ?? $booking->total_price ?? 0);
+                $tmpExtra = (float) ($validated['extra_charges'] ?? $booking->extra_charges ?? 0);
+                $billHint = round($tmpTotal + $tmpExtra, 2);
+            } else {
+                try {
+                    $billHint = round($this->effectiveBookingGrand($booking), 2);
+                } catch (\Throwable) {
+                    $billHint = round((float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0), 2);
+                }
+            }
+
+            if (array_key_exists('deposit_amount', $validated)) {
+                $oldDeposit = round((float) ($booking->deposit_amount ?? 0), 2);
+                $newDeposit = round((float) $validated['deposit_amount'], 2);
+                $delta = round($newDeposit - $oldDeposit, 2);
+                if ($delta > 0.004) {
+                    BookingPaymentLedger::recordPayment($booking, [
+                        'amount' => $delta,
+                        'method' => (string) ($validated['payment_method'] ?? ($booking->payment_method ?: 'cash')),
+                        'source' => 'legacy_patch',
+                        'notes' => 'Deposit update via booking PATCH',
+                        'bill_total' => $billHint,
+                    ]);
+                } elseif ($delta < -0.004) {
+                    BookingPaymentLedger::recordAdjustment($booking, [
+                        'amount' => abs($delta),
+                        'signed_amount' => $delta,
+                        'method' => (string) ($validated['payment_method'] ?? ($booking->payment_method ?: 'cash')),
+                        'source' => 'legacy_patch',
+                        'notes' => 'Deposit correction via booking PATCH',
+                        'bill_total' => $billHint,
+                    ]);
+                }
+                unset($validated['deposit_amount']);
+                // Method/status are owned by ledger sync when deposit moved.
+                unset($validated['payment_method']);
+                if (array_key_exists('payment_status', $validated) && $billHint !== null) {
+                    unset($validated['payment_status']);
+                }
+                $booking->refresh();
+            }
+
+            if (array_key_exists('refund_amount', $validated) && $validated['refund_amount'] !== null) {
+                $oldRefund = round((float) ($booking->refund_amount ?? 0), 2);
+                $newRefund = round((float) $validated['refund_amount'], 2);
+                $refundDelta = round($newRefund - $oldRefund, 2);
+                if ($refundDelta > 0.004) {
+                    BookingPaymentLedger::recordRefund($booking, [
+                        'amount' => $refundDelta,
+                        'method' => (string) ($validated['refund_method'] ?? ($booking->refund_method ?: 'cash')),
+                        'source' => isset($validated['status']) && $validated['status'] === 'checked_out'
+                            ? 'checkout'
+                            : 'legacy_patch',
+                        'notes' => 'Refund recorded via booking update',
+                        'bill_total' => $billHint,
+                        'allow_closed' => true,
+                    ]);
+                }
+                unset($validated['refund_amount'], $validated['refund_method']);
+                $booking->refresh();
+            }
         }
 
         $this->appendAuditNotesForBookingUpdate($booking, $validated, $request);
@@ -2882,6 +2980,195 @@ class BookingController extends Controller
     }
 
     /**
+     * Guest payment / refund ledger for mid-stay cashiering and history.
+     */
+    public function listPayments(Booking $booking)
+    {
+        $this->allowReservationRead();
+
+        if (! BookingPaymentLedger::enabled()) {
+            return response()->json([
+                'items' => [],
+                'totals' => BookingPaymentLedger::totals($booking),
+                'booking' => [
+                    'id' => $booking->id,
+                    'deposit_amount' => (float) ($booking->deposit_amount ?? 0),
+                    'refund_amount' => (float) ($booking->refund_amount ?? 0),
+                    'payment_status' => $booking->payment_status,
+                    'payment_method' => $booking->payment_method,
+                ],
+            ]);
+        }
+
+        $rows = BookingPayment::query()
+            ->where('booking_id', $booking->id)
+            ->with(['receiver:id,name'])
+            ->orderByDesc('paid_at')
+            ->orderByDesc('id')
+            ->get();
+
+        $items = $rows->map(function (BookingPayment $p) {
+            return [
+                'id' => $p->id,
+                'booking_id' => (int) $p->booking_id,
+                'type' => $p->type,
+                'amount' => round((float) $p->amount, 2),
+                'signed_amount' => round($p->signedAmount(), 2),
+                'method' => $p->method,
+                'reference_no' => $p->reference_no,
+                'notes' => $p->notes,
+                'source' => $p->source,
+                'meta' => $p->meta,
+                'paid_at' => $p->paid_at?->toIso8601String(),
+                'received_by' => $p->received_by,
+                'received_by_name' => $p->receiver?->name,
+                'voided_at' => $p->voided_at?->toIso8601String(),
+                'void_reason' => $p->void_reason,
+                'is_voided' => $p->voided_at !== null,
+            ];
+        })->values();
+
+        return response()->json([
+            'items' => $items,
+            'totals' => BookingPaymentLedger::totals($booking),
+            'by_method' => BookingPaymentLedger::netByMethod($booking),
+            'booking' => [
+                'id' => $booking->id,
+                'deposit_amount' => (float) ($booking->deposit_amount ?? 0),
+                'refund_amount' => (float) ($booking->refund_amount ?? 0),
+                'payment_status' => $booking->payment_status,
+                'payment_method' => $booking->payment_method,
+                'refund_method' => $booking->refund_method,
+            ],
+        ]);
+    }
+
+    /**
+     * Record one payment/refund or a split multi-tender payment.
+     */
+    public function storePayment(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        if (! BookingPaymentLedger::enabled()) {
+            return response()->json(['message' => 'Payment ledger is not available.'], 503);
+        }
+
+        if (in_array($booking->status, ['cancelled'], true)) {
+            return response()->json(['message' => 'Cannot post payments on a cancelled reservation.'], 422);
+        }
+
+        $validated = $request->validate([
+            'type' => 'nullable|string|in:payment,refund',
+            'amount' => 'nullable|numeric|min:0.01',
+            'method' => 'nullable|string|in:cash,card,upi,bank_transfer',
+            'reference_no' => 'nullable|string|max:128',
+            'notes' => 'nullable|string|max:500',
+            'source' => 'nullable|string|in:deposit,checkout,manual',
+            'bill_total' => 'nullable|numeric|min:0',
+            'tenders' => 'nullable|array|min:1',
+            'tenders.*.amount' => 'required_with:tenders|numeric|min:0.01',
+            'tenders.*.method' => 'required_with:tenders|string|in:cash,card,upi,bank_transfer',
+            'tenders.*.reference_no' => 'nullable|string|max:128',
+            'tenders.*.notes' => 'nullable|string|max:500',
+        ]);
+
+        $billTotal = array_key_exists('bill_total', $validated) && $validated['bill_total'] !== null
+            ? (float) $validated['bill_total']
+            : round($this->effectiveBookingGrand($booking), 2);
+
+        $source = (string) ($validated['source'] ?? 'deposit');
+        if ($booking->status === 'checked_out' && ($validated['type'] ?? 'payment') === 'payment') {
+            return response()->json(['message' => 'Cannot collect payments after check-out.'], 422);
+        }
+
+        if (! empty($validated['tenders'])) {
+            if (($validated['type'] ?? 'payment') === 'refund') {
+                return response()->json(['message' => 'Split tenders are only supported for payments.'], 422);
+            }
+            $rows = BookingPaymentLedger::recordSplitPayments(
+                $booking,
+                $validated['tenders'],
+                $source === 'checkout' ? 'checkout' : 'deposit',
+                $billTotal,
+            );
+            $booking->refresh();
+
+            return response()->json([
+                'message' => 'Payments recorded.',
+                'payments' => $rows,
+                'booking' => $booking->fresh(['room.roomType', 'segments', 'bookingGroup']),
+                'totals' => BookingPaymentLedger::totals($booking),
+            ], 201);
+        }
+
+        $type = (string) ($validated['type'] ?? BookingPayment::TYPE_PAYMENT);
+        $amount = round((float) ($validated['amount'] ?? 0), 2);
+        if ($amount <= 0.004) {
+            return response()->json(['message' => 'Amount is required.'], 422);
+        }
+        $method = (string) ($validated['method'] ?? '');
+        if ($method === '') {
+            return response()->json(['message' => 'Payment method is required.'], 422);
+        }
+
+        $attrs = [
+            'amount' => $amount,
+            'method' => $method,
+            'reference_no' => $validated['reference_no'] ?? null,
+            'notes' => $validated['notes'] ?? null,
+            'source' => $source,
+            'bill_total' => $billTotal,
+            'allow_closed' => $type === BookingPayment::TYPE_REFUND,
+        ];
+
+        $row = $type === BookingPayment::TYPE_REFUND
+            ? BookingPaymentLedger::recordRefund($booking, $attrs)
+            : BookingPaymentLedger::recordPayment($booking, $attrs);
+
+        $booking->refresh();
+
+        return response()->json([
+            'message' => $type === BookingPayment::TYPE_REFUND ? 'Refund recorded.' : 'Payment recorded.',
+            'payment' => $row,
+            'booking' => $booking->fresh(['room.roomType', 'segments', 'bookingGroup']),
+            'totals' => BookingPaymentLedger::totals($booking),
+        ], 201);
+    }
+
+    public function voidPayment(Request $request, Booking $booking, BookingPayment $payment)
+    {
+        $this->allowReservationEdit();
+
+        if ((int) $payment->booking_id !== (int) $booking->id) {
+            return response()->json(['message' => 'Payment does not belong to this booking.'], 404);
+        }
+
+        if (in_array($booking->status, ['checked_out', 'cancelled'], true)) {
+            return response()->json(['message' => 'Cannot void payments after check-out or cancellation.'], 422);
+        }
+
+        $validated = $request->validate([
+            'reason' => 'nullable|string|max:500',
+            'bill_total' => 'nullable|numeric|min:0',
+        ]);
+
+        $billTotal = array_key_exists('bill_total', $validated) && $validated['bill_total'] !== null
+            ? (float) $validated['bill_total']
+            : round($this->effectiveBookingGrand($booking), 2);
+
+        $row = BookingPaymentLedger::voidPayment($payment, $validated['reason'] ?? null, $billTotal);
+        $booking->refresh();
+
+        return response()->json([
+            'message' => 'Payment voided.',
+            'payment' => $row,
+            'booking' => $booking->fresh(['room.roomType', 'segments', 'bookingGroup']),
+            'totals' => BookingPaymentLedger::totals($booking),
+        ]);
+    }
+
+    /**
      * Checkout inspection charges posted to the booking (minibar consumption + asset penalties).
      */
     public function inspectionCharges(Booking $booking)
@@ -3074,6 +3361,257 @@ class BookingController extends Controller
         }
 
         return $cols;
+    }
+
+    /**
+     * Preview cancellation fee + deposit forfeit / refund settlement (pre-arrival only).
+     */
+    public function previewCancellation(Request $request, Booking $booking)
+    {
+        $this->allowReservationDelete();
+
+        if (! in_array($booking->status, ['pending', 'confirmed'], true)) {
+            return response()->json([
+                'message' => 'Only pending or confirmed reservations can be cancelled from the room chart. In-house stays must be checked out.',
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'waive_fee' => 'nullable|boolean',
+            'fee_override' => 'nullable|numeric|min:0',
+            'additional_collected' => 'nullable|numeric|min:0',
+        ]);
+
+        $feeOverride = array_key_exists('fee_override', $validated) && $validated['fee_override'] !== null
+            ? (float) $validated['fee_override']
+            : null;
+
+        $preview = BookingCancellationPolicy::preview(
+            $booking,
+            $feeOverride,
+            $request->boolean('waive_fee', false),
+            (float) ($validated['additional_collected'] ?? 0),
+        );
+
+        return response()->json($preview);
+    }
+
+    /**
+     * Cancel / void a pre-arrival reservation with policy fee, deposit forfeit, and optional refund.
+     */
+    public function cancelReservation(Request $request, Booking $booking)
+    {
+        $this->allowReservationDelete();
+
+        if (! in_array($booking->status, ['pending', 'confirmed'], true)) {
+            return response()->json([
+                'message' => 'Only pending or confirmed reservations can be cancelled. In-house stays must be checked out.',
+            ], 422);
+        }
+
+        $validated = $request->validate([
+            'reason' => 'required|string|in:'.implode(',', array_keys(BookingCancellationPolicy::REASONS)),
+            'reason_notes' => 'nullable|string|max:500',
+            'waive_fee' => 'nullable|boolean',
+            'fee_override' => 'nullable|numeric|min:0',
+            'additional_collected' => 'nullable|numeric|min:0',
+            'additional_payment_method' => 'nullable|string|in:cash,card,upi,bank_transfer',
+            'refund_method' => 'nullable|string|in:cash,card,upi,bank_transfer',
+            'confirm_balance_waived' => 'nullable|boolean',
+        ]);
+
+        if ($validated['reason'] === 'other' && trim((string) ($validated['reason_notes'] ?? '')) === '') {
+            return response()->json(['message' => 'Please add a short note when reason is Other.'], 422);
+        }
+
+        $feeOverride = array_key_exists('fee_override', $validated) && $validated['fee_override'] !== null
+            ? (float) $validated['fee_override']
+            : null;
+        $waiveFee = $request->boolean('waive_fee', false);
+        $additionalCollected = (float) ($validated['additional_collected'] ?? 0);
+
+        $preview = BookingCancellationPolicy::preview(
+            $booking,
+            $feeOverride,
+            $waiveFee,
+            $additionalCollected,
+        );
+
+        if ((float) $preview['balance_due'] > 0.004 && ! $request->boolean('confirm_balance_waived', false)) {
+            return response()->json([
+                'message' => 'Cancellation fee exceeds deposit. Collect the balance due, or confirm waiving the remaining balance.',
+                'preview' => $preview,
+            ], 422);
+        }
+
+        if ((float) $preview['refund_due'] > 0.004 && empty($validated['refund_method'])) {
+            return response()->json([
+                'message' => 'Select how the deposit refund will be issued (cash, card, UPI, or bank transfer).',
+                'preview' => $preview,
+            ], 422);
+        }
+
+        if ($additionalCollected > 0.004 && empty($validated['additional_payment_method'])) {
+            return response()->json([
+                'message' => 'Select the payment method used to collect the remaining cancellation fee.',
+                'preview' => $preview,
+            ], 422);
+        }
+
+        $reasonLabel = BookingCancellationPolicy::REASONS[$validated['reason']] ?? $validated['reason'];
+        if ($validated['reason'] === 'other' && ! empty($validated['reason_notes'])) {
+            $reasonLabel .= ' — '.trim((string) $validated['reason_notes']);
+        }
+
+        $user = Auth::user();
+        $userName = $user ? (string) $user->name : '';
+        $timestamp = now()->format('Y-m-d H:i:s');
+        $byPart = $userName !== '' ? " by {$userName}" : '';
+
+        $effectiveFee = (float) $preview['effective_fee'];
+        $refundDue = (float) $preview['refund_due'];
+        $forfeited = (float) $preview['forfeited_from_deposit'];
+        $balanceDue = (float) $preview['balance_due'];
+        $balanceWaived = $balanceDue > 0.004 && $request->boolean('confirm_balance_waived', false);
+
+        $depositForSettle = round((float) ($booking->deposit_amount ?? 0) + $additionalCollected, 2);
+
+        // Waiving unpaid balance: retain only what deposit (+ collected) covers.
+        if ($balanceWaived) {
+            $effectiveFee = min($effectiveFee, $depositForSettle);
+            $settled = BookingCancellationPolicy::settle($depositForSettle, $effectiveFee);
+            $refundDue = $settled['refund_due'];
+            $forfeited = $settled['forfeited_from_deposit'];
+            $paymentStatus = $settled['payment_status_after'];
+        } else {
+            $paymentStatus = (string) $preview['payment_status_after'];
+        }
+
+        $feeNote = $waiveFee
+            ? 'Fee waived'
+            : sprintf('Fee ₹%s (forfeit ₹%s)', number_format($effectiveFee, 2, '.', ''), number_format($forfeited, 2, '.', ''));
+        if ($refundDue > 0.004) {
+            $feeNote .= sprintf(
+                ' | Refund ₹%s via %s',
+                number_format($refundDue, 2, '.', ''),
+                (string) $validated['refund_method']
+            );
+        }
+        if ($additionalCollected > 0.004) {
+            $feeNote .= sprintf(
+                ' | Collected ₹%s via %s',
+                number_format($additionalCollected, 2, '.', ''),
+                (string) ($validated['additional_payment_method'] ?? '')
+            );
+        }
+        if ($balanceWaived) {
+            $feeNote .= sprintf(' | Unpaid balance ₹%s waived', number_format($balanceDue, 2, '.', ''));
+        }
+
+        $auditMsg = "[Cancellation: {$reasonLabel} | {$feeNote}{$byPart} on {$timestamp}]";
+        $notes = $booking->notes ? $booking->notes."\n".$auditMsg : $auditMsg;
+
+        DB::transaction(function () use (
+            $booking,
+            $validated,
+            $notes,
+            $effectiveFee,
+            $refundDue,
+            $additionalCollected,
+            $paymentStatus,
+            $forfeited,
+            $balanceWaived,
+        ) {
+            if (BookingPaymentLedger::enabled()) {
+                if ($additionalCollected > 0.004) {
+                    BookingPaymentLedger::recordPayment($booking, [
+                        'amount' => $additionalCollected,
+                        'method' => (string) ($validated['additional_payment_method'] ?? 'cash'),
+                        'source' => 'cancellation',
+                        'notes' => 'Collected toward cancellation fee',
+                        'meta' => ['cancellation_fee' => $effectiveFee],
+                    ]);
+                    $booking->refresh();
+                }
+                if ($refundDue > 0.004) {
+                    BookingPaymentLedger::recordRefund($booking, [
+                        'amount' => $refundDue,
+                        'method' => (string) ($validated['refund_method'] ?? 'cash'),
+                        'source' => 'cancellation',
+                        'notes' => 'Deposit refund on cancellation',
+                        'meta' => [
+                            'cancellation_fee' => $effectiveFee,
+                            'forfeited' => $forfeited,
+                            'balance_waived' => $balanceWaived,
+                        ],
+                    ]);
+                    $booking->refresh();
+                } elseif ($forfeited > 0.004) {
+                    // Deposit retained as fee — no cash movement; annotate via adjustment meta = 0 signed? Skip.
+                    // Keep deposit on file; payment_status forced below.
+                }
+            }
+
+            $booking->update([
+                'status' => 'cancelled',
+                'cancelled_at' => now(),
+                'cancellation_reason' => $validated['reason'],
+                'cancellation_notes' => isset($validated['reason_notes'])
+                    ? (trim((string) $validated['reason_notes']) !== '' ? trim((string) $validated['reason_notes']) : null)
+                    : null,
+                'cancellation_fee_amount' => $effectiveFee,
+                'payment_status' => $paymentStatus,
+                'notes' => $notes,
+            ]);
+
+            // When ledger did not run (or no cash movement), still persist scalars for cancel settlement.
+            if (! BookingPaymentLedger::enabled()) {
+                $newDeposit = round((float) ($booking->deposit_amount ?? 0) + $additionalCollected, 2);
+                $booking->update([
+                    'deposit_amount' => $newDeposit,
+                    'refund_amount' => $refundDue > 0.004 ? $refundDue : 0,
+                    'refund_method' => $refundDue > 0.004 ? ($validated['refund_method'] ?? null) : null,
+                    'payment_method' => $additionalCollected > 0.004
+                        ? ($validated['additional_payment_method'] ?? $booking->payment_method)
+                        : $booking->payment_method,
+                ]);
+            }
+
+            $booking->segments()->update(['status' => 'cancelled']);
+
+            $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
+            Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => 'available']);
+
+            // Release any active holds tied to this booking window so inventory is sellable.
+            RoomStatusBlock::query()
+                ->whereIn('room_id', $allRoomIds->all())
+                ->where('is_active', true)
+                ->where('status', 'on_hold')
+                ->where('start_date', '<', Carbon::parse($booking->check_out)->toDateString())
+                ->where('end_date', '>', Carbon::parse($booking->check_in)->toDateString())
+                ->update(['is_active' => false]);
+        });
+
+        $booking->refresh()->load(['room.roomType', 'segments', 'bookingGroup']);
+
+        HousekeepingStateUpdated::dispatchIfEnabled(
+            $booking->segments()->pluck('room_id')->push($booking->room_id)->unique()->values()->all(),
+            'booking_cancelled',
+        );
+
+        return response()->json([
+            'message' => 'Reservation cancelled.',
+            'booking' => $booking,
+            'settlement' => [
+                'cancellation_fee' => $effectiveFee,
+                'forfeited_from_deposit' => $forfeited,
+                'refund_amount' => $refundDue,
+                'refund_method' => $refundDue > 0.004 ? ($validated['refund_method'] ?? null) : null,
+                'additional_collected' => $additionalCollected,
+                'balance_waived' => $balanceWaived,
+                'payment_status' => $paymentStatus,
+            ],
+        ]);
     }
 
     public function destroy(Booking $booking)
