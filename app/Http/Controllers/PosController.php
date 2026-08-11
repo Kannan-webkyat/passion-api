@@ -8572,22 +8572,25 @@ class PosController extends Controller
 
     /**
      * Issue-unit qty to deduct for a finished-good / direct-sale POS line.
-     * Liquor is stocked in ML: use variant ml_quantity (30/60/90/375), not inventory conversion alone.
-     * Conversion factor is the fallback when a whole bottle is sold without a usable ml size.
+     * Spirits stocked in ML: variant ml_quantity (30/60/90) or cf as bottle ml when no variant.
+     * Beer / soda / water stocked in BTL/PCS: 1 POS sale = 1 issue unit (cf is GRN case→bottle only).
      */
     private function posDirectSaleIssueQty(PosOrderItem $orderItem, MenuItem $menuItem, ?float $quantityOverride = null): float
     {
         $orderItem->loadMissing('variant');
-        $menuItem->loadMissing('inventoryItem');
+        $menuItem->loadMissing('inventoryItem.issueUom');
+        $invItem = $menuItem->inventoryItem;
         $qty = max(0.0, (float) ($quantityOverride ?? $orderItem->quantity));
-        $cf = max(1.0, (float) ($menuItem->inventoryItem?->conversion_factor ?? 1));
+        $cf = max(1.0, (float) ($invItem?->conversion_factor ?? 1));
         $ml = (float) ($orderItem->variant?->ml_quantity ?? 0);
         $label = strtolower(trim((string) ($orderItem->variant?->size_label ?? '')));
+        $stockInMl = $this->inventoryIssueTrackedInMl($invItem);
 
         if ($orderItem->menu_item_variant_id && $ml > 0) {
             // Misconfigured "full bottle" with ml_quantity=1 while stock is in ML (cf=375).
             if (
-                $ml <= 1.0001
+                $stockInMl
+                && $ml <= 1.0001
                 && $cf > 1.0001
                 && (
                     str_contains($label, 'full')
@@ -8599,23 +8602,43 @@ class PosController extends Controller
                 return $cf * $qty;
             }
 
-            // Stock already in bottles (cf=1) but variant still has bottle size in ml (375/500).
-            if ($cf <= 1.0001 && $ml >= 100) {
+            // Stock in bottles/pieces — variant ml is label only (beer 650ml, soda 300ml).
+            if (! $stockInMl || ($cf <= 1.0001 && $ml >= 100)) {
                 return $qty;
             }
 
             return $ml * $qty;
         }
 
-        // No variant (sold as whole unit): 1 bottle → conversion_factor ML.
-        if ($cf > 1.0001 && (
-            (bool) ($menuItem->is_direct_sale ?? false)
-            || (bool) ($menuItem->inventoryItem?->is_direct_sale ?? false)
-        )) {
+        // No variant: whole-unit sale. cf×qty only when stock is tracked in ML (spirit bottle ml).
+        if (
+            $stockInMl
+            && $cf > 1.0001
+            && (
+                (bool) ($menuItem->is_direct_sale ?? false)
+                || (bool) ($invItem?->is_direct_sale ?? false)
+            )
+        ) {
             return $cf * $qty;
         }
 
         return $qty;
+    }
+
+    /** True when inventory quantity is tracked in millilitres (spirits), not count units (beer/soda). */
+    private function inventoryIssueTrackedInMl(?InventoryItem $item): bool
+    {
+        if (! $item) {
+            return false;
+        }
+
+        $item->loadMissing('issueUom');
+        $short = strtoupper(trim((string) ($item->issueUom?->short_name ?? '')));
+        $name = strtolower(trim((string) ($item->issueUom?->name ?? '')));
+
+        return $short === 'ML'
+            || str_contains($name, 'millilitre')
+            || str_contains($name, 'milliliter');
     }
 
     private function deductOrderItemInventory(PosOrderItem $orderItem, InventoryLocation $location, string $refType, string $refId): void
