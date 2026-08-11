@@ -8599,6 +8599,11 @@ class PosController extends Controller
                 return $cf * $qty;
             }
 
+            // Stock already in bottles (cf=1) but variant still has bottle size in ml (375/500).
+            if ($cf <= 1.0001 && $ml >= 100) {
+                return $qty;
+            }
+
             return $ml * $qty;
         }
 
