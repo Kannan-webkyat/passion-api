@@ -906,6 +906,39 @@ class InventoryReportController extends Controller
     }
 
     /**
+     * Bottle size in ml for excise labels / ML↔BTL normalization.
+     * Prefer size parsed from name/SKU when conversion_factor is 1 (BTL stock).
+     */
+    private function exciseBottleMlFromItem(InventoryItem $item): float
+    {
+        $hay = (string) $item->name.' '.(string) ($item->sku ?? '');
+        if (preg_match('/(1000|750|650|500|375|330)/', $hay, $m)) {
+            return (float) $m[1];
+        }
+
+        $cf = (float) ($item->conversion_factor ?: 0);
+
+        return $cf >= 100 ? $cf : 0.0;
+    }
+
+    /**
+     * When stock is BTL but a movement aggregate is still in ml (e.g. POS qty 375/500/1500),
+     * convert to bottle units. Small counts stay as bottles as-is.
+     */
+    private function exciseNormalizeToBottles(float $qty, float $bottleMl): float
+    {
+        if ($bottleMl < 100 || abs($qty) < 0.0001) {
+            return $qty;
+        }
+
+        if (abs($qty) + 0.0001 >= $bottleMl) {
+            return round($qty / $bottleMl, 4);
+        }
+
+        return $qty;
+    }
+
+    /**
      * Excise liquor register (Main Store + Bar)
      *
      * Excel-style output:
@@ -917,10 +950,13 @@ class InventoryReportController extends Controller
      * Internal main→bar transfers are not counted as receipts (would double-count).
      *
      * Assumptions:
-     * - Spirits are tracked in ml (issue UOM = ml, conversion_factor = bottle ml)
-     * - Beer is tracked in pcs (issue UOM = Pcs, conversion_factor = 1)
+     * - Spirits on ML: issue UOM = ML, conversion_factor = bottle ml (750/1000) → bottles + pegs
+     * - Full-bottle spirits on BTL: issue UOM = BTL, cf = 1 → bottle counts (bottle size from name)
+     * - Beer: issue UOM = BTL/Pcs → bottle/piece counts (no pegs)
      * - POS generates inventory_transactions out rows with reason 'POS Order'
      * - Supplier receipts post as reason 'GRN Receipt' at Main Store
+     * - After ML→BTL conversion, older POS lines may still store qty in ml (375/500);
+     *   those aggregates are normalized to bottles when stock is BTL.
      */
     public function exciseBar(Request $request)
     {
@@ -997,9 +1033,9 @@ class InventoryReportController extends Controller
                 $baseName = preg_replace('/\s*[—\-]?\s*\d+(?:\.\d+)?\s*ml\s*$/iu', '', $rawName) ?? $rawName;
                 $baseName = mb_strtolower(trim(preg_replace('/\s{2,}/u', ' ', $baseName) ?? $baseName));
 
-                $bottleMl = (int) round((float) ($i->conversion_factor ?: 0));
+                $bottleMl = $this->exciseBottleMlFromItem($i);
                 // Larger bottle first within the name group
-                $bottleRank = $bottleMl > 0 ? (99999 - $bottleMl) : 99999;
+                $bottleRank = $bottleMl > 0 ? (99999 - (int) round($bottleMl)) : 99999;
 
                 return sprintf(
                     '%05d-%05d-%s-%s-%05d-%s',
@@ -1103,7 +1139,18 @@ class InventoryReportController extends Controller
             $splitBottlePeg,
             $pegMl
         ) {
-            $bottleMl = (float) ($item->conversion_factor ?: 0);
+            $bottleMl = $this->exciseBottleMlFromItem($item);
+
+            $uomRaw = strtolower(trim((string) ($item->issueUom?->short_name ?? '')));
+            $uomName = strtolower(trim((string) ($item->issueUom?->name ?? '')));
+            $isMl = $uomRaw === 'ml'
+                || $uomRaw === 'millilitre'
+                || $uomRaw === 'milliliter'
+                || str_contains($uomName, 'millilitre')
+                || str_contains($uomName, 'milliliter');
+            $isBtl = $uomRaw === 'btl'
+                || $uomRaw === 'bottle'
+                || str_contains($uomName, 'bottle');
 
             $nowQty = (float) ($qtyNowByItemId[$item->id] ?? 0);
 
@@ -1112,10 +1159,23 @@ class InventoryReportController extends Controller
             $dayOut = (float) ($day?->out_qty ?? 0);
             $purchaseIn = (float) ($day?->purchase_in_qty ?? 0);
             $posOut = (float) ($day?->pos_out_qty ?? 0);
-            $netDay = $dayIn - $dayOut;
 
             $after = $txAggAfter->get($item->id);
-            $afterNet = (float) ($after?->in_qty ?? 0) - (float) ($after?->out_qty ?? 0);
+            $afterIn = (float) ($after?->in_qty ?? 0);
+            $afterOut = (float) ($after?->out_qty ?? 0);
+
+            // BTL stock + legacy ML-sized movement lines (e.g. corrected full-bottle POS qty=375).
+            if ($isBtl && ! $isMl && $bottleMl >= 100) {
+                $dayIn = $this->exciseNormalizeToBottles($dayIn, $bottleMl);
+                $dayOut = $this->exciseNormalizeToBottles($dayOut, $bottleMl);
+                $purchaseIn = $this->exciseNormalizeToBottles($purchaseIn, $bottleMl);
+                $posOut = $this->exciseNormalizeToBottles($posOut, $bottleMl);
+                $afterIn = $this->exciseNormalizeToBottles($afterIn, $bottleMl);
+                $afterOut = $this->exciseNormalizeToBottles($afterOut, $bottleMl);
+            }
+
+            $netDay = $dayIn - $dayOut;
+            $afterNet = $afterIn - $afterOut;
 
             // current = opening + netDay + afterNet → opening / end-of-day from live stock
             $openingQty = $nowQty - $netDay - $afterNet;
@@ -1128,14 +1188,6 @@ class InventoryReportController extends Controller
             $salesQty = $posOut;
             $otherDayNet = ($dayIn - $purchaseIn) - ($dayOut - $posOut); // non-GRN in − non-POS out
             $totalQty = $openingQty + $receiptsQty;
-
-            $uomRaw = strtolower(trim((string) ($item->issueUom?->short_name ?? '')));
-            $uomName = strtolower(trim((string) ($item->issueUom?->name ?? '')));
-            $isMl = $uomRaw === 'ml'
-                || $uomRaw === 'millilitre'
-                || $uomRaw === 'milliliter'
-                || str_contains($uomName, 'millilitre')
-                || str_contains($uomName, 'milliliter');
 
             // Spirits-like (ml tracked): sealed bottles + open stock as pegs
             if ($isMl && $bottleMl > 0) {
@@ -1176,7 +1228,7 @@ class InventoryReportController extends Controller
                 ];
             }
 
-            // Beer / pcs-like — count only (no pegs)
+            // BTL / pcs — count only (no pegs). bottle_ml from name when available (excise label).
             return [
                 'item_id' => $item->id,
                 'item_name' => $item->name,
@@ -1184,7 +1236,7 @@ class InventoryReportController extends Controller
                 'category_id' => $item->category_id,
                 'excise_sort_order' => $item->category?->excise_sort_order,
                 'uom' => $item->issueUom?->short_name ?? '—',
-                'bottle_ml' => null,
+                'bottle_ml' => $bottleMl >= 100 ? (int) round($bottleMl) : null,
                 'opening_bottles' => round($openingQty, 2),
                 'opening_pegs' => null,
                 'receipts_bottles' => round($receiptsQty, 2),
@@ -1203,6 +1255,7 @@ class InventoryReportController extends Controller
                     'other_day_net' => round($otherDayNet, 3),
                     'closing_qty' => round($closingQty, 3),
                     'now_qty' => round($nowQty, 3),
+                    'stock_uom' => $isBtl ? 'BTL' : ($item->issueUom?->short_name ?? ''),
                 ],
             ];
         })->values();
