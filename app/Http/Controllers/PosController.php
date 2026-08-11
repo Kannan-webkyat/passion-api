@@ -5887,6 +5887,7 @@ class PosController extends Controller
         $this->checkPermission('pos-order');
         $validated = $request->validate([
             'restaurant_id' => 'required|exists:restaurant_masters,id',
+            'tab' => 'nullable|in:current,running,settled',
             'order_id' => 'nullable|integer|min:1',
             'from' => 'nullable|date',
             'to' => 'nullable|date|after_or_equal:from',
@@ -5895,43 +5896,118 @@ class PosController extends Controller
         ]);
         $this->authorizeRestaurantId((int) $validated['restaurant_id']);
 
+        $tab = $validated['tab'] ?? 'settled';
+        $from = null;
+        $to = null;
+        $dateWasExplicit = false;
+        $statuses = match ($tab) {
+            'current' => ['open', 'billed', 'paid', 'refunded'],
+            'running' => ['open', 'billed'],
+            default => ['paid', 'refunded'],
+        };
+
         $query = PosOrder::with(['room', 'table', 'refunds'])
             ->where('restaurant_id', $validated['restaurant_id'])
-            ->whereIn('status', ['paid', 'refunded'])
-            ->orderByDesc('closed_at');
+            ->whereIn('status', $statuses);
+
+        if ($tab === 'running') {
+            $query->orderByDesc('opened_at');
+        } else {
+            $query->orderByDesc('closed_at')->orderByDesc('opened_at');
+        }
 
         if (! empty($validated['order_id'])) {
-            $query->where('id', (int) $validated['order_id']);
+            // ID search ignores tab status filter so cashiers can find any order.
+            $query = PosOrder::with(['room', 'table', 'refunds'])
+                ->where('restaurant_id', $validated['restaurant_id'])
+                ->where('id', (int) $validated['order_id'])
+                ->orderByDesc('id');
         } else {
             // Filter by business date (Z-report / day-close date), with legacy
-            // fallback for older rows that only have closed_at.
-            $applyBusinessDateRange = function ($q, string $from, string $to) {
-                $q->where(function ($w) use ($from, $to) {
+            // fallback for older rows that only have closed_at / opened_at.
+            $applyBusinessDateRange = function ($q, string $from, string $to) use ($tab) {
+                $q->where(function ($w) use ($from, $to, $tab) {
                     $w->where(function ($bd) use ($from, $to) {
                         $bd->whereNotNull('business_date')
                             ->whereDate('business_date', '>=', $from)
                             ->whereDate('business_date', '<=', $to);
-                    })->orWhere(function ($legacy) use ($from, $to) {
-                        $legacy->whereNull('business_date')
-                            ->whereDate('closed_at', '>=', $from)
-                            ->whereDate('closed_at', '<=', $to);
+                    })->orWhere(function ($legacy) use ($from, $to, $tab) {
+                        $legacy->whereNull('business_date');
+                        if ($tab === 'running') {
+                            $legacy->whereDate('opened_at', '>=', $from)
+                                ->whereDate('opened_at', '<=', $to);
+                        } else {
+                            $legacy->where(function ($closedOrOpened) use ($from, $to) {
+                                $closedOrOpened
+                                    ->where(function ($c) use ($from, $to) {
+                                        $c->whereNotNull('closed_at')
+                                            ->whereDate('closed_at', '>=', $from)
+                                            ->whereDate('closed_at', '<=', $to);
+                                    })
+                                    ->orWhere(function ($o) use ($from, $to) {
+                                        $o->whereNull('closed_at')
+                                            ->whereDate('opened_at', '>=', $from)
+                                            ->whereDate('opened_at', '<=', $to);
+                                    });
+                            });
+                        }
                     });
                 });
             };
 
-            if (! empty($validated['from']) && ! empty($validated['to'])) {
-                $applyBusinessDateRange($query, $validated['from'], $validated['to']);
-            } elseif (! empty($validated['from'])) {
-                $applyBusinessDateRange($query, $validated['from'], $validated['from']);
-            } elseif (! empty($validated['to'])) {
-                $applyBusinessDateRange($query, $validated['to'], $validated['to']);
+            $restaurant = RestaurantMaster::find((int) $validated['restaurant_id']);
+            $outletBusinessDate = BusinessDateService::resolve($restaurant);
+
+            $from = $validated['from'] ?? null;
+            $to = $validated['to'] ?? null;
+            $dateWasExplicit = $from !== null || $to !== null;
+
+            // Current / Settled: default (or live-day with no rows) → latest day that
+            // actually has matching statuses. Avoids empty Settled when the date picker
+            // still shows the rolled-forward outlet day.
+            if (in_array($tab, ['current', 'settled'], true)) {
+                if (! $from && ! $to) {
+                    $from = $to = $outletBusinessDate;
+                }
+
+                $lookingAtLiveDay = $from
+                    && $to
+                    && $from === $outletBusinessDate
+                    && $to === $outletBusinessDate;
+
+                if ($lookingAtLiveDay) {
+                    $hasOnLiveDay = PosOrder::query()
+                        ->where('restaurant_id', $validated['restaurant_id'])
+                        ->whereIn('status', $statuses)
+                        ->whereDate('business_date', $outletBusinessDate)
+                        ->exists();
+                    if (! $hasOnLiveDay) {
+                        $latest = PosOrder::query()
+                            ->where('restaurant_id', $validated['restaurant_id'])
+                            ->whereIn('status', $statuses)
+                            ->whereNotNull('business_date')
+                            ->max('business_date');
+                        if ($latest) {
+                            $from = $to = \Illuminate\Support\Carbon::parse($latest)->toDateString();
+                        }
+                    }
+                }
             }
+
+            if ($from && $to) {
+                $applyBusinessDateRange($query, $from, $to);
+            } elseif ($from) {
+                $applyBusinessDateRange($query, $from, $from);
+            } elseif ($to) {
+                $applyBusinessDateRange($query, $to, $to);
+            }
+            // Running with no date = all open/billed for outlet.
         }
 
         $perPage = (int) ($validated['per_page'] ?? 20);
         $paginated = $query->paginate($perPage);
 
-        $orders = $paginated->getCollection()->map(fn($o) => [
+        $orders = $paginated->getCollection()->map(fn ($o) => [
             'id' => $o->id,
             'order_type' => $o->order_type,
             'customer_name' => $o->customer_name,
@@ -5943,11 +6019,21 @@ class PosController extends Controller
             'refunded_amount' => (float) $o->refunds->sum('amount'),
             'status' => $o->status,
             'business_date' => $o->business_date?->toDateString(),
+            'opened_at' => $o->opened_at,
             'closed_at' => $o->closed_at,
+            'current_kot_batch' => (int) ($o->current_kot_batch ?? 0),
         ]);
+
+        $restaurant ??= RestaurantMaster::find((int) $validated['restaurant_id']);
+        $outletBusinessDate ??= BusinessDateService::resolve($restaurant);
 
         return response()->json([
             'data' => $orders->values()->all(),
+            'tab' => $tab,
+            'business_date' => $outletBusinessDate,
+            'from' => $from ?? null,
+            'to' => $to ?? null,
+            'date_was_explicit' => $dateWasExplicit ?? false,
             'current_page' => $paginated->currentPage(),
             'last_page' => $paginated->lastPage(),
             'per_page' => $paginated->perPage(),
@@ -8484,6 +8570,49 @@ class PosController extends Controller
         }
     }
 
+    /**
+     * Issue-unit qty to deduct for a finished-good / direct-sale POS line.
+     * Liquor is stocked in ML: use variant ml_quantity (30/60/90/375), not inventory conversion alone.
+     * Conversion factor is the fallback when a whole bottle is sold without a usable ml size.
+     */
+    private function posDirectSaleIssueQty(PosOrderItem $orderItem, MenuItem $menuItem, ?float $quantityOverride = null): float
+    {
+        $orderItem->loadMissing('variant');
+        $menuItem->loadMissing('inventoryItem');
+        $qty = max(0.0, (float) ($quantityOverride ?? $orderItem->quantity));
+        $cf = max(1.0, (float) ($menuItem->inventoryItem?->conversion_factor ?? 1));
+        $ml = (float) ($orderItem->variant?->ml_quantity ?? 0);
+        $label = strtolower(trim((string) ($orderItem->variant?->size_label ?? '')));
+
+        if ($orderItem->menu_item_variant_id && $ml > 0) {
+            // Misconfigured "full bottle" with ml_quantity=1 while stock is in ML (cf=375).
+            if (
+                $ml <= 1.0001
+                && $cf > 1.0001
+                && (
+                    str_contains($label, 'full')
+                    || str_contains($label, 'bottle')
+                    || str_contains($label, 'btl')
+                    || str_contains($label, 'bottile')
+                )
+            ) {
+                return $cf * $qty;
+            }
+
+            return $ml * $qty;
+        }
+
+        // No variant (sold as whole unit): 1 bottle → conversion_factor ML.
+        if ($cf > 1.0001 && (
+            (bool) ($menuItem->is_direct_sale ?? false)
+            || (bool) ($menuItem->inventoryItem?->is_direct_sale ?? false)
+        )) {
+            return $cf * $qty;
+        }
+
+        return $qty;
+    }
+
     private function deductOrderItemInventory(PosOrderItem $orderItem, InventoryLocation $location, string $refType, string $refId): void
     {
         if ($orderItem->inventory_deducted || $orderItem->status !== 'active') {
@@ -8491,7 +8620,7 @@ class PosController extends Controller
         }
 
         DB::transaction(function () use ($orderItem, $location, $refType, $refId) {
-            $orderItem->loadMissing('order');
+            $orderItem->loadMissing(['order', 'variant']);
             $businessDate = $orderItem->order?->business_date?->format('Y-m-d');
 
             $menuItemIds = $orderItem->combo_id && $orderItem->combo
@@ -8520,12 +8649,8 @@ class PosController extends Controller
                         $this->executeDeduction($itemId, $location->id, $rawQty, $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}", $businessDate);
                     }
                 } elseif ($menuItem->inventory_item_id) {
-                    // CASE 2: Finished Good (Biryani) or Direct Item (Pepsi)
-                    $deductQty = $orderItem->quantity;
-                    // Handle variants (ML scale for Liquor)
-                    if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                        $deductQty = $ml * $orderItem->quantity;
-                    }
+                    // CASE 2: Finished good / direct liquor — deduct in issue units (ML).
+                    $deductQty = $this->posDirectSaleIssueQty($orderItem, $menuItem);
                     $this->executeDeduction($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}", $businessDate);
                 }
             }
@@ -8569,10 +8694,7 @@ class PosController extends Controller
                         $this->executeInventoryIn($itemId, $location->id, $rawQty, $refType, $refId, "Inventory Reversal (Cancel/Reduce): Order #{$orderItem->order_id}", $businessDate);
                     }
                 } elseif ($menuItem->inventory_item_id) {
-                    $deductQty = $baseQty;
-                    if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                        $deductQty = $ml * $baseQty;
-                    }
+                    $deductQty = $this->posDirectSaleIssueQty($orderItem, $menuItem, $baseQty);
                     $this->executeInventoryIn($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Inventory Reversal (Cancel/Reduce): Order #{$orderItem->order_id}", $businessDate);
                 }
             }
@@ -8670,10 +8792,7 @@ class PosController extends Controller
                     $this->createVoidWasteRow($order, $orderItem, (int) $itemId, $location, (float) $rawQty, $voidReason);
                 }
             } elseif ($menuItem->inventory_item_id) {
-                $qty = (float) $orderItem->quantity;
-                if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                    $qty = $ml * (float) $orderItem->quantity;
-                }
+                $qty = $this->posDirectSaleIssueQty($orderItem, $menuItem);
                 $this->createVoidWasteRow($order, $orderItem, (int) $menuItem->inventory_item_id, $location, $qty, $voidReason);
             }
         }

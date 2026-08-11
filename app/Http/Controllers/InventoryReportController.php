@@ -248,9 +248,29 @@ class InventoryReportController extends Controller
                     $theoretical[$itemId] = ($theoretical[$itemId] ?? 0) + $rawQty;
                 }
             } elseif ($menuItem->inventory_item_id) {
-                $deductQty = (float)$qty;
-                if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                    $deductQty = $ml * (float)$qty;
+                $deductQty = (float) $qty;
+                if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                    $label = strtolower(trim((string) ($orderItem->variant?->size_label ?? '')));
+                    $cf = max(1.0, (float) ($menuItem->inventoryItem?->conversion_factor ?? 1));
+                    if (
+                        $ml <= 1.0001
+                        && $cf > 1.0001
+                        && (
+                            str_contains($label, 'full')
+                            || str_contains($label, 'bottle')
+                            || str_contains($label, 'btl')
+                            || str_contains($label, 'bottile')
+                        )
+                    ) {
+                        $deductQty = $cf * (float) $qty;
+                    } else {
+                        $deductQty = $ml * (float) $qty;
+                    }
+                } elseif (
+                    (bool) ($menuItem->is_direct_sale ?? false)
+                    && ($cf = max(1.0, (float) ($menuItem->inventoryItem?->conversion_factor ?? 1))) > 1.0001
+                ) {
+                    $deductQty = $cf * (float) $qty;
                 }
                 $theoretical[$menuItem->inventory_item_id] = ($theoretical[$menuItem->inventory_item_id] ?? 0) + $deductQty;
             }
