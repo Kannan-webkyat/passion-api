@@ -59,15 +59,19 @@ class StockMovementController extends Controller
             }
         }
 
-        $rows = $query->latest()->get();
-        $rows->each(function (InventoryTransaction $tx) {
+        $perPage = (int) $request->input('per_page', 50);
+        $perPage = max(10, min(100, $perPage));
+
+        $paginator = $query->latest()->paginate($perPage);
+
+        $paginator->getCollection()->each(function (InventoryTransaction $tx) {
             $tx->setAttribute(
                 'outlet_name',
                 $this->resolvePosOutletName($tx->reference_type, $tx->reference_id)
             );
         });
 
-        return response()->json($rows);
+        return response()->json($paginator);
     }
 
     /**
