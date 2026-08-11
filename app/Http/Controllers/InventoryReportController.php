@@ -1084,7 +1084,9 @@ class InventoryReportController extends Controller
                 SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END) as in_qty,
                 SUM(CASE WHEN type = 'out' THEN quantity ELSE 0 END) as out_qty,
                 SUM(CASE WHEN type = 'in' AND reason IN ({$purchaseReasonList}) THEN quantity ELSE 0 END) as purchase_in_qty,
-                SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty
+                SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty,
+                SUM(CASE WHEN type = 'in' AND reason = 'Opening Stock' THEN quantity ELSE 0 END) as opening_stock_in_qty,
+                SUM(CASE WHEN type = 'out' AND reason = 'Opening Stock' THEN quantity ELSE 0 END) as opening_stock_out_qty
             ")
             ->groupBy('inventory_item_id')
             ->get()
@@ -1159,6 +1161,8 @@ class InventoryReportController extends Controller
             $dayOut = (float) ($day?->out_qty ?? 0);
             $purchaseIn = (float) ($day?->purchase_in_qty ?? 0);
             $posOut = (float) ($day?->pos_out_qty ?? 0);
+            $openingStockIn = (float) ($day?->opening_stock_in_qty ?? 0);
+            $openingStockOut = (float) ($day?->opening_stock_out_qty ?? 0);
 
             $after = $txAggAfter->get($item->id);
             $afterIn = (float) ($after?->in_qty ?? 0);
@@ -1170,6 +1174,8 @@ class InventoryReportController extends Controller
                 $dayOut = $this->exciseNormalizeToBottles($dayOut, $bottleMl);
                 $purchaseIn = $this->exciseNormalizeToBottles($purchaseIn, $bottleMl);
                 $posOut = $this->exciseNormalizeToBottles($posOut, $bottleMl);
+                $openingStockIn = $this->exciseNormalizeToBottles($openingStockIn, $bottleMl);
+                $openingStockOut = $this->exciseNormalizeToBottles($openingStockOut, $bottleMl);
                 $afterIn = $this->exciseNormalizeToBottles($afterIn, $bottleMl);
                 $afterOut = $this->exciseNormalizeToBottles($afterOut, $bottleMl);
             }
@@ -1177,16 +1183,22 @@ class InventoryReportController extends Controller
             $netDay = $dayIn - $dayOut;
             $afterNet = $afterIn - $afterOut;
 
-            // current = opening + netDay + afterNet → opening / end-of-day from live stock
+            // current = opening + netDay + afterNet → true start-of-day before any day txs
             $openingQty = $nowQty - $netDay - $afterNet;
             $closingQty = $nowQty - $afterNet; // stock at end of selected date (matches book)
+
+            // Same-day "Opening Stock" is a process mistake mid-period, but for Excise
+            // roll it into Opening so Opening + Receipts − Sales ties to Closing
+            // (instead of Closing jumping while Receipts stay 0).
+            $openingStockNet = $openingStockIn - $openingStockOut;
+            $openingQty += $openingStockNet;
 
             // Register columns: Receipts = GRN only; Sales = POS only.
             // Other day movements (adjustments, wastage, transfers net, etc.) explain
             // Opening + Receipts − Sales ≠ Closing when present.
             $receiptsQty = $purchaseIn;
             $salesQty = $posOut;
-            $otherDayNet = ($dayIn - $purchaseIn) - ($dayOut - $posOut); // non-GRN in − non-POS out
+            $otherDayNet = ($dayIn - $purchaseIn - $openingStockIn) - ($dayOut - $posOut - $openingStockOut);
             $totalQty = $openingQty + $receiptsQty;
 
             // Spirits-like (ml tracked): sealed bottles + open stock as pegs
@@ -1217,6 +1229,7 @@ class InventoryReportController extends Controller
                     'closing_pegs' => (float) $closing['pegs'],
                     'debug' => [
                         'opening_qty_ml' => round($openingQty, 3),
+                        'opening_stock_rolled_into_opening_ml' => round($openingStockNet, 3),
                         'receipts_purchase_ml' => round($receiptsQty, 3),
                         'total_qty_ml' => round($totalQty, 3),
                         'pos_out_ml' => round($salesQty, 3),
@@ -1249,6 +1262,7 @@ class InventoryReportController extends Controller
                 'closing_pegs' => null,
                 'debug' => [
                     'opening_qty' => round($openingQty, 3),
+                    'opening_stock_rolled_into_opening' => round($openingStockNet, 3),
                     'receipts_purchase' => round($receiptsQty, 3),
                     'total_qty' => round($totalQty, 3),
                     'pos_out' => round($salesQty, 3),
