@@ -87,6 +87,31 @@ class JournalPostingServiceTest extends TestCase
         );
     }
 
+    public function test_one_paise_rounding_is_absorbed_without_inflating_credit(): void
+    {
+        $service = app(JournalPostingService::class);
+
+        $entry = $service->post(
+            sourceType: 'test_penny',
+            sourceId: random_int(100000, 999999),
+            entryDate: '2026-06-20',
+            businessDate: null,
+            sourceRef: 'GRN-PENNY',
+            memo: 'One paise GRN rounding',
+            lines: [
+                ['account_code' => '1110', 'debit' => 641291.23],
+                ['account_code' => '4210', 'credit' => 641291.22],
+            ],
+        );
+
+        $debit = round((float) $entry->lines->sum('debit'), 2);
+        $credit = round((float) $entry->lines->sum('credit'), 2);
+        $this->assertSame($debit, $credit);
+        $this->assertEqualsWithDelta(641291.22, $debit, 0.001);
+        $this->assertEqualsWithDelta(641291.22, (float) $entry->lines->firstWhere('account.code', '4210')?->credit, 0.001);
+        $this->assertEqualsWithDelta(641291.22, (float) $entry->lines->firstWhere('account.code', '1110')?->debit, 0.001);
+    }
+
     private function ensureTestAccounts(): void
     {
         foreach ([

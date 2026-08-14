@@ -45,6 +45,7 @@ final class JournalPostingService
             throw new JournalPostingException("No journal lines for {$sourceType}#{$sourceId}");
         }
 
+        $this->absorbPennyRounding($normalized);
         $this->assertBalanced($normalized);
 
         return DB::transaction(function () use (
@@ -156,15 +157,59 @@ final class JournalPostingService
         return array_values(array_filter($merged, fn (array $l) => $l['debit'] > 0 || $l['credit'] > 0));
     }
 
+    /**
+     * GRN / landed-cost posters can be 1 paise off after rounding 4dp unit costs
+     * vs 2dp line totals. Put that paise on the oversized side so the journal
+     * stays in balance (do not inflate GRNI / payables).
+     *
+     * @param  list<array{account_code: string, debit: float, credit: float, tax_tag: ?string, meta: ?array}>  $lines
+     */
+    private function absorbPennyRounding(array &$lines): void
+    {
+        $diffPaise = $this->debitCreditDiffPaise($lines);
+        if (abs($diffPaise) !== 1) {
+            return;
+        }
+
+        $side = $diffPaise > 0 ? 'debit' : 'credit';
+        $best = null;
+        $bestAmt = -1.0;
+        foreach ($lines as $i => $line) {
+            if ($line[$side] > $bestAmt) {
+                $bestAmt = $line[$side];
+                $best = $i;
+            }
+        }
+
+        if ($best === null || $bestAmt < 0.01) {
+            return;
+        }
+
+        $lines[$best][$side] = round($lines[$best][$side] - 0.01, 2);
+        $lines = array_values(array_filter($lines, fn (array $l) => $l['debit'] > 0 || $l['credit'] > 0));
+    }
+
+    /** @param list<array{debit: float, credit: float}> $lines */
+    private function debitCreditDiffPaise(array $lines): int
+    {
+        $debitPaise = (int) round(array_sum(array_column($lines, 'debit')) * 100);
+        $creditPaise = (int) round(array_sum(array_column($lines, 'credit')) * 100);
+
+        return $debitPaise - $creditPaise;
+    }
+
     /** @param list<array{debit: float, credit: float}> $lines */
     private function assertBalanced(array $lines): void
     {
+        $diffPaise = $this->debitCreditDiffPaise($lines);
+        if ($diffPaise === 0) {
+            return;
+        }
+
         $debit = round(array_sum(array_column($lines, 'debit')), 2);
         $credit = round(array_sum(array_column($lines, 'credit')), 2);
 
-        if (abs($debit - $credit) > 0.01) {
-            throw new JournalPostingException("Journal not balanced: debit={$debit} credit={$credit}");
-        }
+        throw new JournalPostingException("Journal not balanced: debit={$debit} credit={$credit}");
     }
 
     private function nextEntryNumber(string $entryDate): string
