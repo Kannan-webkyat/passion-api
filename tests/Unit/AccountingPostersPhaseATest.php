@@ -30,6 +30,9 @@ class AccountingPostersPhaseATest extends TestCase
             ['1310', 'Inventory Food', 'asset'],
             ['2210', 'Output CGST', 'liability'],
             ['2211', 'Output SGST', 'liability'],
+            ['2212', 'Output IGST', 'liability'],
+            ['2213', 'Output VAT', 'liability'],
+            ['4220', 'Bar Sales', 'income'],
             ['4100', 'Room Revenue', 'income'],
             ['4210', 'Restaurant Sales', 'income'],
             ['4310', 'Delivery Charge Income', 'income'],
@@ -164,6 +167,50 @@ class AccountingPostersPhaseATest extends TestCase
         );
         $this->assertNotNull($packLine);
         $this->assertEqualsWithDelta(10.0, (float) $packLine->credit, 0.01);
+    }
+
+    public function test_pos_settle_poster_credits_unsplit_inclusive_liquor_vat(): void
+    {
+        $order = new PosOrder([
+            'id' => 6401,
+            'total_amount' => 770,
+            'tax_amount' => 115.5,
+            'gst_net_taxable' => 0,
+            'vat_net_taxable' => 654.5,
+            'cgst_amount' => 0,
+            'sgst_amount' => 0,
+            'igst_amount' => 0,
+            'vat_tax_amount' => 0,
+            'discount_amount' => 0,
+            'service_charge_amount' => 0,
+            'delivery_charge' => 0,
+            'packing_charge' => 0,
+            'tip_amount' => 0,
+            'rounding_amount' => 0,
+            'business_date' => '2026-08-17',
+            'is_complimentary' => false,
+        ]);
+        $order->id = 6401;
+        $order->setRelation('payments', collect([
+            new \App\Models\PosPayment([
+                'id' => 1,
+                'order_id' => 6401,
+                'method' => 'cash',
+                'amount' => 770,
+            ]),
+        ]));
+
+        $entry = app(\App\Services\Accounting\PosSettlePoster::class)->post($order);
+
+        $this->assertNotNull($entry);
+        $this->assertEqualsWithDelta(770.0, (float) $entry->lines->sum('debit'), 0.001);
+        $this->assertEqualsWithDelta(770.0, (float) $entry->lines->sum('credit'), 0.001);
+        $vatLine = $entry->lines->firstWhere(
+            'account_id',
+            ChartOfAccount::where('code', AccountCodes::OUTPUT_VAT)->value('id')
+        );
+        $this->assertNotNull($vatLine);
+        $this->assertEqualsWithDelta(115.5, (float) $vatLine->credit, 0.001);
     }
 
     public function test_inventory_adjustment_poster_posts_wastage(): void

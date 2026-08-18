@@ -93,6 +93,10 @@ final class PosSettlePoster
             $this->addCredit($lines, AccountCodes::RESTAURANT_SALES, $rounding, $order->id);
         }
 
+        // Inclusive liquor MRP (e.g. ₹770) can sit in vat_net_taxable while vat_tax_amount
+        // / CGST+SGST are still 0. Cash is the full bill — plug the missing tax credit.
+        $this->creditMissingTaxAndBalance($lines, $order);
+
         $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
 
         return $this->journal->post(
@@ -105,6 +109,62 @@ final class PosSettlePoster
             lines: $lines,
             postedBy: $postedBy,
         );
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function creditMissingTaxAndBalance(array &$lines, PosOrder $order): void
+    {
+        $headerTax = round((float) ($order->tax_amount ?? 0), 2);
+        $splitTax = round(
+            (float) ($order->cgst_amount ?? 0)
+            + (float) ($order->sgst_amount ?? 0)
+            + (float) ($order->igst_amount ?? 0)
+            + (float) ($order->vat_tax_amount ?? 0),
+            2
+        );
+        $unsplitTax = round($headerTax - $splitTax, 2);
+        if ($unsplitTax >= 0.01) {
+            $this->creditTaxRemainder($lines, $order, $unsplitTax);
+        }
+
+        $debit = 0.0;
+        $credit = 0.0;
+        foreach ($lines as $line) {
+            $debit += (float) ($line['debit'] ?? 0);
+            $credit += (float) ($line['credit'] ?? 0);
+        }
+        $gap = round($debit - $credit, 2);
+        if ($gap >= 0.01) {
+            $this->creditTaxRemainder($lines, $order, $gap);
+        }
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function creditTaxRemainder(array &$lines, PosOrder $order, float $amount): void
+    {
+        $amount = round($amount, 2);
+        if ($amount < 0.01) {
+            return;
+        }
+
+        $vatNet = round((float) ($order->vat_net_taxable ?? 0), 2);
+        $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+        if ($vatNet > 0 || $vatTax > 0) {
+            $this->addCredit($lines, AccountCodes::OUTPUT_VAT, $amount, $order->id, 'output_vat');
+
+            return;
+        }
+
+        $igst = round((float) ($order->igst_amount ?? 0), 2);
+        if ($igst > 0) {
+            $this->addCredit($lines, AccountCodes::OUTPUT_IGST, $amount, $order->id, 'output_gst');
+
+            return;
+        }
+
+        $half = round($amount / 2, 2);
+        $this->addCredit($lines, AccountCodes::OUTPUT_CGST, $half, $order->id, 'output_gst');
+        $this->addCredit($lines, AccountCodes::OUTPUT_SGST, round($amount - $half, 2), $order->id, 'output_gst');
     }
 
     /** @param list<array<string, mixed>> $lines */
