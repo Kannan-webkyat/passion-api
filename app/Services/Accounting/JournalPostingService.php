@@ -45,7 +45,7 @@ final class JournalPostingService
             throw new JournalPostingException("No journal lines for {$sourceType}#{$sourceId}");
         }
 
-        $this->absorbPennyRounding($normalized);
+        $this->absorbRoundingImbalance($normalized);
         $this->assertBalanced($normalized);
 
         return DB::transaction(function () use (
@@ -158,42 +158,53 @@ final class JournalPostingService
     }
 
     /**
-     * GRN / landed-cost posters can be 1 paise off after rounding 4dp unit costs
-     * vs 2dp line totals. Put that paise on the oversized side so the journal
-     * stays in balance (do not inflate GRNI / payables).
+     * Multi-line posters (esp. GRN: landed 4dp × qty vs GRNI 2dp) can drift a few paise.
+     * Absorb up to 5 paise on the oversized side so the journal stays balanced
+     * (do not inflate the light side / GRNI when debit is short — trim the heavy side).
      *
      * @param  list<array{account_code: string, debit: float, credit: float, tax_tag: ?string, meta: ?array}>  $lines
      */
-    private function absorbPennyRounding(array &$lines): void
+    private function absorbRoundingImbalance(array &$lines): void
     {
         $diffPaise = $this->debitCreditDiffPaise($lines);
-        if (abs($diffPaise) !== 1) {
+        if ($diffPaise === 0) {
+            return;
+        }
+
+        // Max 5 paise (₹0.05) — enough for large Bevco GRNs; larger gaps stay hard errors.
+        if (abs($diffPaise) > 5) {
             return;
         }
 
         $side = $diffPaise > 0 ? 'debit' : 'credit';
+        $adjustPaise = abs($diffPaise);
         $best = null;
-        $bestAmt = -1.0;
+        $bestPaise = -1;
         foreach ($lines as $i => $line) {
-            if ($line[$side] > $bestAmt) {
-                $bestAmt = $line[$side];
+            $paise = (int) round(((float) $line[$side]) * 100);
+            if ($paise > $bestPaise) {
+                $bestPaise = $paise;
                 $best = $i;
             }
         }
 
-        if ($best === null || $bestAmt < 0.01) {
+        if ($best === null || $bestPaise < $adjustPaise) {
             return;
         }
 
-        $lines[$best][$side] = round($lines[$best][$side] - 0.01, 2);
+        $lines[$best][$side] = round(($bestPaise - $adjustPaise) / 100, 2);
         $lines = array_values(array_filter($lines, fn (array $l) => $l['debit'] > 0 || $l['credit'] > 0));
     }
 
     /** @param list<array{debit: float, credit: float}> $lines */
     private function debitCreditDiffPaise(array $lines): int
     {
-        $debitPaise = (int) round(array_sum(array_column($lines, 'debit')) * 100);
-        $creditPaise = (int) round(array_sum(array_column($lines, 'credit')) * 100);
+        $debitPaise = 0;
+        $creditPaise = 0;
+        foreach ($lines as $line) {
+            $debitPaise += (int) round(((float) $line['debit']) * 100);
+            $creditPaise += (int) round(((float) $line['credit']) * 100);
+        }
 
         return $debitPaise - $creditPaise;
     }

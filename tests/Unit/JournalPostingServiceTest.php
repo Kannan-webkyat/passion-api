@@ -112,6 +112,29 @@ class JournalPostingServiceTest extends TestCase
         $this->assertEqualsWithDelta(641291.22, (float) $entry->lines->firstWhere('account.code', '1110')?->debit, 0.001);
     }
 
+    public function test_three_paise_rounding_drift_is_absorbed(): void
+    {
+        $service = app(JournalPostingService::class);
+
+        $entry = $service->post(
+            sourceType: 'test_paise_absorb',
+            sourceId: random_int(100000, 999999),
+            entryDate: '2026-08-20',
+            businessDate: null,
+            sourceRef: 'GRN-2026-005',
+            memo: 'Simulate Bevco GRN 0.03 drift',
+            lines: [
+                ['account_code' => '1110', 'debit' => 1153865.70],
+                ['account_code' => '4210', 'credit' => 1153865.73],
+            ],
+        );
+
+        $debit = round((float) $entry->lines->sum('debit'), 2);
+        $credit = round((float) $entry->lines->sum('credit'), 2);
+        $this->assertSame($debit, $credit);
+        $this->assertEqualsWithDelta(1153865.70, $debit, 0.001);
+    }
+
     private function ensureTestAccounts(): void
     {
         foreach ([
