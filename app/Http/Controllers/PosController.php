@@ -6665,7 +6665,8 @@ class PosController extends Controller
         $includeAll = $this->restaurantIncludesAllItemsOnKot($order->restaurant);
 
         $batch = null;
-        DB::transaction(function () use ($order, $includeAll, &$batch) {
+        $errorResponse = null;
+        DB::transaction(function () use ($order, $includeAll, &$batch, &$errorResponse) {
             // Lock the order to prevent concurrent simultaneous KOT triggers issuing the same batch number
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
 
@@ -6682,24 +6683,22 @@ class PosController extends Controller
                 });
             }
 
-            if (! $kotQuery->exists()) {
+            $toSend = $kotQuery->with(['menuItem', 'variant', 'combo.menuItems'])->orderBy('id')->get();
+            if ($toSend->isEmpty()) {
+                return;
+            }
+
+            // Fire = commit: block KOT when MTO ingredients (incl. shared BOM across this fire) are short.
+            $insufficient = $this->checkMadeToOrderStock($order, $toSend);
+            if (count($insufficient) > 0) {
+                $errorResponse = $this->insufficientKotStockResponse($insufficient);
                 return;
             }
 
             $order->increment('current_kot_batch');
             $batch = $order->current_kot_batch;
 
-            $updateQuery = $order->items()
-                ->where('status', 'active')
-                ->where('kot_sent', false)
-                ->where('kot_hold', false);
-            if (! $includeAll) {
-                $updateQuery->where(function ($q) {
-                    $q->whereNull('menu_item_id')
-                        ->orWhereHas('menuItem', fn ($mq) => $mq->where('requires_production', true));
-                });
-            }
-            $updateQuery->update([
+            PosOrderItem::whereIn('id', $toSend->pluck('id')->all())->update([
                 'kot_sent' => true,
                 'kot_sent_at' => now(),
                 'kot_batch' => $batch,
@@ -6709,6 +6708,10 @@ class PosController extends Controller
                 $order->update(['kitchen_status' => 'pending']);
             }
         });
+
+        if ($errorResponse) {
+            return $errorResponse;
+        }
 
         if ($batch === null) {
             return response()->json([
@@ -6977,7 +6980,10 @@ class PosController extends Controller
         ]);
 
         $ids = array_values(array_unique($validated['order_item_ids']));
-        $items = PosOrderItem::whereIn('id', $ids)->orderBy('id')->get();
+        $items = PosOrderItem::whereIn('id', $ids)
+            ->with(['menuItem', 'variant', 'combo.menuItems'])
+            ->orderBy('id')
+            ->get();
         $order->loadMissing('restaurant');
 
         foreach ($items as $item) {
@@ -6995,8 +7001,16 @@ class PosController extends Controller
             }
         }
 
-        DB::transaction(function () use ($order, $ids) {
+        $errorResponse = null;
+        DB::transaction(function () use ($order, $ids, $items, &$errorResponse) {
             $locked = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+
+            $insufficient = $this->checkMadeToOrderStock($locked, $items);
+            if (count($insufficient) > 0) {
+                $errorResponse = $this->insufficientKotStockResponse($insufficient);
+                return;
+            }
+
             $locked->increment('current_kot_batch');
             $batch = $locked->fresh()->current_kot_batch;
 
@@ -7011,6 +7025,10 @@ class PosController extends Controller
                 $locked->update(['kitchen_status' => 'pending']);
             }
         });
+
+        if ($errorResponse) {
+            return $errorResponse;
+        }
 
         $fresh = $order->fresh()->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy');
 
@@ -8207,6 +8225,28 @@ class PosController extends Controller
         ?RestaurantMaster $restaurant = null
     ): ?InventoryLocation {
         return $this->storeResolver()->resolve($menuItem, $kitchenStore, $barStore, $restaurant);
+    }
+
+    /**
+     * 422 payload when Send/Fire KOT (or Ready) cannot cover MTO ingredients.
+     */
+    private function insufficientKotStockResponse(array $insufficient): \Illuminate\Http\JsonResponse
+    {
+        $err = $insufficient[0];
+        $message = sprintf(
+            'Cannot send KOT: short of "%s" for "%s" (%s %s available, needs %s %s).',
+            $err['ingredient'] ?? 'ingredient',
+            $err['menu_item'] ?? 'item',
+            $err['available'] ?? 0,
+            $err['uom'] ?? 'unit',
+            $err['required'] ?? 0,
+            $err['uom'] ?? 'unit'
+        );
+
+        return response()->json([
+            'message' => $message,
+            'errors' => $insufficient,
+        ], 422);
     }
 
     /**
