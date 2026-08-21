@@ -922,8 +922,10 @@ class InventoryReportController extends Controller
     }
 
     /**
-     * When stock is BTL but a movement aggregate is still in ml (e.g. POS qty 375/500/1500),
-     * convert to bottle units. Small counts stay as bottles as-is.
+     * When stock is BTL but a movement aggregate is still in ml (legacy POS qty 750/1500…),
+     * convert to bottle units. Real bottle counts (incl. large GRNs) stay as-is.
+     *
+     * Do NOT use "qty >= bottleMl ⇒ divide": a GRN of 900 × 650ml beer became 1.38 Btl.
      */
     private function exciseNormalizeToBottles(float $qty, float $bottleMl): float
     {
@@ -931,11 +933,33 @@ class InventoryReportController extends Controller
             return $qty;
         }
 
-        if (abs($qty) + 0.0001 >= $bottleMl) {
-            return round($qty / $bottleMl, 4);
+        // Full-bottle beer / cider sizes are always BTL counts — never ml-normalize.
+        foreach ([330.0, 500.0, 650.0] as $beerMl) {
+            if (abs($bottleMl - $beerMl) < 0.5) {
+                return $qty;
+            }
         }
 
-        return $qty;
+        $abs = abs($qty);
+        if ($abs + 0.0001 < $bottleMl) {
+            return $qty;
+        }
+
+        $asBottles = $abs / $bottleMl;
+        $nearest = (float) round($asBottles);
+        // Non-multiples of bottle ml (e.g. 900 on a 750ml spirit) are bottle counts.
+        if ($nearest < 1 || abs($asBottles - $nearest) > 0.001) {
+            return $qty;
+        }
+
+        // Huge exact multiples are warehouse bottle movements, not a few ml lines.
+        if ($nearest > 24) {
+            return $qty;
+        }
+
+        $sign = $qty < 0 ? -1.0 : 1.0;
+
+        return round($sign * $nearest, 4);
     }
 
     /**
@@ -955,8 +979,9 @@ class InventoryReportController extends Controller
      * - Beer: issue UOM = BTL/Pcs → bottle/piece counts (no pegs)
      * - POS generates inventory_transactions out rows with reason 'POS Order'
      * - Supplier receipts post as reason 'GRN Receipt' at Main Store
-     * - After ML→BTL conversion, older POS lines may still store qty in ml (375/500);
-     *   those aggregates are normalized to bottles when stock is BTL.
+     * - After ML→BTL conversion, older spirit POS lines may still store qty in ml (750/1500);
+     *   those outbound aggregates are normalized to bottles when stock is BTL.
+     *   Beer (330/500/650) and GRN/inbound bottle counts are never ml-normalized.
      */
     public function exciseBar(Request $request)
     {
@@ -1168,15 +1193,11 @@ class InventoryReportController extends Controller
             $afterIn = (float) ($after?->in_qty ?? 0);
             $afterOut = (float) ($after?->out_qty ?? 0);
 
-            // BTL stock + legacy ML-sized movement lines (e.g. corrected full-bottle POS qty=375).
+            // BTL stock: only rewrite legacy ML-sized *outbound* aggregates (POS).
+            // Never touch GRN / opening / inbound — e.g. receipt of 900 bottles must stay 900.
             if ($isBtl && ! $isMl && $bottleMl >= 100) {
-                $dayIn = $this->exciseNormalizeToBottles($dayIn, $bottleMl);
                 $dayOut = $this->exciseNormalizeToBottles($dayOut, $bottleMl);
-                $purchaseIn = $this->exciseNormalizeToBottles($purchaseIn, $bottleMl);
                 $posOut = $this->exciseNormalizeToBottles($posOut, $bottleMl);
-                $openingStockIn = $this->exciseNormalizeToBottles($openingStockIn, $bottleMl);
-                $openingStockOut = $this->exciseNormalizeToBottles($openingStockOut, $bottleMl);
-                $afterIn = $this->exciseNormalizeToBottles($afterIn, $bottleMl);
                 $afterOut = $this->exciseNormalizeToBottles($afterOut, $bottleMl);
             }
 
