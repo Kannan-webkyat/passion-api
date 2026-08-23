@@ -5893,6 +5893,7 @@ class PosController extends Controller
             'restaurant_id' => 'required|exists:restaurant_masters,id',
             'tab' => 'nullable|in:current,running,settled',
             'order_id' => 'nullable|integer|min:1',
+            'search' => 'nullable|string|max:100',
             'from' => 'nullable|date',
             'to' => 'nullable|date|after_or_equal:from',
             'page' => 'nullable|integer|min:1',
@@ -5910,6 +5911,12 @@ class PosController extends Controller
             default => ['paid', 'refunded'],
         };
 
+        $search = trim((string) ($validated['search'] ?? ''));
+        // Bare "#123" / "123" → exact order id (legacy order_id param still works).
+        $orderIdExact = ! empty($validated['order_id'])
+            ? (int) $validated['order_id']
+            : (preg_match('/^#?(\d+)$/', $search, $m) ? (int) $m[1] : null);
+
         $query = PosOrder::with(['room', 'table', 'refunds'])
             ->where('restaurant_id', $validated['restaurant_id'])
             ->whereIn('status', $statuses);
@@ -5920,13 +5927,33 @@ class PosController extends Controller
             $query->orderByDesc('closed_at')->orderByDesc('opened_at');
         }
 
-        if (! empty($validated['order_id'])) {
-            // ID search ignores tab status filter so cashiers can find any order.
+        if ($orderIdExact) {
+            // ID search ignores tab status + date so cashiers can find any past order.
             $query = PosOrder::with(['room', 'table', 'refunds'])
                 ->where('restaurant_id', $validated['restaurant_id'])
-                ->where('id', (int) $validated['order_id'])
+                ->where('id', $orderIdExact)
                 ->orderByDesc('id');
         } else {
+            if ($search !== '') {
+                $like = '%'.str_replace(['%', '_'], ['\\%', '\\_'], $search).'%';
+                $query->where(function ($w) use ($like, $search) {
+                    $w->where('customer_name', 'like', $like)
+                        ->orWhere('customer_phone', 'like', $like)
+                        ->orWhere('delivery_address', 'like', $like)
+                        ->orWhereHas('table', function ($tq) use ($like, $search) {
+                            $tq->where('table_number', 'like', $like);
+                            // "T-05" / "B-01" style — also match bare digits / without prefix
+                            $bare = preg_replace('/^[A-Za-z]-?/', '', $search);
+                            if ($bare !== '' && $bare !== $search) {
+                                $tq->orWhere('table_number', 'like', '%'.$bare.'%');
+                            }
+                        })
+                        ->orWhereHas('room', function ($rq) use ($like) {
+                            $rq->where('room_number', 'like', $like);
+                        });
+                });
+            }
+
             // Filter by business date (Z-report / day-close date), with legacy
             // fallback for older rows that only have closed_at / opened_at.
             $applyBusinessDateRange = function ($q, string $from, string $to) use ($tab) {
@@ -5966,10 +5993,13 @@ class PosController extends Controller
             $to = $validated['to'] ?? null;
             $dateWasExplicit = $from !== null || $to !== null;
 
+            // Text search without dates: look across recent history (not only live day).
+            $skipDefaultDate = $search !== '';
+
             // Current / Settled: default (or live-day with no rows) → latest day that
             // actually has matching statuses. Avoids empty Settled when the date picker
             // still shows the rolled-forward outlet day.
-            if (in_array($tab, ['current', 'settled'], true)) {
+            if (! $skipDefaultDate && in_array($tab, ['current', 'settled'], true)) {
                 if (! $from && ! $to) {
                     $from = $to = $outletBusinessDate;
                 }
@@ -6006,6 +6036,7 @@ class PosController extends Controller
                 $applyBusinessDateRange($query, $to, $to);
             }
             // Running with no date = all open/billed for outlet.
+            // Text search with no date = all matching statuses for outlet.
         }
 
         $perPage = (int) ($validated['per_page'] ?? 20);
