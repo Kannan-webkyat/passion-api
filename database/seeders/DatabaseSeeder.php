@@ -39,15 +39,15 @@ class DatabaseSeeder extends Seeder
             // RestaurantBarOpeningStockSeeder::class,
             // BarCocktailSeeder::class,
             // ----
-            // RoomTypeRoomSeeder::class,
+            RoomTypeRoomSeeder::class,
             // HotelInventoryCatalogSeeder::class,
-            // RoomParTestTemplatesSeeder::class,
-            // RoomParProcurementStockSeeder::class,
-            // HousekeepingStoreRoomParStockSeeder::class, 
-            // HotelMinibarMenuItemsSeeder::class,
-            // HousekeepingChecklistSeeder::class,
+            RoomParTestTemplatesSeeder::class,
+            RoomParProcurementStockSeeder::class,
+            HousekeepingStoreRoomParStockSeeder::class, 
+            HotelMinibarMenuItemsSeeder::class,
+            HousekeepingChecklistSeeder::class,
             // RbacTestUsersSeeder::class,
-            // BookingSeeder::class,
+            BookingSeeder::class,
         ]);
 
         User::firstOrCreate(

@@ -5562,7 +5562,11 @@ class PosController extends Controller
                                 ->where('inventory_location_id', $targetStore->id)
                                 ->where('inventory_item_id', $item->inventory_item_id)
                                 ->value('quantity') ?? 0);
-                            $res = (float) ($reservedByItem->get($item->inventory_item_id, 0));
+                            // Reserve only at this shelf — shared kitchen must not zero another outlet's bar.
+                            $res = $this->reservedFinishedGoodQtyAtLocation(
+                                (int) $item->inventory_item_id,
+                                (int) $targetStore->id
+                            );
                             $item->available_qty = max(0, $phys - $res);
                         } else {
                             $item->available_qty = max(0, $stock);
@@ -6326,37 +6330,30 @@ class PosController extends Controller
                         (int) $order->restaurant_id,
                     );
                 } elseif ($item->inventory_item_id) {
-                    // Availability = Physical Stock - Reserved(not deducted) — single source of truth
-                    $locIds = $order->restaurant_id ? array_filter([$order->restaurant->kitchen_location_id, $order->restaurant->bar_location_id]) : [];
-                    $physical = $locIds ? (float) (DB::table('inventory_item_locations')
-                        ->whereIn('inventory_location_id', $locIds)
-                        ->where('inventory_item_id', $item->inventory_item_id)
-                        ->sum('quantity') ?? 0) : 0;
-
-                    $reservedItemQty = DB::table('pos_order_items')
-                        ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-                        ->join('menu_items', 'pos_order_items.menu_item_id', '=', 'menu_items.id')
-                        ->leftJoin('menu_item_variants', 'pos_order_items.menu_item_variant_id', '=', 'menu_item_variants.id')
-                        ->whereIn('pos_orders.status', ['open', 'billed'])
-                        ->where('pos_order_items.status', 'active')
-                        ->where('pos_order_items.inventory_deducted', false)
-                        ->where('pos_order_items.order_id', '!=', $order->id)
-                        ->where('menu_items.inventory_item_id', $item->inventory_item_id)
-                        ->select(DB::raw('SUM(pos_order_items.quantity * COALESCE(menu_item_variants.ml_quantity, 1)) as total'))
-                        ->value('total') ?? 0;
-
-                    $reservedComboQty = DB::table('pos_order_items')
-                        ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
-                        ->join('combo_items', 'pos_order_items.combo_id', '=', 'combo_items.combo_id')
-                        ->join('menu_items', 'combo_items.menu_item_id', '=', 'menu_items.id')
-                        ->whereIn('pos_orders.status', ['open', 'billed'])
-                        ->where('pos_order_items.status', 'active')
-                        ->where('pos_order_items.inventory_deducted', false)
-                        ->where('pos_order_items.order_id', '!=', $order->id)
-                        ->where('menu_items.inventory_item_id', $item->inventory_item_id)
-                        ->sum('pos_order_items.quantity') ?? 0;
-
-                    $available = max(0, (float) $physical - ((float) $reservedItemQty + (float) $reservedComboQty));
+                    // Availability = shelf stock at deduction store − reserved on that same shelf only.
+                    $order->loadMissing('restaurant');
+                    $kitchenStore = $this->getKitchenForOrder($order);
+                    $barStore = $this->getBarLocationForRestaurant($order->restaurant);
+                    $targetStore = $this->resolveInventoryDeductionStore(
+                        $item,
+                        $kitchenStore,
+                        $barStore,
+                        $order->restaurant
+                    );
+                    $physical = $targetStore
+                        ? (float) (DB::table('inventory_item_locations')
+                            ->where('inventory_location_id', $targetStore->id)
+                            ->where('inventory_item_id', $item->inventory_item_id)
+                            ->value('quantity') ?? 0)
+                        : 0.0;
+                    $reserved = $targetStore
+                        ? $this->reservedFinishedGoodQtyAtLocation(
+                            (int) $item->inventory_item_id,
+                            (int) $targetStore->id,
+                            (int) $order->id
+                        )
+                        : 0.0;
+                    $available = max(0, $physical - $reserved);
                 } elseif ($mtoMenuItemIds->has($menuItemId)) {
                     // Type C: made-to-order — validate FULL cart qty (not delta). Delta vs raw stock
                     // let cashiers add bowl #2 when bowl #1 already reserved undeducted on this order.
@@ -8225,6 +8222,55 @@ class PosController extends Controller
         ?RestaurantMaster $restaurant = null
     ): ?InventoryLocation {
         return $this->storeResolver()->resolve($menuItem, $kitchenStore, $barStore, $restaurant);
+    }
+
+    /**
+     * Undeducted open/billed finished-good demand at one shelf.
+     * Only outlets whose kitchen_location_id or bar_location_id is this location —
+     * Brews open beer must not reserve Champions bar stock via a shared kitchen id.
+     * Peg-style variant ml (1–10) scales; bottle-size ml values are treated as 1×.
+     */
+    private function reservedFinishedGoodQtyAtLocation(
+        int $inventoryItemId,
+        int $locationId,
+        ?int $excludeOrderId = null
+    ): float {
+        $mlScale = 'CASE WHEN menu_item_variants.ml_quantity > 0 AND menu_item_variants.ml_quantity <= 10 THEN menu_item_variants.ml_quantity ELSE 1 END';
+
+        $itemQty = (float) (DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->join('restaurant_masters', 'pos_orders.restaurant_id', '=', 'restaurant_masters.id')
+            ->join('menu_items', 'pos_order_items.menu_item_id', '=', 'menu_items.id')
+            ->leftJoin('menu_item_variants', 'pos_order_items.menu_item_variant_id', '=', 'menu_item_variants.id')
+            ->whereIn('pos_orders.status', ['open', 'billed'])
+            ->where('pos_order_items.status', 'active')
+            ->where('pos_order_items.inventory_deducted', false)
+            ->where('menu_items.inventory_item_id', $inventoryItemId)
+            ->where(function ($q) use ($locationId) {
+                $q->where('restaurant_masters.bar_location_id', $locationId)
+                    ->orWhere('restaurant_masters.kitchen_location_id', $locationId);
+            })
+            ->when($excludeOrderId, fn ($q) => $q->where('pos_order_items.order_id', '!=', $excludeOrderId))
+            ->selectRaw("SUM(pos_order_items.quantity * {$mlScale}) as total")
+            ->value('total') ?? 0);
+
+        $comboQty = (float) (DB::table('pos_order_items')
+            ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
+            ->join('restaurant_masters', 'pos_orders.restaurant_id', '=', 'restaurant_masters.id')
+            ->join('combo_items', 'pos_order_items.combo_id', '=', 'combo_items.combo_id')
+            ->join('menu_items', 'combo_items.menu_item_id', '=', 'menu_items.id')
+            ->whereIn('pos_orders.status', ['open', 'billed'])
+            ->where('pos_order_items.status', 'active')
+            ->where('pos_order_items.inventory_deducted', false)
+            ->where('menu_items.inventory_item_id', $inventoryItemId)
+            ->where(function ($q) use ($locationId) {
+                $q->where('restaurant_masters.bar_location_id', $locationId)
+                    ->orWhere('restaurant_masters.kitchen_location_id', $locationId);
+            })
+            ->when($excludeOrderId, fn ($q) => $q->where('pos_order_items.order_id', '!=', $excludeOrderId))
+            ->sum('pos_order_items.quantity') ?? 0);
+
+        return max(0.0, $itemQty + $comboQty);
     }
 
     /**
