@@ -92,6 +92,11 @@ class MenuItemController extends Controller
             $validated['price'] = 0;
         }
 
+        // ConvertEmptyStringsToNull turns blank dietary type into null; column is NOT NULL.
+        if (! array_key_exists('type', $validated) || $validated['type'] === null || $validated['type'] === '') {
+            $validated['type'] = 'Veg';
+        }
+
         if ($request->hasFile('image')) {
             $path = $request->file('image')->store('menu-items', 'public');
             $validated['image'] = url('storage/'.$path);
