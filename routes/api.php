@@ -229,6 +229,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::post('orders/{order}/refund', [PosController::class, 'refund']);
         Route::get('reports/sales', [PosController::class, 'salesReport']);
         Route::get('reports/dashboard-summary', [PosController::class, 'salesDashboardSummary']);
+        Route::get('reports/mini-dash', [PosController::class, 'miniDash']);
         Route::get('reports/sales/export', [PosController::class, 'salesReportExport']);
         Route::get('reports/sales/orders', [PosController::class, 'salesReportOrders']);
         Route::get('reports/liquor-sales', [PosController::class, 'liquorSalesReport']);

@@ -67,6 +67,24 @@ class PosController extends Controller
         }
     }
 
+    /** @param  list<string>  $permissions */
+    private function checkAnyPermission(array $permissions): void
+    {
+        $user = auth()->user();
+        if (! $user) {
+            abort(401, 'Unauthenticated.');
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return;
+        }
+        foreach ($permissions as $permission) {
+            if ($user->can($permission)) {
+                return;
+            }
+        }
+        abort(403, 'Unauthorized action.');
+    }
+
     /** Kitchen display actions: Kitchen Staff (kitchen-production) or POS cashiers (pos-order). */
     private function checkKitchenActionPermission(): void
     {
@@ -987,6 +1005,181 @@ class PosController extends Controller
                     'is_top' => $topOutletId !== null && (int) $outlet['id'] === (int) $topOutletId,
                 ]);
             }, $byOutlet),
+        ]);
+    }
+
+    /**
+     * Compact per-outlet sales for the mini-dash (today or a past business date).
+     */
+    public function miniDash(Request $request)
+    {
+        $this->checkAnyPermission(['pos-order', 'report-sales', 'pos-day-closing', 'view-dashboard']);
+
+        $validated = $request->validate([
+            'date' => 'nullable|date',
+        ]);
+        $date = $validated['date'] ?? now()->toDateString();
+        $outletIds = $this->resolveAccessibleOutletIds();
+
+        $empty = [
+            'date' => $date,
+            'outlet_count' => 0,
+            'orders_count' => 0,
+            'open_count' => 0,
+            'gross_sales' => 0.0,
+            'total_refunded' => 0.0,
+            'revenue' => 0.0,
+            'cash' => 0.0,
+            'card' => 0.0,
+            'upi' => 0.0,
+            'room_charge' => 0.0,
+            'outlets' => [],
+        ];
+
+        if ($outletIds === []) {
+            return response()->json($empty);
+        }
+
+        $outletNames = RestaurantMaster::query()
+            ->whereIn('id', $outletIds)
+            ->orderBy('name')
+            ->pluck('name', 'id');
+
+        $salesRows = DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereIn('status', ['paid', 'refunded'])
+            ->whereDate('business_date', $date)
+            ->groupBy('restaurant_id')
+            ->select(
+                'restaurant_id',
+                DB::raw('COUNT(*) as orders_count'),
+                DB::raw('COALESCE(SUM(total_amount), 0) as gross_sales'),
+            )
+            ->get()
+            ->keyBy('restaurant_id');
+
+        $openRows = DB::table('pos_orders')
+            ->whereIn('restaurant_id', $outletIds)
+            ->whereIn('status', ['open', 'billed'])
+            ->whereDate('business_date', $date)
+            ->groupBy('restaurant_id')
+            ->select('restaurant_id', DB::raw('COUNT(*) as open_count'))
+            ->get()
+            ->keyBy('restaurant_id');
+
+        $payRows = DB::table('pos_payments')
+            ->join('pos_orders', 'pos_payments.order_id', '=', 'pos_orders.id')
+            ->whereIn('pos_orders.restaurant_id', $outletIds)
+            ->whereIn('pos_orders.status', ['paid', 'refunded'])
+            ->whereDate('pos_orders.business_date', $date)
+            ->groupBy('pos_orders.restaurant_id', 'pos_payments.method')
+            ->select(
+                'pos_orders.restaurant_id',
+                'pos_payments.method',
+                DB::raw('COALESCE(SUM(pos_payments.amount), 0) as amount'),
+            )
+            ->get();
+
+        $refundRows = DB::table('pos_order_refunds')
+            ->join('pos_orders', 'pos_order_refunds.order_id', '=', 'pos_orders.id')
+            ->whereIn('pos_orders.restaurant_id', $outletIds)
+            ->where(function ($q) use ($date) {
+                $q->whereDate('pos_order_refunds.business_date', $date)
+                    ->orWhere(function ($legacy) use ($date) {
+                        $legacy->whereNull('pos_order_refunds.business_date')
+                            ->whereDate('pos_order_refunds.refunded_at', $date);
+                    });
+            })
+            ->groupBy('pos_orders.restaurant_id', 'pos_order_refunds.method')
+            ->select(
+                'pos_orders.restaurant_id',
+                'pos_order_refunds.method',
+                DB::raw('COALESCE(SUM(pos_order_refunds.amount), 0) as amount'),
+            )
+            ->get();
+
+        $payByOutlet = [];
+        foreach ($payRows as $row) {
+            $rid = (int) $row->restaurant_id;
+            $method = (string) $row->method;
+            $payByOutlet[$rid][$method] = ($payByOutlet[$rid][$method] ?? 0) + (float) $row->amount;
+        }
+        $refundByOutlet = [];
+        $refundTotalByOutlet = [];
+        foreach ($refundRows as $row) {
+            $rid = (int) $row->restaurant_id;
+            $method = (string) $row->method;
+            $amt = (float) $row->amount;
+            $refundByOutlet[$rid][$method] = ($refundByOutlet[$rid][$method] ?? 0) + $amt;
+            $refundTotalByOutlet[$rid] = ($refundTotalByOutlet[$rid] ?? 0) + $amt;
+        }
+
+        $netMethod = function (int $rid, string $method) use ($payByOutlet, $refundByOutlet): float {
+            return round(($payByOutlet[$rid][$method] ?? 0) - ($refundByOutlet[$rid][$method] ?? 0), 2);
+        };
+
+        $outlets = [];
+        $sumOrders = 0;
+        $sumOpen = 0;
+        $sumGross = 0.0;
+        $sumRefund = 0.0;
+        $sumCash = 0.0;
+        $sumCard = 0.0;
+        $sumUpi = 0.0;
+        $sumRoom = 0.0;
+
+        foreach ($outletIds as $outletId) {
+            $id = (int) $outletId;
+            $sales = $salesRows->get($id);
+            $gross = round((float) ($sales->gross_sales ?? 0), 2);
+            $orders = (int) ($sales->orders_count ?? 0);
+            $refunded = round((float) ($refundTotalByOutlet[$id] ?? 0), 2);
+            $revenue = round($gross - $refunded, 2);
+            $open = (int) ($openRows->get($id)->open_count ?? 0);
+            $cash = $netMethod($id, 'cash');
+            $card = $netMethod($id, 'card');
+            $upi = $netMethod($id, 'upi');
+            $room = $netMethod($id, 'room_charge');
+
+            $outlets[] = [
+                'id' => $id,
+                'name' => trim((string) ($outletNames[$id] ?? '')) ?: "Outlet {$id}",
+                'orders_count' => $orders,
+                'open_count' => $open,
+                'gross_sales' => $gross,
+                'total_refunded' => $refunded,
+                'revenue' => $revenue,
+                'cash' => $cash,
+                'card' => $card,
+                'upi' => $upi,
+                'room_charge' => $room,
+            ];
+
+            $sumOrders += $orders;
+            $sumOpen += $open;
+            $sumGross += $gross;
+            $sumRefund += $refunded;
+            $sumCash += $cash;
+            $sumCard += $card;
+            $sumUpi += $upi;
+            $sumRoom += $room;
+        }
+
+        usort($outlets, fn ($a, $b) => $b['revenue'] <=> $a['revenue']);
+
+        return response()->json([
+            'date' => $date,
+            'outlet_count' => count($outlets),
+            'orders_count' => $sumOrders,
+            'open_count' => $sumOpen,
+            'gross_sales' => round($sumGross, 2),
+            'total_refunded' => round($sumRefund, 2),
+            'revenue' => round($sumGross - $sumRefund, 2),
+            'cash' => round($sumCash, 2),
+            'card' => round($sumCard, 2),
+            'upi' => round($sumUpi, 2),
+            'room_charge' => round($sumRoom, 2),
+            'outlets' => $outlets,
         ]);
     }
 
