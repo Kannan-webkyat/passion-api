@@ -41,10 +41,12 @@ return Application::configure(basePath: dirname(__DIR__))
                 return null;
             }
 
+            $sql = $e->getMessage();
             $message = match (true) {
-                str_contains($e->getMessage(), 'pos_void_waste') => 'POS void waste table is missing. Run database migrations on the server.',
-                str_contains($e->getMessage(), 'journal_entries'),
-                str_contains($e->getMessage(), 'chart_of_accounts') => 'Accounting tables are missing or incomplete. Run database migrations on the server.',
+                str_contains($sql, 'pos_void_waste') => 'POS void waste table is missing. Run database migrations on the server.',
+                str_contains($sql, 'journal_entries'),
+                str_contains($sql, 'chart_of_accounts') => 'Accounting tables are missing or incomplete. Run database migrations on the server.',
+                str_contains($sql, "Column 'type' cannot be null") => 'Dietary type is required. Select Veg, Non-Veg, or another type.',
                 default => 'Database error while saving. Contact support if this continues.',
             };
 
