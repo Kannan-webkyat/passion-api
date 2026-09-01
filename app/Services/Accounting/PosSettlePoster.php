@@ -44,9 +44,59 @@ final class PosSettlePoster
             return null;
         }
 
+        $lines = $this->buildLines($order);
+        if ($lines === []) {
+            return null;
+        }
+
+        $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
+
+        return $this->journal->post(
+            sourceType: 'pos_settle',
+            sourceId: (int) $order->id,
+            entryDate: $entryDate,
+            businessDate: $order->business_date?->toDateString(),
+            sourceRef: 'POS #'.$order->id,
+            memo: 'POS order settled',
+            lines: $lines,
+            postedBy: $postedBy,
+        );
+    }
+
+    /** Replace an existing pos_settle journal with current order tax splits (KGST backfill). */
+    public function repost(PosOrder $order, ?int $postedBy = null): ?JournalEntry
+    {
+        $order->loadMissing('payments');
+
+        if (! $this->isJournalRequired($order)) {
+            return null;
+        }
+
+        $lines = $this->buildLines($order);
+        if ($lines === []) {
+            return null;
+        }
+
+        $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
+
+        return $this->journal->replacePosted(
+            sourceType: 'pos_settle',
+            sourceId: (int) $order->id,
+            entryDate: $entryDate,
+            businessDate: $order->business_date?->toDateString(),
+            sourceRef: 'POS #'.$order->id,
+            memo: 'POS order settled',
+            lines: $lines,
+            postedBy: $postedBy,
+        );
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function buildLines(PosOrder $order): array
+    {
         $total = round((float) $order->total_amount, 2);
         if ($total <= 0) {
-            return null;
+            return [];
         }
 
         $lines = [];
@@ -78,7 +128,7 @@ final class PosSettlePoster
         }
 
         $this->addCredit($lines, AccountCodes::RESTAURANT_SALES, (float) $order->gst_net_taxable, $order->id);
-        $this->addCredit($lines, AccountCodes::BAR_SALES, (float) $order->vat_net_taxable, $order->id);
+        $this->addCredit($lines, AccountCodes::BAR_SALES, $this->barSalesCreditAmount($order), $order->id);
         $this->addCredit($lines, AccountCodes::OUTPUT_CGST, (float) $order->cgst_amount, $order->id, 'output_gst');
         $this->addCredit($lines, AccountCodes::OUTPUT_SGST, (float) $order->sgst_amount, $order->id, 'output_gst');
         $this->addCredit($lines, AccountCodes::OUTPUT_IGST, (float) $order->igst_amount, $order->id, 'output_gst');
@@ -93,22 +143,9 @@ final class PosSettlePoster
             $this->addCredit($lines, AccountCodes::RESTAURANT_SALES, $rounding, $order->id);
         }
 
-        // Inclusive liquor MRP (e.g. ₹770) can sit in vat_net_taxable while vat_tax_amount
-        // / CGST+SGST are still 0. Cash is the full bill — plug the missing tax credit.
         $this->creditMissingTaxAndBalance($lines, $order);
 
-        $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
-
-        return $this->journal->post(
-            sourceType: 'pos_settle',
-            sourceId: (int) $order->id,
-            entryDate: $entryDate,
-            businessDate: $order->business_date?->toDateString(),
-            sourceRef: 'POS #'.$order->id,
-            memo: 'POS order settled',
-            lines: $lines,
-            postedBy: $postedBy,
-        );
+        return $lines;
     }
 
     /** @param list<array<string, mixed>> $lines */
@@ -135,8 +172,34 @@ final class PosSettlePoster
         }
         $gap = round($debit - $credit, 2);
         if ($gap >= 0.01) {
+            $discount = round((float) ($order->discount_amount ?? 0), 2);
+            $gstNet = round((float) ($order->gst_net_taxable ?? 0), 2);
+            $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+            if ($discount >= 0.01 && abs(round($gap - $discount, 2)) <= 0.01 && $gstNet < 0.01 && $vatTax < 0.01) {
+                return;
+            }
+
             $this->creditTaxRemainder($lines, $order, $gap);
         }
+    }
+
+    /** GL gross bar credit; vat_net_taxable on the order stays net for KGST turnover reports. */
+    private function barSalesCreditAmount(PosOrder $order): float
+    {
+        $net = round((float) ($order->vat_net_taxable ?? 0), 2);
+        if ($net <= 0) {
+            return 0.0;
+        }
+
+        $discount = round((float) ($order->discount_amount ?? 0), 2);
+        $gstNet = round((float) ($order->gst_net_taxable ?? 0), 2);
+        $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+
+        if ($discount > 0 && $gstNet < 0.01 && $vatTax < 0.01) {
+            return round($net + $discount, 2);
+        }
+
+        return $net;
     }
 
     /** @param list<array<string, mixed>> $lines */
@@ -149,8 +212,14 @@ final class PosSettlePoster
 
         $vatNet = round((float) ($order->vat_net_taxable ?? 0), 2);
         $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
-        if ($vatNet > 0 || $vatTax > 0) {
+        if ($vatTax >= 0.01) {
             $this->addCredit($lines, AccountCodes::OUTPUT_VAT, $amount, $order->id, 'output_vat');
+
+            return;
+        }
+
+        if ($vatNet >= 0.01) {
+            $this->addCredit($lines, AccountCodes::BAR_SALES, $amount, $order->id);
 
             return;
         }

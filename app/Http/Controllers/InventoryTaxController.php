@@ -41,6 +41,9 @@ class InventoryTaxController extends Controller
         if (! array_key_exists('is_input_credit_eligible', $validated)) {
             $validated['is_input_credit_eligible'] = $validated['type'] !== 'vat';
         }
+        if ($validated['type'] === 'vat') {
+            $validated['is_input_credit_eligible'] = false;
+        }
 
         $tax = InventoryTax::create($validated);
 
@@ -59,6 +62,9 @@ class InventoryTaxController extends Controller
 
         if (! array_key_exists('is_input_credit_eligible', $validated)) {
             $validated['is_input_credit_eligible'] = $validated['type'] !== 'vat';
+        }
+        if ($validated['type'] === 'vat') {
+            $validated['is_input_credit_eligible'] = false;
         }
 
         $tax->update($validated);

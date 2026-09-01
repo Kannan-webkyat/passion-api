@@ -6,6 +6,7 @@ use App\Models\InventoryItem;
 use App\Models\ProcurementRequisition;
 use App\Models\PurchaseOrder;
 use App\Models\PurchaseOrderItem;
+use App\Models\Vendor;
 use Illuminate\Support\Facades\DB;
 
 class PurchaseOrderService
@@ -16,11 +17,14 @@ class PurchaseOrderService
      * @param  array<int, array<string, mixed>>  $items
      * @return array{subtotal: float, tax_amount: float, total_cess_amount: float}
      */
-    public static function applyLineAmountsToItems(array &$items): array
+    public static function applyLineAmountsToItems(array &$items, ?int $vendorId = null): array
     {
         $subtotalSum = 0.0;
         $taxSum = 0.0;
         $cessSum = 0.0;
+
+        $liquorSupplier = $vendorId !== null
+            && (bool) Vendor::query()->whereKey($vendorId)->value('is_liquor_supplier');
 
         $itemIds = array_values(array_unique(array_filter(array_map(
             fn ($line) => (int) ($line['inventory_item_id'] ?? 0),
@@ -37,6 +41,11 @@ class PurchaseOrderService
             $qty = (float) $line['quantity'];
             $up = (float) $line['unit_price'];
             $rate = (float) ($line['tax_rate'] ?? 0);
+
+            if ($liquorSupplier) {
+                $basis = PurchaseOrderLineAmounts::BASIS_NON_TAXABLE;
+                $rate = 0.0;
+            }
 
             if ($basis === PurchaseOrderLineAmounts::BASIS_NON_TAXABLE) {
                 $rate = 0.0;
@@ -55,7 +64,7 @@ class PurchaseOrderService
 
             $line['tax_price_basis'] = $basis;
             $line['tax_rate'] = $computed['tax_rate'];
-            $line['tax_type'] = PurchaseOrderLineAmounts::resolveTaxType($inv?->tax?->type);
+            $line['tax_type'] = LiquorItemClassifier::resolvePoLineTaxType($inv);
             $line['subtotal'] = $computed['subtotal'];
             $line['tax_amount'] = $computed['tax_amount'];
             $line['total_amount'] = $computed['total_amount'];
@@ -124,7 +133,7 @@ class PurchaseOrderService
      */
     public function createFromValidatedDataWithinTransaction(array $validated, ?int $procurementRequisitionId = null, string $initialStatus = 'draft'): PurchaseOrder
     {
-        $lineTotals = self::applyLineAmountsToItems($validated['items']);
+        $lineTotals = self::applyLineAmountsToItems($validated['items'], (int) $validated['vendor_id']);
         $financials = self::buildHeaderFinancials($lineTotals, $validated);
 
         $year = date('Y', strtotime($validated['order_date']));

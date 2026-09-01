@@ -115,7 +115,7 @@ class PurchaseOrderController extends Controller
 
         DB::beginTransaction();
         try {
-            $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items']);
+            $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items'], (int) $validated['vendor_id']);
             $financials = PurchaseOrderService::buildHeaderFinancials($lineTotals, $validated);
 
             $purchaseOrder->update([

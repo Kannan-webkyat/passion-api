@@ -242,6 +242,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::get('reports/menu-performance', [PosController::class, 'menuPerformanceReport']);
         Route::get('reports/tax-gst-summary/export', [PosController::class, 'taxGstSummaryExport']);
         Route::get('reports/tax-gst-summary', [PosController::class, 'taxGstSummaryReport']);
+        Route::get('reports/kgst-bar-tot', [PosController::class, 'kgstBarTotReport']);
         Route::get('reports/refunds-adjustments/export', [PosController::class, 'refundsAdjustmentsExport']);
         Route::get('reports/refunds-adjustments', [PosController::class, 'refundsAdjustmentsReport']);
         Route::get('reports/voids-discounts/export', [PosController::class, 'voidsDiscountsExport']);

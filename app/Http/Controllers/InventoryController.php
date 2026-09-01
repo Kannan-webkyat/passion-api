@@ -60,6 +60,10 @@ class InventoryController extends Controller
             return;
         }
 
+        $validated['tax_id'] = null;
+        $validated['is_direct_sale'] = true;
+        $validated['is_prepared_item'] = false;
+
         if (! $validated['is_cess_applicable']) {
             $validated['cess_amount'] = null;
         }

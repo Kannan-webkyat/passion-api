@@ -36,7 +36,10 @@ use App\Services\BusinessDateService;
 use App\Services\DayClosingService;
 use App\Services\BatchProductionPoolService;
 use App\Services\BomEnforcementConfig;
+use App\Services\BarTurnoverTaxService;
 use App\Services\InventoryDeductionStoreResolver;
+use App\Services\LiquorItemClassifier;
+use App\Services\KgstBarTotPolicy;
 use App\Services\MenuPerformanceSummarizer;
 use App\Services\PosFoodCostService;
 use App\Services\RecipeBomExpander;
@@ -1426,6 +1429,17 @@ class PosController extends Controller
         )->first();
 
         $vatFiling = $this->registerStatutoryFilingSummaryFromBase($base);
+        $kgstSummary = app(BarTurnoverTaxService::class)->summary($rid, $from, $to);
+        $summaryBase = [
+            'lines_count' => (int) ($agg->lines_count ?? 0),
+            'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
+            'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
+            'qty_total' => (float) ($agg->qty_total ?? 0),
+            'revenue_total' => (float) ($agg->revenue_total ?? 0),
+            'bar_turnover' => $kgstSummary['bar_turnover'],
+            'kgst_tot_liability' => $kgstSummary['tot_liability'],
+            'bills_count' => (int) ($agg->bills_count ?? 0),
+        ];
 
         if ($groupBy === 'item' || $groupBy === 'invoice') {
             $perPage = 50;
@@ -1436,14 +1450,8 @@ class PosController extends Controller
             $slice = array_slice($allRows, ($page - 1) * $perPage, $perPage);
 
             return response()->json([
-                'summary' => [
-                    'lines_count' => (int) ($agg->lines_count ?? 0),
-                    'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
-                    'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
-                    'qty_total' => (float) ($agg->qty_total ?? 0),
-                    'revenue_total' => (float) ($agg->revenue_total ?? 0),
-                    'bills_count' => (int) ($agg->bills_count ?? 0),
-                ],
+                'summary' => $summaryBase,
+                'kgst_bar_tot' => $kgstSummary,
                 'vat_filing' => $vatFiling,
                 'data' => $slice,
                 'meta' => [
@@ -1554,6 +1562,7 @@ class PosController extends Controller
                 'line_after_discount' => $extras['line_after_discount'],
                 'net_taxable' => $extras['net_taxable'],
                 'tax_amount' => $extras['tax_amount'],
+                'kgst_tot_liability' => (float) ($extras['kgst_tot_liability'] ?? 0),
                 'vat_amount' => $extras['tax_amount'],
                 'cgst' => $extras['cgst'],
                 'sgst' => $extras['sgst'],
@@ -1579,14 +1588,8 @@ class PosController extends Controller
         })->values();
 
         return response()->json([
-            'summary' => [
-                'lines_count' => (int) ($agg->lines_count ?? 0),
-                'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
-                'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
-                'qty_total' => (float) ($agg->qty_total ?? 0),
-                'revenue_total' => (float) ($agg->revenue_total ?? 0),
-                'bills_count' => (int) ($agg->bills_count ?? 0),
-            ],
+            'summary' => $summaryBase,
+            'kgst_bar_tot' => $kgstSummary,
             'vat_filing' => $vatFiling,
             'data' => $data,
             'meta' => [
@@ -1638,14 +1641,14 @@ class PosController extends Controller
                 'rows' => $export['rows'],
             ])->setPaper('a4', 'landscape');
 
-            return $pdf->download("liquor_vat_sales_{$groupBy}_{$from}_to_{$to}.pdf");
+            return $pdf->download("bar_liquor_kgst_{$groupBy}_{$from}_to_{$to}.pdf");
         }
 
         if ($format === 'xlsx') {
             $spreadsheet = new Spreadsheet;
             $sheet = $spreadsheet->getActiveSheet();
             $sheet->fromArray(array_merge([$export['headers']], $export['rows']), null, 'A1');
-            $fileName = "liquor_vat_sales_{$groupBy}_{$from}_to_{$to}.xlsx";
+            $fileName = "bar_liquor_kgst_{$groupBy}_{$from}_to_{$to}.xlsx";
 
             return response()->streamDownload(function () use ($spreadsheet) {
                 $writer = new Xlsx($spreadsheet);
@@ -1657,7 +1660,7 @@ class PosController extends Controller
             ]);
         }
 
-        $fileName = "liquor_vat_sales_{$groupBy}_{$from}_to_{$to}.csv";
+        $fileName = "bar_liquor_kgst_{$groupBy}_{$from}_to_{$to}.csv";
         $headers = [
             'Content-type' => 'text/csv',
             'Content-Disposition' => "attachment; filename={$fileName}",
@@ -2384,7 +2387,7 @@ class PosController extends Controller
             $agg = $this->liquorSalesBuildAggregatedRows($restaurantId, $from, $to, 'item');
             $headers = [
                 'Item',
-                'VAT lines',
+                'Bar lines',
                 'Qty',
                 'Avg unit',
                 'Tax %',
@@ -2392,8 +2395,8 @@ class PosController extends Controller
                 'Gross (Before Bill Discount)',
                 'Line discount',
                 'After discount',
-                'Net taxable',
-                'VAT',
+                'Bar turnover',
+                'KGST TOT @10%',
                 'Refund (alloc)',
                 'Svc chg',
                 'Tip',
@@ -2416,7 +2419,7 @@ class PosController extends Controller
                     $r['line_discount'],
                     $r['line_after_discount'],
                     $r['net_taxable'],
-                    $r['tax_amount'],
+                    $r['kgst_tot_liability'] ?? KgstBarTotPolicy::totLiabilityFromTurnover((float) $r['net_taxable']),
                     $r['refund_alloc'],
                     $r['service_charge_alloc'],
                     $r['tip_alloc'],
@@ -2441,7 +2444,7 @@ class PosController extends Controller
                 'Customer',
                 'Customer tax ID',
                 'Business date',
-                'VAT lines',
+                'Bar lines',
                 'Qty',
                 'Avg unit',
                 'Tax %',
@@ -2449,8 +2452,8 @@ class PosController extends Controller
                 'Gross (Before Bill Discount)',
                 'Line discount',
                 'After discount',
-                'Net taxable',
-                'VAT',
+                'Bar turnover',
+                'KGST TOT @10%',
                 'Refund (alloc)',
                 'Svc chg',
                 'Tip',
@@ -2479,7 +2482,7 @@ class PosController extends Controller
                     $r['line_discount'],
                     $r['line_after_discount'],
                     $r['net_taxable'],
-                    $r['tax_amount'],
+                    $r['kgst_tot_liability'] ?? KgstBarTotPolicy::totLiabilityFromTurnover((float) $r['net_taxable']),
                     $r['refund_alloc'],
                     $r['service_charge_alloc'],
                     $r['tip_alloc'],
@@ -2514,8 +2517,8 @@ class PosController extends Controller
             'Gross (Before Bill Discount)',
             'Line discount',
             'After discount',
-            'Net taxable',
-            'VAT',
+            'Bar turnover',
+            'KGST TOT @10%',
             'Refund (alloc)',
             'Svc chg',
             'Tip',
@@ -2624,7 +2627,7 @@ class PosController extends Controller
                 $ex['line_discount'],
                 $ex['line_after_discount'],
                 $ex['net_taxable'],
-                $ex['tax_amount'],
+                $ex['kgst_tot_liability'] ?? KgstBarTotPolicy::totLiabilityFromTurnover((float) $ex['net_taxable']),
                 $ex['refund_alloc'],
                 $ex['service_charge_alloc'],
                 $ex['tip_alloc'],
@@ -2903,6 +2906,7 @@ class PosController extends Controller
                             'line_after_discount' => 0.0,
                             'net_taxable' => 0.0,
                             'tax_amount' => 0.0,
+                            'kgst_tot_liability' => 0.0,
                             'cgst' => 0.0,
                             'sgst' => 0.0,
                             'igst' => 0.0,
@@ -2928,6 +2932,7 @@ class PosController extends Controller
                             'line_after_discount' => 0.0,
                             'net_taxable' => 0.0,
                             'tax_amount' => 0.0,
+                            'kgst_tot_liability' => 0.0,
                             'cgst' => 0.0,
                             'sgst' => 0.0,
                             'igst' => 0.0,
@@ -2965,6 +2970,7 @@ class PosController extends Controller
                 $b['line_after_discount'] += $ex['line_after_discount'];
                 $b['net_taxable'] += $ex['net_taxable'];
                 $b['tax_amount'] += $ex['tax_amount'];
+                $b['kgst_tot_liability'] += (float) ($ex['kgst_tot_liability'] ?? 0);
                 $b['cgst'] += $ex['cgst'];
                 $b['sgst'] += $ex['sgst'];
                 $b['igst'] += $ex['igst'];
@@ -3016,6 +3022,7 @@ class PosController extends Controller
                     'line_after_discount' => round($b['line_after_discount'], 2),
                     'net_taxable' => round($b['net_taxable'], 2),
                     'tax_amount' => round($b['tax_amount'], 2),
+                    'kgst_tot_liability' => round($b['kgst_tot_liability'], 2),
                     'vat_amount' => round($b['tax_amount'], 2),
                     'cgst' => round($b['cgst'], 2),
                     'sgst' => round($b['sgst'], 2),
@@ -3059,6 +3066,7 @@ class PosController extends Controller
                     'line_after_discount' => round($b['line_after_discount'], 2),
                     'net_taxable' => round($b['net_taxable'], 2),
                     'tax_amount' => round($b['tax_amount'], 2),
+                    'kgst_tot_liability' => round($b['kgst_tot_liability'], 2),
                     'vat_amount' => round($b['tax_amount'], 2),
                     'cgst' => round($b['cgst'], 2),
                     'sgst' => round($b['sgst'], 2),
@@ -3174,12 +3182,21 @@ class PosController extends Controller
 
         $taxInclusive = $this->linePriceTaxInclusive($item, $order);
 
+        $kgstTotLiability = 0.0;
+        if ($kind === 'vat') {
+            $businessDate = $order->business_date?->toDateString();
+            if (KgstBarTotPolicy::usesBarTurnoverModel($businessDate)) {
+                $kgstTotLiability = KgstBarTotPolicy::totLiabilityFromTurnover(round($lineNet, 2));
+            }
+        }
+
         return [
             'line_gross' => round($lineGross, 2),
             'line_discount' => $lineDiscountShare,
             'line_after_discount' => $lineAfterDiscount,
             'net_taxable' => round($lineNet, 2),
             'tax_amount' => round($lineTax, 2),
+            'kgst_tot_liability' => round($kgstTotLiability, 2),
             'cgst' => $cgst,
             'sgst' => $sgst,
             'igst' => $igst,
@@ -4907,11 +4924,37 @@ class PosController extends Controller
         }
 
         $payload = $this->buildTaxGstSummaryData((int) $restaurantId, $from, $to);
+        $kgstTot = app(BarTurnoverTaxService::class)->summary((int) $restaurantId, $from, $to);
 
         return response()->json([
             'summary' => $payload['totals'],
             'data' => $payload['by_rate'],
+            'kgst_bar_tot' => $kgstTot,
         ]);
+    }
+
+    /**
+     * KGST Section 5(2) bar foreign liquor turnover tax worksheet (internal liability).
+     */
+    public function kgstBarTotReport(Request $request)
+    {
+        $this->checkPermission('report-tax-gst-summary');
+
+        $validated = $request->validate([
+            'from' => 'required|date',
+            'to' => 'required|date|after_or_equal:from',
+            'restaurant_id' => 'required|integer|exists:restaurant_masters,id',
+        ]);
+
+        $this->authorizeRestaurantId((int) $validated['restaurant_id']);
+
+        return response()->json(
+            app(BarTurnoverTaxService::class)->summary(
+                (int) $validated['restaurant_id'],
+                $validated['from'],
+                $validated['to'],
+            )
+        );
     }
 
     public function taxGstSummaryExport(Request $request)
@@ -5030,6 +5073,9 @@ class PosController extends Controller
                 'vat_tax' => (float) $nonVoidOrders->sum(fn($o) => (float) ($o->vat_tax_amount ?? 0)),
                 'gst_net_taxable' => (float) $nonVoidOrders->sum(fn($o) => (float) ($o->gst_net_taxable ?? 0)),
                 'vat_net_taxable' => (float) $nonVoidOrders->sum(fn($o) => (float) ($o->vat_net_taxable ?? 0)),
+                'kgst_tot' => KgstBarTotPolicy::totLiabilityFromTurnover(
+                    (float) $nonVoidOrders->sum(fn($o) => (float) ($o->vat_net_taxable ?? 0))
+                ),
             ];
             $pdf = Pdf::loadView('reports.sales', [
                 'orders' => $orders,
@@ -5065,9 +5111,9 @@ class PosController extends Controller
             'CGST',
             'SGST',
             'IGST',
-            'Liquor VAT',
+            'KGST TOT @10%',
             'GST Taxable',
-            'VAT Taxable',
+            'Bar turnover',
             'Srv Chg',
             'Tips',
             'Net Total',
@@ -5103,7 +5149,9 @@ class PosController extends Controller
                     $o->cgst_amount ?? 0,
                     $o->sgst_amount ?? 0,
                     $o->igst_amount ?? 0,
-                    $o->vat_tax_amount ?? 0,
+                    KgstBarTotPolicy::usesBarTurnoverModel($o->business_date?->format('Y-m-d') ?? (string) $o->business_date)
+                        ? KgstBarTotPolicy::totLiabilityFromTurnover((float) ($o->vat_net_taxable ?? 0))
+                        : ($o->vat_tax_amount ?? 0),
                     $o->gst_net_taxable ?? 0,
                     $o->vat_net_taxable ?? 0,
                     $o->service_charge_amount,
@@ -5151,7 +5199,7 @@ class PosController extends Controller
             'Expires' => '0',
         ];
 
-        $columns = ['Bill #', 'Date', 'Customer', 'GSTIN', 'Outlet', 'GST Taxable', 'VAT Taxable', 'CGST', 'SGST', 'IGST', 'Liquor VAT', 'Total Tax', 'Total Amount'];
+        $columns = ['Bill #', 'Date', 'Customer', 'GSTIN', 'Outlet', 'GST Taxable', 'Bar turnover', 'CGST', 'SGST', 'IGST', 'KGST TOT @10%', 'Total Tax', 'Total Amount'];
 
         $callback = function () use ($orders, $columns) {
             $file = fopen('php://output', 'w');
@@ -5168,7 +5216,9 @@ class PosController extends Controller
                     round((float) ($o->cgst_amount ?? 0), 2),
                     round((float) ($o->sgst_amount ?? 0), 2),
                     round((float) ($o->igst_amount ?? 0), 2),
-                    round((float) ($o->vat_tax_amount ?? 0), 2),
+                    round(KgstBarTotPolicy::usesBarTurnoverModel($o->business_date?->format('Y-m-d') ?? (string) $o->business_date)
+                        ? KgstBarTotPolicy::totLiabilityFromTurnover((float) ($o->vat_net_taxable ?? 0))
+                        : (float) ($o->vat_tax_amount ?? 0), 2),
                     round((float) ($o->tax_amount ?? 0), 2),
                     round((float) ($o->total_amount ?? 0), 2),
                 ]);
@@ -5702,7 +5752,7 @@ class PosController extends Controller
                 ->keyBy('menu_item_id');
 
             $categories = MenuCategory::where('is_active', true)->with(['items' => function ($q) use ($rmiByItem) {
-                $q->with(['tax', 'variants'])->where('menu_items.is_active', true)
+                $q->with(['tax', 'variants', 'inventoryItem'])->where('menu_items.is_active', true)
                     ->whereIn('menu_items.id', $rmiByItem->keys()->toArray())
                     ->orderBy('name');
             }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
@@ -5855,6 +5905,7 @@ class PosController extends Controller
                         $item->setRelation('variants', collect());
                     }
                     $item->requires_production = (bool) $item->requires_production;
+                    $item->is_alcohol = LiquorItemClassifier::menuItemIsLiquor($item);
                     $itemId = (int) $item->id;
                     $usesBatchPool = $batchTrackedIds->has($itemId)
                         || ($item->requires_production && ! $mtoTrackedIds->has($itemId));
@@ -5905,7 +5956,7 @@ class PosController extends Controller
             });
         } else {
             $categories = MenuCategory::where('is_active', true)->with(['items' => function ($q) {
-                $q->with(['tax', 'variants'])->where('is_active', true)->orderBy('name');
+                $q->with(['tax', 'variants', 'inventoryItem'])->where('is_active', true)->orderBy('name');
             }])->get()->filter(fn($c) => $c->items->isNotEmpty())->values();
 
             $allMenuItemIds = $categories->flatMap(fn ($c) => $c->items->pluck('id'))->unique()->values()->all();
@@ -5938,6 +5989,7 @@ class PosController extends Controller
                         $item->setRelation('variants', collect());
                     }
                     $item->requires_production = (bool) $item->requires_production;
+                    $item->is_alcohol = LiquorItemClassifier::menuItemIsLiquor($item);
                     $itemId = (int) $item->id;
                     $usesBatchPool = $legacyBatchTracked->has($itemId) || $item->requires_production;
                     if ($usesBatchPool) {
@@ -6928,9 +6980,12 @@ class PosController extends Controller
                             ], 422)
                         );
                     }
-                    $taxRate = floatval($menuItem->tax?->rate ?? 0);
+                    $menuItem->loadMissing(['inventoryItem', 'tax']);
+                    $taxRate = LiquorItemClassifier::menuItemIsLiquor($menuItem)
+                        ? 0.0
+                        : floatval($menuItem->tax?->rate ?? 0);
                     $priceTaxInclusive = (bool) ($rmi->price_tax_inclusive ?? true);
-                    $taxRegime = strtolower((string) ($menuItem->tax?->type ?? 'local')) === 'vat' ? 'vat_liquor' : 'gst';
+                    $taxRegime = LiquorItemClassifier::menuItemIsLiquor($menuItem) ? 'vat_liquor' : 'gst';
                     $matching = $currentActive->filter(
                         fn($i) => $i->menu_item_id == $row['menu_item_id']
                             && ($i->menu_item_variant_id ?? null) == $variantId
@@ -9450,10 +9505,9 @@ class PosController extends Controller
 
     private function resolveComboTaxRegime(Combo $combo, int $restaurantId): string
     {
-        $combo->loadMissing('menuItems.tax');
+        $combo->loadMissing('menuItems.inventoryItem.tax', 'menuItems.tax');
         foreach ($combo->menuItems as $mi) {
-            $t = strtolower((string) ($mi->tax?->type ?? 'local'));
-            if ($t !== 'vat') {
+            if (! LiquorItemClassifier::menuItemIsLiquor($mi)) {
                 return 'gst';
             }
         }
@@ -9476,7 +9530,7 @@ class PosController extends Controller
     /** @return 'vat'|'igst'|'local_gst' */
     private function posLineTaxSupplyKind(PosOrderItem $i, PosOrder $order): string
     {
-        $i->loadMissing(['menuItem.tax', 'combo.menuItems.tax']);
+        $i->loadMissing(['menuItem.inventoryItem.tax', 'menuItem.tax', 'combo.menuItems.inventoryItem.tax', 'combo.menuItems.tax']);
         if ($i->combo_id && $i->combo) {
             if ($this->resolveComboTaxRegime($i->combo, (int) $order->restaurant_id) === 'vat_liquor') {
                 return 'vat';
@@ -9484,11 +9538,11 @@ class PosController extends Controller
 
             return $this->comboHasInterstateGstComponent($i->combo) ? 'igst' : 'local_gst';
         }
-        if ($i->menu_item_id && $i->menuItem?->tax) {
-            $t = strtolower((string) $i->menuItem->tax->type);
-            if ($t === 'vat') {
+        if ($i->menu_item_id && $i->menuItem) {
+            if (LiquorItemClassifier::menuItemIsLiquor($i->menuItem)) {
                 return 'vat';
             }
+            $t = strtolower((string) ($i->menuItem->tax?->type ?? 'local'));
             if ($t === 'inter-state') {
                 return 'igst';
             }
@@ -9501,12 +9555,12 @@ class PosController extends Controller
 
     private function posLineTaxRegimeSnapshot(PosOrderItem $i, int $restaurantId): string
     {
-        $i->loadMissing(['menuItem.tax', 'combo.menuItems.tax']);
+        $i->loadMissing(['menuItem.inventoryItem.tax', 'menuItem.tax', 'combo.menuItems.inventoryItem.tax', 'combo.menuItems.tax']);
         if ($i->combo_id && $i->combo) {
             return $this->resolveComboTaxRegime($i->combo, $restaurantId);
         }
-        if ($i->menu_item_id && $i->menuItem?->tax) {
-            return strtolower((string) $i->menuItem->tax->type) === 'vat' ? 'vat_liquor' : 'gst';
+        if ($i->menu_item_id && $i->menuItem) {
+            return LiquorItemClassifier::menuItemIsLiquor($i->menuItem) ? 'vat_liquor' : 'gst';
         }
 
         return 'gst';
@@ -9628,9 +9682,19 @@ class PosController extends Controller
 
         foreach ($activeItems as $i) {
             $reg = $this->posLineTaxRegimeSnapshot($i, $restaurantId);
+            $lineUpdates = [];
             if (($i->tax_regime ?? null) !== $reg) {
-                PosOrderItem::where('id', $i->id)->update(['tax_regime' => $reg]);
+                $lineUpdates['tax_regime'] = $reg;
                 $i->tax_regime = $reg;
+            }
+            if ($reg === 'vat_liquor'
+                && KgstBarTotPolicy::usesBarTurnoverModel($order->business_date)
+                && (float) ($i->tax_rate ?? 0) > 0) {
+                $lineUpdates['tax_rate'] = 0;
+                $i->tax_rate = 0;
+            }
+            if ($lineUpdates !== []) {
+                PosOrderItem::where('id', $i->id)->update($lineUpdates);
             }
             [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
             $totalTaxAmount += $lineTax;
@@ -9726,6 +9790,18 @@ class PosController extends Controller
     {
         $effGross = floatval($i->line_total) * (1 - $discountRatio);
         $r = floatval($i->tax_rate);
+        $businessDate = $order->business_date?->toDateString() ?? now()->toDateString();
+        $kind = $this->posLineTaxSupplyKind($i, $order);
+
+        if ($kind === 'vat') {
+            return KgstBarTotPolicy::liquorLineTaxAndTurnover(
+                $effGross,
+                (bool) ($order->tax_exempt || $order->is_complimentary),
+                KgstBarTotPolicy::usesBarTurnoverModel($businessDate),
+                $this->linePriceTaxInclusive($i, $order),
+                $r,
+            );
+        }
 
         if ($order->tax_exempt || $order->is_complimentary) {
             return [0.0, $effGross];
@@ -10452,22 +10528,41 @@ class PosController extends Controller
                     $label = $this->resolvePosLineTaxLabel($i, $r);
                 }
 
-                // Separate GST from VAT
+                // Bar liquor: KGST TOT turnover vs legacy liquor VAT split
                 if ($kind === 'vat') {
-                    $label = 'Liquor VAT @ '.number_format($r, 2).'%';
-                    $key = sprintf('%.4f', $r).'|'.$label;
-                    if (! isset($vatBuckets[$key])) {
-                        $vatBuckets[$key] = [
-                            'rate' => $r,
-                            'tax_label' => $label,
-                            'taxable_value' => 0.0,
-                            'tax_amount' => 0.0,
-                            'line_count' => 0,
-                        ];
+                    $businessDate = $order->business_date?->toDateString();
+                    if (KgstBarTotPolicy::usesBarTurnoverModel($businessDate)) {
+                        $label = KgstBarTotPolicy::BUCKET_LABEL;
+                        $key = 'kgst|'.$label;
+                        $r = KgstBarTotPolicy::TOT_RATE_PERCENT;
+                        if (! isset($vatBuckets[$key])) {
+                            $vatBuckets[$key] = [
+                                'rate' => $r,
+                                'tax_label' => $label,
+                                'taxable_value' => 0.0,
+                                'tax_amount' => 0.0,
+                                'line_count' => 0,
+                            ];
+                        }
+                        $vatBuckets[$key]['taxable_value'] += $lineNet;
+                        $vatBuckets[$key]['tax_amount'] += KgstBarTotPolicy::totLiabilityFromTurnover($lineNet);
+                        $vatBuckets[$key]['line_count']++;
+                    } else {
+                        $label = 'Liquor VAT @ '.number_format($r, 2).'% (legacy)';
+                        $key = sprintf('%.4f', $r).'|'.$label;
+                        if (! isset($vatBuckets[$key])) {
+                            $vatBuckets[$key] = [
+                                'rate' => $r,
+                                'tax_label' => $label,
+                                'taxable_value' => 0.0,
+                                'tax_amount' => 0.0,
+                                'line_count' => 0,
+                            ];
+                        }
+                        $vatBuckets[$key]['taxable_value'] += $lineNet;
+                        $vatBuckets[$key]['tax_amount'] += $lineTax;
+                        $vatBuckets[$key]['line_count']++;
                     }
-                    $vatBuckets[$key]['taxable_value'] += $lineNet;
-                    $vatBuckets[$key]['tax_amount'] += $lineTax;
-                    $vatBuckets[$key]['line_count']++;
                 } else {
                     $key = sprintf('%.4f', $r).'|'.$label;
                     if (! isset($gstBuckets[$key])) {

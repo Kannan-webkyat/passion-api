@@ -98,6 +98,101 @@ final class JournalPostingService
         });
     }
 
+    /**
+     * Replace line items on an existing posted entry (maintenance / tax model backfill).
+     * When no posted entry exists, delegates to post().
+     *
+     * @param  array<int, array{account_code: string, debit?: float|string, credit?: float|string, tax_tag?: string|null, meta?: array<string, mixed>|null}>  $lines
+     */
+    public function replacePosted(
+        string $sourceType,
+        int $sourceId,
+        string $entryDate,
+        ?string $businessDate,
+        ?string $sourceRef,
+        ?string $memo,
+        array $lines,
+        ?int $postedBy = null
+    ): JournalEntry {
+        $normalized = $this->normalizeLines($lines);
+        if ($normalized === []) {
+            throw new JournalPostingException("No journal lines for {$sourceType}#{$sourceId}");
+        }
+
+        $this->absorbRoundingImbalance($normalized);
+        $this->assertBalanced($normalized);
+
+        return DB::transaction(function () use (
+            $sourceType,
+            $sourceId,
+            $entryDate,
+            $businessDate,
+            $sourceRef,
+            $memo,
+            $normalized,
+            $postedBy
+        ) {
+            $existing = JournalEntry::query()
+                ->where('source_type', $sourceType)
+                ->where('source_id', $sourceId)
+                ->where('status', JournalEntry::STATUS_POSTED)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $existing) {
+                return $this->post(
+                    $sourceType,
+                    $sourceId,
+                    $entryDate,
+                    $businessDate,
+                    $sourceRef,
+                    $memo,
+                    $this->denormalizeForPost($normalized),
+                    $postedBy
+                );
+            }
+
+            $existing->lines()->delete();
+
+            foreach ($normalized as $index => $line) {
+                JournalLine::create([
+                    'journal_entry_id' => $existing->id,
+                    'line_no' => $index + 1,
+                    'account_id' => $this->accountId($line['account_code']),
+                    'debit' => $line['debit'],
+                    'credit' => $line['credit'],
+                    'tax_tag' => $line['tax_tag'] ?? null,
+                    'meta' => $line['meta'] ?? null,
+                ]);
+            }
+
+            $existing->update([
+                'entry_date' => $entryDate,
+                'business_date' => $businessDate,
+                'source_ref' => $sourceRef,
+                'memo' => $memo,
+                'posted_by' => $postedBy ?? $existing->posted_by,
+            ]);
+
+            return $existing->fresh(['lines.account']);
+        });
+    }
+
+    /**
+     * @param  list<array{account_code: string, debit: float, credit: float, tax_tag: ?string, meta: ?array}>  $normalized
+     * @return list<array{account_code: string, debit?: float, credit?: float, tax_tag?: ?string, meta?: ?array}>
+     */
+    private function denormalizeForPost(array $normalized): array
+    {
+        return array_map(fn (array $line) => array_filter([
+            'account_code' => $line['account_code'],
+            'debit' => ($line['debit'] ?? 0) > 0 ? $line['debit'] : null,
+            'credit' => ($line['credit'] ?? 0) > 0 ? $line['credit'] : null,
+            'tax_tag' => $line['tax_tag'] ?? null,
+            'meta' => $line['meta'] ?? null,
+        ], fn ($v) => $v !== null), $normalized);
+    }
+
     public function accountId(string $code): int
     {
         if (self::$accountIdsByCode === null) {

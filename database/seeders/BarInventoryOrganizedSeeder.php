@@ -5,14 +5,13 @@ namespace Database\Seeders;
 use App\Models\InventoryCategory;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
-use App\Models\InventoryTax;
 use App\Models\InventoryUom;
 use App\Models\RestaurantMaster;
 use App\Models\Vendor;
 use Illuminate\Database\Seeder;
 
 /**
- * Bar inventory catalog from BEVCO-style organized list (VAT 10%, cess by category).
+ * Bar inventory catalog from BEVCO-style organized list (is_alcohol + cess by category).
  *
  * Requires: InventoryTaxSeeder, InventoryUomSeeder, CessSlabSeeder, DepartmentSeeder,
  * LocationSeeder, RestaurantTableSeeder (BAR outlet + Bar Store).
@@ -28,11 +27,6 @@ class BarInventoryOrganizedSeeder extends Seeder
     {
         $rows = require __DIR__.'/data/bar_inventory_organized.php';
 
-        $vat10 = InventoryTax::firstOrCreate(
-            ['name' => 'Liquor VAT 10%'],
-            ['rate' => 10, 'type' => 'vat']
-        );
-
         $btl = $this->uom('BTL', 'Bottle');
         $ml = $this->uom('ML', 'Millilitre');
 
@@ -44,15 +38,15 @@ class BarInventoryOrganizedSeeder extends Seeder
                 'email' => null,
                 'address' => 'Kerala State Beverages Corporation',
                 'is_liquor_supplier' => true,
-                'default_tax_price_basis' => 'tax_inclusive',
+                'default_tax_price_basis' => 'non_taxable',
             ]
         );
         $vendorUpdates = [];
         if (! $vendor->is_liquor_supplier) {
             $vendorUpdates['is_liquor_supplier'] = true;
         }
-        if ($vendor->default_tax_price_basis !== 'tax_inclusive') {
-            $vendorUpdates['default_tax_price_basis'] = 'tax_inclusive';
+        if ($vendor->default_tax_price_basis !== 'non_taxable') {
+            $vendorUpdates['default_tax_price_basis'] = 'non_taxable';
         }
         if ($vendorUpdates !== []) {
             $vendor->update($vendorUpdates);
@@ -103,7 +97,7 @@ class BarInventoryOrganizedSeeder extends Seeder
                 'cost_price' => 0,
                 'reorder_level' => self::REORDER_LEVEL,
                 'current_stock' => 0,
-                'tax_id' => $vat10->id,
+                'tax_id' => null,
                 'is_direct_sale' => true,
                 'is_alcohol' => true,
                 'is_cess_applicable' => $meta['is_cess_applicable'],
@@ -124,7 +118,7 @@ class BarInventoryOrganizedSeeder extends Seeder
         $this->command?->info('Bar inventory (organized) seeded.');
         $this->command?->info("  Items created: {$created}");
         $this->command?->info("  Items updated: {$updated}");
-        $this->command?->info('  Vendor: BEVCO · Tax: Liquor VAT 10% · Category: Alcohol ('.count($categoryIds).' subcategories) · Reorder level: '.self::REORDER_LEVEL);
+        $this->command?->info('  Vendor: BEVCO · Liquor: is_alcohol flag · Category: Alcohol ('.count($categoryIds).' subcategories) · Reorder level: '.self::REORDER_LEVEL);
     }
 
     private function uom(string $shortName, string $name): int

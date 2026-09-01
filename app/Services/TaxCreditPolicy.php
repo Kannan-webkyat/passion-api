@@ -12,6 +12,10 @@ final class TaxCreditPolicy
 {
     public static function isInputCreditEligible(?InventoryTax $tax, ?InventoryItem $item = null): bool
     {
+        if ($item !== null && (bool) $item->is_alcohol) {
+            return false;
+        }
+
         if ($tax !== null && $tax->is_input_credit_eligible !== null) {
             return (bool) $tax->is_input_credit_eligible;
         }
@@ -25,6 +29,10 @@ final class TaxCreditPolicy
     {
         if (! $item) {
             return true;
+        }
+
+        if ((bool) $item->is_alcohol) {
+            return false;
         }
 
         $item->loadMissing('tax');

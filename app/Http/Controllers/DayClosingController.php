@@ -10,6 +10,7 @@ use App\Models\Recipe;
 use App\Models\RestaurantMaster;
 use App\Models\StoreRequest;
 use App\Services\DayClosingService;
+use App\Services\KgstBarTotPolicy;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -30,6 +31,12 @@ class DayClosingController extends Controller
         if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
         }
+    }
+
+    /** Used by maintenance commands — no permission gate. */
+    public function maintenanceComputeSummary(int $restaurantId, string $closedDate): array
+    {
+        return $this->computeSummary($restaurantId, $closedDate);
     }
 
     /**
@@ -275,6 +282,18 @@ class DayClosingController extends Controller
 
         $closings = $query->paginate($request->get('per_page', 20));
 
+        $closings->getCollection()->transform(function ($c) {
+            $date = $c->closed_date?->format('Y-m-d') ?? '';
+            $c->setAttribute(
+                'kgst_tot_liability',
+                KgstBarTotPolicy::usesBarTurnoverModel($date)
+                    ? KgstBarTotPolicy::totLiabilityFromTurnover((float) ($c->vat_net_taxable ?? 0))
+                    : 0.0
+            );
+
+            return $c;
+        });
+
         return response()->json($closings);
     }
 
@@ -356,8 +375,8 @@ class DayClosingController extends Controller
             'CGST',
             'SGST',
             'IGST',
-            'VAT taxable',
-            'VAT amount',
+            'Bar turnover',
+            'KGST TOT @10%',
             'Cash',
             'Card',
             'UPI',
@@ -374,6 +393,12 @@ class DayClosingController extends Controller
             fputcsv($file, $columns);
 
             foreach ($closings as $c) {
+                $closedDate = $c->closed_date?->format('Y-m-d') ?? '';
+                $barTurnover = (float) ($c->vat_net_taxable ?? 0);
+                $kgstTot = KgstBarTotPolicy::usesBarTurnoverModel($closedDate)
+                    ? KgstBarTotPolicy::totLiabilityFromTurnover($barTurnover)
+                    : (float) ($c->vat_tax_amount ?? 0);
+
                 fputcsv($file, [
                     $c->closed_date?->format('Y-m-d') ?? '',
                     $c->restaurant?->name ?? '—',
@@ -390,8 +415,8 @@ class DayClosingController extends Controller
                     $c->cgst_amount ?? 0,
                     $c->sgst_amount ?? 0,
                     $c->igst_amount ?? 0,
-                    $c->vat_net_taxable ?? 0,
-                    $c->vat_tax_amount ?? 0,
+                    $barTurnover,
+                    $kgstTot,
                     $c->cash_total,
                     $c->card_total,
                     $c->upi_total,
@@ -570,6 +595,9 @@ class DayClosingController extends Controller
             'sgst_amount' => (float) ($totals->sgst_amount ?? 0),
             'igst_amount' => (float) ($totals->igst_amount ?? 0),
             'vat_tax_amount' => (float) ($totals->vat_tax_amount ?? 0),
+            'kgst_tot_liability' => KgstBarTotPolicy::usesBarTurnoverModel($closedDate)
+                ? KgstBarTotPolicy::totLiabilityFromTurnover((float) ($totals->vat_net_taxable ?? 0))
+                : 0.0,
             'cash_total' => $cashTotal,
             'card_total' => $cardTotal,
             'upi_total' => $upiTotal,
