@@ -37,6 +37,7 @@ use App\Services\DayClosingService;
 use App\Services\BatchProductionPoolService;
 use App\Services\BomEnforcementConfig;
 use App\Services\InventoryDeductionStoreResolver;
+use App\Services\MenuPerformanceSummarizer;
 use App\Services\PosFoodCostService;
 use App\Services\RecipeBomExpander;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -4536,6 +4537,7 @@ class PosController extends Controller
             'restaurant_id' => 'nullable|integer|exists:restaurant_masters,id',
             'page' => 'nullable|integer|min:1',
             'category' => 'nullable|string|in:all,kitchen,bar',
+            'summarize' => 'nullable|boolean',
         ]);
 
         $user = auth()->user();
@@ -4544,6 +4546,7 @@ class PosController extends Controller
         $page = (int) ($validated['page'] ?? 1);
         $restaurantId = $validated['restaurant_id'] ?? null;
         $category = $validated['category'] ?? 'all';
+        $summarize = filter_var($validated['summarize'] ?? false, FILTER_VALIDATE_BOOLEAN);
 
         if ($restaurantId) {
             $this->authorizeRestaurantId((int) $restaurantId);
@@ -4601,6 +4604,10 @@ class PosController extends Controller
             $rows = $allRows->filter(fn($r) => (bool) $r->is_liquor)->values();
         }
 
+        if ($summarize) {
+            $rows = app(MenuPerformanceSummarizer::class)->summarize($rows);
+        }
+
         $summary = $this->buildMenuPerformanceSummary($rid, $from, $to, $rows, $category);
 
         $perPage = 50;
@@ -4612,7 +4619,9 @@ class PosController extends Controller
         $data = $slice->map(function ($r) {
             $name = (string) ($r->name ?? '');
             $variant = trim((string) ($r->variant_label ?? ''));
-            $display = $variant !== '' ? $name . ' — ' . $variant : $name;
+            $display = ($r->is_summarized ?? false) || $variant === ''
+                ? $name
+                : $name . ' — ' . $variant;
             if (($r->row_kind ?? '') === 'combo') {
                 $display = 'Combo: ' . $name;
             }
@@ -4627,9 +4636,13 @@ class PosController extends Controller
                 'variant_label' => $variant !== '' ? $variant : null,
                 'display_name' => $display,
                 'qty_sold' => (float) $r->qty_sold,
+                'qty_display' => isset($r->qty_display) ? (string) $r->qty_display : null,
+                'bottles_sold' => isset($r->bottles_sold) ? (float) $r->bottles_sold : null,
+                'pegs_sold' => isset($r->pegs_sold) ? (float) $r->pegs_sold : null,
                 'revenue' => round((float) $r->revenue, 2),
                 'lines_sold' => (int) $r->lines_sold,
                 'bills_count' => (int) $r->bills_count,
+                'is_summarized' => (bool) ($r->is_summarized ?? false),
             ];
         });
 
@@ -4651,7 +4664,10 @@ class PosController extends Controller
         $restaurantId = $request->query('restaurant_id');
         $from = $request->query('from') ?? now()->toDateString();
         $to = $request->query('to') ?? now()->toDateString();
-        $type = $request->query('type', 'csv');
+        $type = strtolower((string) $request->query('type', 'csv'));
+        if (! in_array($type, ['csv', 'xlsx', 'pdf'], true)) {
+            abort(422, 'Invalid export type.');
+        }
 
         if (! $restaurantId || ! $this->userCanAccessRestaurant((int) $restaurantId)) {
             abort(403, 'Unauthorized access to this outlet.');
@@ -4659,6 +4675,7 @@ class PosController extends Controller
 
         $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
         $category = $request->query('category', 'all');
+        $summarize = filter_var($request->query('summarize', false), FILTER_VALIDATE_BOOLEAN);
         $allRows = $this->buildMenuPerformanceRows((int) $restaurantId, $from, $to);
 
         $rows = $allRows;
@@ -4668,7 +4685,12 @@ class PosController extends Controller
             $rows = $allRows->filter(fn($r) => (bool) $r->is_liquor)->values();
         }
 
+        if ($summarize) {
+            $rows = app(MenuPerformanceSummarizer::class)->summarize($rows);
+        }
+
         $summary = $this->buildMenuPerformanceSummary((int) $restaurantId, $from, $to, $rows, $category);
+        $export = $this->buildMenuPerformanceExportTable($rows, $summary, $summarize);
 
         if ($type === 'pdf') {
             $pdf = Pdf::loadView('reports.menu_performance', [
@@ -4678,50 +4700,146 @@ class PosController extends Controller
                 'rows' => $rows,
                 'summary' => $summary,
                 'category' => $category,
+                'summarize' => $summarize,
             ]);
 
             return $pdf->download("menu_performance_{$from}_to_{$to}.pdf");
         }
 
+        if ($type === 'xlsx') {
+            $spreadsheet = new Spreadsheet;
+            $sheet = $spreadsheet->getActiveSheet();
+            $sheet->fromArray(array_merge([$export['headers']], $export['rows']), null, 'A1');
+            $fileName = "menu_performance_{$from}_to_{$to}.xlsx";
+
+            return response()->streamDownload(function () use ($spreadsheet) {
+                $writer = new Xlsx($spreadsheet);
+                $writer->save('php://output');
+            }, $fileName, [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'Cache-Control' => 'must-revalidate',
+                'Pragma' => 'public',
+            ]);
+        }
+
         $fileName = "menu_performance_{$from}_to_{$to}.csv";
         $headers = [
-            'Content-type' => 'text/csv',
+            'Content-type' => 'text/csv; charset=UTF-8',
             'Content-Disposition' => "attachment; filename={$fileName}",
             'Pragma' => 'no-cache',
             'Cache-Control' => 'must-revalidate, post-check=0, pre-check=0',
             'Expires' => '0',
         ];
 
-        $callback = function () use ($rows, $summary) {
+        $callback = function () use ($export) {
             $file = fopen('php://output', 'w');
-            fputcsv($file, ['Category', 'Item / combo', 'Qty sold', 'Revenue', 'POS lines', 'Bills']);
-            foreach ($rows as $r) {
-                $name = (string) ($r->name ?? '');
-                $variant = trim((string) ($r->variant_label ?? ''));
-                $itemCol = ($r->row_kind ?? '') === 'combo'
-                    ? 'Combo: ' . $name
-                    : ($variant !== '' ? $name . ' — ' . $variant : $name);
-                fputcsv($file, [
-                    (string) ($r->category_name ?? '—'),
-                    $itemCol,
-                    $r->qty_sold,
-                    round((float) $r->revenue, 2),
-                    $r->lines_sold,
-                    $r->bills_count,
-                ]);
+            // UTF-8 BOM so Excel opens CSV with correct encoding.
+            fwrite($file, "\xEF\xBB\xBF");
+            fputcsv($file, $export['headers']);
+            foreach ($export['rows'] as $row) {
+                fputcsv($file, $row);
             }
-            fputcsv($file, [
-                'TOTAL',
-                $summary['sku_rows'] . ' SKUs',
-                $summary['qty_sold'],
-                $summary['revenue'],
-                '',
-                $summary['bills_with_sales'] . ' distinct bills',
-            ]);
             fclose($file);
         };
 
         return response()->stream($callback, 200, $headers);
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, object>  $rows
+     * @param  array{sku_rows: int, qty_sold: float, revenue: float, bills_with_sales: int}  $summary
+     * @return array{headers: list<string>, rows: list<list<mixed>>}
+     */
+    private function buildMenuPerformanceExportTable($rows, array $summary, bool $summarize): array
+    {
+        if ($summarize) {
+            $headers = [
+                'Category',
+                'Item / combo',
+                'Bottles',
+                'Pegs',
+                'Qty (summary)',
+                'Revenue (INR)',
+                'POS lines',
+                'Bills',
+            ];
+            $data = [];
+            foreach ($rows as $r) {
+                $data[] = [
+                    (string) ($r->category_name ?? '—'),
+                    $this->menuPerformanceExportItemLabel($r),
+                    isset($r->bottles_sold) && $r->bottles_sold !== null ? (float) $r->bottles_sold : '',
+                    isset($r->pegs_sold) && $r->pegs_sold !== null ? (float) $r->pegs_sold : '',
+                    isset($r->qty_display) ? (string) $r->qty_display : (float) $r->qty_sold,
+                    round((float) $r->revenue, 2),
+                    (int) $r->lines_sold,
+                    (int) $r->bills_count,
+                ];
+            }
+            $data[] = [
+                'TOTAL',
+                $summary['sku_rows'].' SKUs',
+                '',
+                '',
+                $summary['qty_sold'],
+                round((float) $summary['revenue'], 2),
+                '',
+                $summary['bills_with_sales'].' distinct bills',
+            ];
+
+            return ['headers' => $headers, 'rows' => $data];
+        }
+
+        $headers = [
+            'Category',
+            'Item',
+            'Variant',
+            'Qty sold',
+            'Revenue (INR)',
+            'POS lines',
+            'Bills',
+        ];
+        $data = [];
+        foreach ($rows as $r) {
+            $variant = trim((string) ($r->variant_label ?? ''));
+            $data[] = [
+                (string) ($r->category_name ?? '—'),
+                ($r->row_kind ?? '') === 'combo' ? 'Combo: '.($r->name ?? '') : (string) ($r->name ?? ''),
+                $variant !== '' ? $variant : '—',
+                (float) $r->qty_sold,
+                round((float) $r->revenue, 2),
+                (int) $r->lines_sold,
+                (int) $r->bills_count,
+            ];
+        }
+        $data[] = [
+            'TOTAL',
+            $summary['sku_rows'].' SKUs',
+            '',
+            $summary['qty_sold'],
+            round((float) $summary['revenue'], 2),
+            '',
+            $summary['bills_with_sales'].' distinct bills',
+        ];
+
+        return ['headers' => $headers, 'rows' => $data];
+    }
+
+    private function menuPerformanceExportItemLabel(object $r): string
+    {
+        $name = (string) ($r->name ?? '');
+
+        if (($r->row_kind ?? '') === 'combo') {
+            return 'Combo: '.$name;
+        }
+
+        if ($r->is_summarized ?? false) {
+            return $name;
+        }
+
+        $variant = trim((string) ($r->variant_label ?? ''));
+
+        return $variant !== '' ? $name.' — '.$variant : $name;
     }
 
     /**
@@ -10127,6 +10245,7 @@ class PosController extends Controller
             ->join('menu_items as mi', 'poi.menu_item_id', '=', 'mi.id')
             ->leftJoin('menu_item_variants as miv', 'poi.menu_item_variant_id', '=', 'miv.id')
             ->leftJoin('menu_categories as mc', 'mi.menu_category_id', '=', 'mc.id')
+            ->leftJoin('inventory_items as ii', 'mi.inventory_item_id', '=', 'ii.id')
             ->whereIn('po.status', ['paid', 'refunded'])
             ->where('po.restaurant_id', $restaurantId)
             ->whereDate('po.business_date', '>=', $from)
@@ -10142,6 +10261,8 @@ class PosController extends Controller
                 'poi.menu_item_variant_id as variant_id',
                 DB::raw('MAX(mi.name) as name'),
                 DB::raw('MAX(COALESCE(miv.size_label, \'\')) as variant_label'),
+                DB::raw('MAX(COALESCE(miv.ml_quantity, 0)) as variant_ml'),
+                DB::raw('MAX(COALESCE(ii.conversion_factor, 1)) as conversion_factor'),
                 DB::raw('MAX(mc.name) as category_name'),
                 DB::raw('SUM(poi.quantity) as qty_sold'),
                 DB::raw('SUM(poi.line_total) as revenue'),
