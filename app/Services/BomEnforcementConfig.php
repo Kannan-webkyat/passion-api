@@ -22,7 +22,35 @@ final class BomEnforcementConfig
 
         $raw = Setting::get(self::SETTING_KEY, '1');
 
-        return filter_var($raw, FILTER_VALIDATE_BOOLEAN);
+        return self::parseStoredFlag($raw, defaultEnabled: true);
+    }
+
+    /** @param  mixed  $raw */
+    private static function parseStoredFlag(mixed $raw, bool $defaultEnabled): bool
+    {
+        if ($raw === null || $raw === '') {
+            return $defaultEnabled;
+        }
+
+        if (is_bool($raw)) {
+            return $raw;
+        }
+
+        if (is_int($raw) || is_float($raw)) {
+            return (int) $raw !== 0;
+        }
+
+        $normalized = strtolower(trim((string) $raw));
+
+        if (in_array($normalized, ['0', 'false', 'off', 'no'], true)) {
+            return false;
+        }
+
+        if (in_array($normalized, ['1', 'true', 'on', 'yes'], true)) {
+            return true;
+        }
+
+        return filter_var($normalized, FILTER_VALIDATE_BOOLEAN);
     }
 
     public static function setEnabled(bool $enabled): void

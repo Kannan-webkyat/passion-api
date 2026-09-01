@@ -27,7 +27,13 @@ class Setting extends Model
 
     public static function set(string $key, mixed $value): void
     {
-        self::updateOrCreate(['key' => $key], ['value' => $value]);
+        if (is_bool($value)) {
+            $value = $value ? '1' : '0';
+        } elseif ($value !== null && ! is_scalar($value)) {
+            $value = json_encode($value);
+        }
+
+        self::updateOrCreate(['key' => $key], ['value' => (string) $value]);
         Cache::forget("setting.{$key}");
     }
 
