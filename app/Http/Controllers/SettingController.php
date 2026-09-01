@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use App\Services\BomDeductionConfig;
+use App\Services\BomEnforcementConfig;
 use App\Services\InventoryCostingConfig;
 
 class SettingController extends Controller
@@ -190,23 +191,33 @@ class SettingController extends Controller
 
     public function bomDeduction()
     {
-        return response()->json(BomDeductionConfig::publicMeta());
+        return response()->json([
+            ...BomDeductionConfig::publicMeta(),
+            ...BomEnforcementConfig::publicMeta(),
+        ]);
     }
 
     public function updateBomDeduction(Request $request)
     {
         $this->checkPermission('manage-settings');
         $validated = $request->validate([
-            'bom_deduction_mode' => 'required|string|in:'
+            'bom_deduction_mode' => 'sometimes|required|string|in:'
                 .BomDeductionConfig::MODE_PREP_STOCK.','
                 .BomDeductionConfig::MODE_EXPAND_RAW,
+            'bom_stock_enforcement' => 'sometimes|boolean',
         ]);
 
-        BomDeductionConfig::setMode($validated['bom_deduction_mode']);
+        if (array_key_exists('bom_deduction_mode', $validated)) {
+            BomDeductionConfig::setMode($validated['bom_deduction_mode']);
+        }
+        if (array_key_exists('bom_stock_enforcement', $validated)) {
+            BomEnforcementConfig::setEnabled((bool) $validated['bom_stock_enforcement']);
+        }
 
         return response()->json([
-            'message' => 'BOM deduction mode updated.',
+            'message' => 'BOM settings updated.',
             ...BomDeductionConfig::publicMeta(),
+            ...BomEnforcementConfig::publicMeta(),
         ]);
     }
 }

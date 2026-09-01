@@ -7,6 +7,7 @@ use App\Models\Recipe;
 use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
 use App\Services\BatchProductionPoolService;
+use App\Services\BomEnforcementConfig;
 use App\Services\BusinessDateService;
 use App\Services\InventoryDeductionStoreResolver;
 use Illuminate\Http\Request;
@@ -94,6 +95,7 @@ class MenuAvailabilityController extends Controller
 
         $kitchenStock = collect($this->storeResolver->stockMapAtLocation($kitchenStore));
         $barStock = collect($this->storeResolver->stockMapAtLocation($barStore));
+        $bomEnforcementOn = BomEnforcementConfig::isEnabled();
 
         $rows = $rmis->map(function (RestaurantMenuItem $rmi) use (
             $restaurant,
@@ -105,6 +107,7 @@ class MenuAvailabilityController extends Controller
             $kitchenStock,
             $barStock,
             $businessDate,
+            $bomEnforcementOn,
         ) {
             $item = $rmi->menuItem;
             if (! $item) {
@@ -141,6 +144,7 @@ class MenuAvailabilityController extends Controller
                 $kitchenStock,
                 $barStock,
                 $businessDate,
+                $bomEnforcementOn,
             );
 
             $turnedOff = ! (bool) $rmi->is_active;
@@ -177,6 +181,7 @@ class MenuAvailabilityController extends Controller
                 'type' => $item->type,
                 'category' => $item->category?->name,
                 'menu_category_id' => $item->menu_category_id,
+                'item_kind' => $this->itemKind($item),
                 'item_active' => ! $itemInactive,
                 'outlet_enabled' => ! $turnedOff,
                 'is_priced' => $priced,
@@ -197,6 +202,10 @@ class MenuAvailabilityController extends Controller
                 'name' => $restaurant->name,
             ],
             'business_date' => $businessDate,
+            'bom_stock_enforcement' => $bomEnforcementOn,
+            'enforcement_note' => $bomEnforcementOn
+                ? null
+                : 'Recipe stock rules are off. Use the toggle to hide items from POS. Liquor / bottle stock still applies.',
             'items' => $rows,
         ]);
     }
@@ -246,10 +255,21 @@ class MenuAvailabilityController extends Controller
         $kitchenStock,
         $barStock,
         string $businessDate,
+        bool $bomEnforcementOn = true,
     ): array {
         $recipe = $item->recipe;
 
         if ($recipe && (bool) ($recipe->requires_production ?? true)) {
+            if (! $bomEnforcementOn) {
+                return [
+                    'mode' => 'manual_only',
+                    'sold_out' => false,
+                    'available_qty' => null,
+                    'summary' => 'Recipe enforcement off — chef toggle controls POS visibility.',
+                    'fix' => null,
+                ];
+            }
+
             $prod = (float) $produced->get($item->id, 0);
             $comm = (float) $committed->get($item->id, 0);
             $avail = max(0, $prod - $comm);
@@ -266,6 +286,20 @@ class MenuAvailabilityController extends Controller
         }
 
         if ($item->inventory_item_id) {
+            $item->loadMissing('inventoryItem');
+            $isLiquorShelf = (bool) ($item->is_direct_sale ?? false)
+                || (bool) ($item->inventoryItem?->is_alcohol ?? false);
+
+            if (! $bomEnforcementOn && ! $isLiquorShelf) {
+                return [
+                    'mode' => 'manual_only',
+                    'sold_out' => false,
+                    'available_qty' => null,
+                    'summary' => 'Recipe enforcement off — chef toggle controls POS visibility.',
+                    'fix' => null,
+                ];
+            }
+
             $targetStore = $this->storeResolver->resolve($item, $kitchenStore, $barStore, $restaurant, $recipe);
             $phys = $targetStore
                 ? $this->storeResolver->quantityAt((int) $item->inventory_item_id, (int) $targetStore->id)
@@ -283,6 +317,16 @@ class MenuAvailabilityController extends Controller
         }
 
         if ($recipe && ! (bool) ($recipe->requires_production ?? true)) {
+            if (! $bomEnforcementOn) {
+                return [
+                    'mode' => 'manual_only',
+                    'sold_out' => false,
+                    'available_qty' => null,
+                    'summary' => 'Recipe enforcement off — chef toggle controls POS visibility.',
+                    'fix' => null,
+                ];
+            }
+
             $mto = $mtoRecipes->get($item->id) ?? $recipe;
             $usesBar = $this->storeResolver->usesBarStore($item, $restaurant, $barStore, $kitchenStore);
             $stockMap = ($usesBar ? $barStock : $kitchenStock)->all();
@@ -306,5 +350,23 @@ class MenuAvailabilityController extends Controller
             'summary' => 'Not stock-tracked on POS.',
             'fix' => null,
         ];
+    }
+
+    private function itemKind(MenuItem $item): string
+    {
+        $item->loadMissing('category', 'inventoryItem');
+
+        if ($item->is_direct_sale || (bool) ($item->inventoryItem?->is_alcohol ?? false)) {
+            return 'alcohol';
+        }
+
+        $categoryName = strtolower($item->category?->name ?? '');
+        if (str_contains($categoryName, 'alcohol')
+            || str_contains($categoryName, 'liquor')
+            || str_contains($categoryName, 'bar')) {
+            return 'alcohol';
+        }
+
+        return 'food';
     }
 }

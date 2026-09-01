@@ -35,6 +35,7 @@ use App\Models\User;
 use App\Services\BusinessDateService;
 use App\Services\DayClosingService;
 use App\Services\BatchProductionPoolService;
+use App\Services\BomEnforcementConfig;
 use App\Services\InventoryDeductionStoreResolver;
 use App\Services\PosFoodCostService;
 use App\Services\RecipeBomExpander;
@@ -5579,7 +5580,6 @@ class PosController extends Controller
         // When not provided: legacy mode — all items, use menu_items.price
         if ($restaurantId) {
             $rmiByItem = RestaurantMenuItem::where('restaurant_master_id', $restaurantId)
-                ->where('is_active', true)
                 ->get()
                 ->keyBy('menu_item_id');
 
@@ -5714,6 +5714,9 @@ class PosController extends Controller
                     if ($rmi) {
                         $item->price = (string) $rmi->price;
                         $item->price_tax_inclusive = (bool) ($rmi->price_tax_inclusive ?? true);
+                        $item->outlet_enabled = (bool) $rmi->is_active;
+                    } else {
+                        $item->outlet_enabled = true;
                     }
                     if ($item->variants && $item->variants->isNotEmpty()) {
                         // Must be setRelation, not `$item->variants = ...`: toArray() merges
@@ -5777,6 +5780,9 @@ class PosController extends Controller
                                 : null;
                         }
                     }
+                    if (! BomEnforcementConfig::isEnabled() && ! $this->posItemUsesDirectSaleStock($item, $usesBatchPool, $mtoTrackedIds->has($itemId))) {
+                        $item->available_qty = null;
+                    }
                 });
             });
         } else {
@@ -5830,6 +5836,9 @@ class PosController extends Controller
                     } else {
                         $item->available_qty = null;
                     }
+                    if (! BomEnforcementConfig::isEnabled() && ! $this->posItemUsesDirectSaleStock($item, $usesBatchPool)) {
+                        $item->available_qty = null;
+                    }
                 });
             });
         }
@@ -5868,7 +5877,7 @@ class PosController extends Controller
             ->keyBy('combo_id')
             : collect();
 
-        $combos = Combo::with('menuItems.tax')
+        $combos = Combo::with(['menuItems.tax', 'menuItems.recipe', 'menuItems.inventoryItem'])
             ->where('is_active', true)
             ->orderBy('name')
             ->get()
@@ -5881,7 +5890,15 @@ class PosController extends Controller
                         if ($qty !== null) {
                             $availables[] = (float) $qty;
                         } elseif ($mi->inventory_item_id) {
-                            $availables[] = max(0, $physicalStock->get($mi->inventory_item_id, 0));
+                            $recipe = $mi->recipe;
+                            $usesBatchPool = $recipe && (bool) ($recipe->requires_production ?? true);
+                            $isMto = $recipe && ! (bool) ($recipe->requires_production ?? true);
+                            if (
+                                BomEnforcementConfig::isEnabled()
+                                || $this->posItemUsesDirectSaleStock($mi, $usesBatchPool, $isMto)
+                            ) {
+                                $availables[] = max(0, $physicalStock->get($mi->inventory_item_id, 0));
+                            }
                         }
                     }
                     if (! empty($availables)) {
@@ -6527,6 +6544,24 @@ class PosController extends Controller
                 }
                 $menuItemId = (int) $menuItemId;
 
+                $outletLink = RestaurantMenuItem::where('menu_item_id', $menuItemId)
+                    ->where('restaurant_master_id', $order->restaurant_id)
+                    ->first();
+                if (! $outletLink) {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json([
+                            'message' => "Item \"{$item->name}\" is not available at this outlet.",
+                        ], 422)
+                    );
+                }
+                if (! $outletLink->is_active) {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json([
+                            'message' => "Item \"{$item->name}\" is not on the menu today.",
+                        ], 422)
+                    );
+                }
+
                 $existingDirectQty = (float) DB::table('pos_order_items')
                     ->where('order_id', $order->id)
                     ->where('status', 'active')
@@ -6546,15 +6581,16 @@ class PosController extends Controller
                     continue;
                 }
 
-                if ($batchRecipeMenuIds->has($menuItemId) || ($item->requires_production && ! $mtoMenuItemIds->has($menuItemId))) {
-                    $available = $batchPool->availablePortions(
-                        (int) $menuItemId,
-                        $batchBusinessDate,
-                        (int) $order->id,
-                        (int) $order->restaurant_id,
-                    );
-                } elseif ($item->inventory_item_id) {
-                    // Availability = shelf stock at deduction store − reserved on that same shelf only.
+                $usesBatchPool = $batchRecipeMenuIds->has($menuItemId)
+                    || ($item->requires_production && ! $mtoMenuItemIds->has($menuItemId));
+                $isMtoTracked = $mtoMenuItemIds->has($menuItemId);
+                $enforceShelfStock = $item->inventory_item_id && (
+                    BomEnforcementConfig::isEnabled()
+                    || $this->posItemUsesDirectSaleStock($item, $usesBatchPool, $isMtoTracked)
+                );
+
+                if ($enforceShelfStock) {
+                    // Direct-sale / liquor — validate shelf stock (always when enforcement on).
                     $order->loadMissing('restaurant');
                     $kitchenStore = $this->getKitchenForOrder($order);
                     $barStore = $this->getBarLocationForRestaurant($order->restaurant);
@@ -6578,6 +6614,29 @@ class PosController extends Controller
                         )
                         : 0.0;
                     $available = max(0, $physical - $reserved);
+
+                    if ($qtyToValidate > $available + 0.001) {
+                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                            response()->json([
+                                'message' => "Insufficient stock for \"{$item->name}\". Only {$available} available, requested {$qtyToValidate}.",
+                            ], 422)
+                        );
+                    }
+
+                    continue;
+                }
+
+                if (! BomEnforcementConfig::isEnabled()) {
+                    continue;
+                }
+
+                if ($batchRecipeMenuIds->has($menuItemId) || ($item->requires_production && ! $mtoMenuItemIds->has($menuItemId))) {
+                    $available = $batchPool->availablePortions(
+                        (int) $menuItemId,
+                        $batchBusinessDate,
+                        (int) $order->id,
+                        (int) $order->restaurant_id,
+                    );
                 } elseif ($mtoMenuItemIds->has($menuItemId)) {
                     // Type C: made-to-order — validate FULL cart qty (not delta). Delta vs raw stock
                     // let cashiers add bowl #2 when bowl #1 already reserved undeducted on this order.
@@ -6715,12 +6774,18 @@ class PosController extends Controller
                     $variantId = $row['menu_item_variant_id'] ?? null;
                     $rmi = RestaurantMenuItem::where('menu_item_id', $menuItem->id)
                         ->where('restaurant_master_id', $order->restaurant_id)
-                        ->where('is_active', true)
                         ->first();
                     if (! $rmi) {
                         throw new \Illuminate\Http\Exceptions\HttpResponseException(
                             response()->json([
                                 'message' => "Item \"{$menuItem->name}\" is not available at this outlet.",
+                            ], 422)
+                        );
+                    }
+                    if (! $rmi->is_active) {
+                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                            response()->json([
+                                'message' => "Item \"{$menuItem->name}\" is not on the menu today.",
                             ], 422)
                         );
                     }
@@ -8520,6 +8585,40 @@ class PosController extends Controller
     }
 
     /**
+     * When recipe/BOM stock enforcement is disabled, only direct-sale liquor shelf stock
+     * should still limit POS quantity. Batch and MTO food items stay sellable.
+     */
+    private function posItemUsesDirectSaleStock(object $item, bool $usesBatchPool, bool $isMtoTracked = false): bool
+    {
+        if (! $item->inventory_item_id || $usesBatchPool || $isMtoTracked) {
+            return false;
+        }
+
+        if (method_exists($item, 'loadMissing') && ! $item->relationLoaded('inventoryItem')) {
+            $item->loadMissing('inventoryItem');
+        }
+
+        return (bool) ($item->is_direct_sale ?? false)
+            || (bool) ($item->inventoryItem?->is_alcohol ?? false);
+    }
+
+    private function shouldApplyShelfStockDeduction(MenuItem $menuItem, ?Recipe $recipe): bool
+    {
+        if (! $menuItem->inventory_item_id) {
+            return false;
+        }
+
+        $usesBatchPool = $recipe && (bool) ($recipe->requires_production ?? true);
+        $isMto = $recipe && ! (bool) ($recipe->requires_production ?? true);
+
+        if (! BomEnforcementConfig::isEnabled()) {
+            return $this->posItemUsesDirectSaleStock($menuItem, $usesBatchPool, $isMto);
+        }
+
+        return true;
+    }
+
+    /**
      * Check if kitchen/bar has sufficient ingredients for made-to-order items.
      * Returns array of insufficient items: [['menu_item' => 'Tea', 'ingredient' => 'Tea Leaves', 'required' => 3, 'available' => 0, 'uom' => 'Gm']]
      *
@@ -8528,6 +8627,10 @@ class PosController extends Controller
      */
     private function checkMadeToOrderStock(PosOrder $order, $items, bool $excludeCurrentOrder = false): array
     {
+        if (! BomEnforcementConfig::isEnabled()) {
+            return [];
+        }
+
         $order->loadMissing('restaurant');
         $kitchenStore = $this->getKitchenForOrder($order);
         $barLocationId = $order->restaurant?->bar_location_id;
@@ -8973,7 +9076,7 @@ class PosController extends Controller
 
                 $recipe = Recipe::with('ingredients.inventoryItem')->where('menu_item_id', $menuItemId)->where('is_active', true)->first();
 
-                if ($recipe && ! ($recipe->requires_production ?? true)) {
+                if ($recipe && ! ($recipe->requires_production ?? true) && BomEnforcementConfig::isEnabled()) {
                     // CASE 1: Made-to-order Recipe (Tea, Coffee)
                     $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                     $scale = 1.0;
@@ -8986,7 +9089,7 @@ class PosController extends Controller
                     foreach ($this->bomExpander()->flattenedRequirements($recipe, $multiplier) as $itemId => $rawQty) {
                         $this->executeDeduction($itemId, $location->id, $rawQty, $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}", $businessDate);
                     }
-                } elseif ($menuItem->inventory_item_id) {
+                } elseif ($this->shouldApplyShelfStockDeduction($menuItem, $recipe)) {
                     // CASE 2: Finished good / direct liquor — deduct in issue units (ML).
                     $deductQty = $this->posDirectSaleIssueQty($orderItem, $menuItem);
                     $this->executeDeduction($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Order #{$orderItem->order_id} - {$menuItem->name}", $businessDate);
@@ -9021,7 +9124,7 @@ class PosController extends Controller
 
                 $recipe = Recipe::with('ingredients.inventoryItem')->where('menu_item_id', $menuItemId)->where('is_active', true)->first();
 
-                if ($recipe && ! ($recipe->requires_production ?? true)) {
+                if ($recipe && ! ($recipe->requires_production ?? true) && BomEnforcementConfig::isEnabled()) {
                     $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                     $scale = 1.0;
                     if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
@@ -9031,7 +9134,7 @@ class PosController extends Controller
                     foreach ($this->bomExpander()->flattenedRequirements($recipe, $multiplier) as $itemId => $rawQty) {
                         $this->executeInventoryIn($itemId, $location->id, $rawQty, $refType, $refId, "Inventory Reversal (Cancel/Reduce): Order #{$orderItem->order_id}", $businessDate);
                     }
-                } elseif ($menuItem->inventory_item_id) {
+                } elseif ($this->shouldApplyShelfStockDeduction($menuItem, $recipe)) {
                     $deductQty = $this->posDirectSaleIssueQty($orderItem, $menuItem, $baseQty);
                     $this->executeInventoryIn($menuItem->inventory_item_id, $location->id, $deductQty, $refType, $refId, "Inventory Reversal (Cancel/Reduce): Order #{$orderItem->order_id}", $businessDate);
                 }
@@ -9119,7 +9222,7 @@ class PosController extends Controller
                 ->where('is_active', true)
                 ->first();
 
-            if ($recipe && ! ($recipe->requires_production ?? true)) {
+            if ($recipe && ! ($recipe->requires_production ?? true) && BomEnforcementConfig::isEnabled()) {
                 $yield = max(1, (float) ($recipe->yield_quantity ?? 1));
                 $scale = 1.0;
                 if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0 && $ml <= 10) {
@@ -9129,7 +9232,7 @@ class PosController extends Controller
                 foreach ($this->bomExpander()->flattenedRequirements($recipe, $multiplier) as $itemId => $rawQty) {
                     $this->createVoidWasteRow($order, $orderItem, (int) $itemId, $location, (float) $rawQty, $voidReason);
                 }
-            } elseif ($menuItem->inventory_item_id) {
+            } elseif ($this->shouldApplyShelfStockDeduction($menuItem, $recipe)) {
                 $qty = $this->posDirectSaleIssueQty($orderItem, $menuItem);
                 $this->createVoidWasteRow($order, $orderItem, (int) $menuItem->inventory_item_id, $location, $qty, $voidReason);
             }

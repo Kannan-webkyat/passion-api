@@ -13,7 +13,16 @@ class Setting extends Model
     {
         $setting = Cache::remember("setting.{$key}", 300, fn () => self::where('key', $key)->first());
 
-        return $setting ? ($setting->value ?: $default) : $default;
+        if (! $setting) {
+            return $default;
+        }
+
+        // Do not use ?: — stored "0" is a valid value (e.g. boolean toggles).
+        if ($setting->value === null || $setting->value === '') {
+            return $default;
+        }
+
+        return $setting->value;
     }
 
     public static function set(string $key, mixed $value): void
