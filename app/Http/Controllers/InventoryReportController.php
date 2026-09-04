@@ -55,15 +55,24 @@ class InventoryReportController extends Controller
     public function stockStatus(Request $request)
     {
         $this->checkPermission('inventory-report-status');
+        $itemType = strtolower((string) ($request->query('item_type') ?? 'all'));
         $categoryId = $request->query('category_id');
         $locationId = $request->query('location_id');
         $search = $request->query('search');
 
         // Note: Joining is needed for sorting by category name.
-        // We use 'category_id' as verified by tinker.
         $query = InventoryItem::with(['category', 'issueUom'])
             ->leftJoin('inventory_categories', 'inventory_items.category_id', '=', 'inventory_categories.id')
             ->select('inventory_items.*');
+
+        if ($itemType === 'liquor') {
+            $query->where('inventory_items.is_alcohol', true);
+        } elseif ($itemType === 'food') {
+            $query->where(function ($q) {
+                $q->where('inventory_items.is_alcohol', false)
+                    ->orWhereNull('inventory_items.is_alcohol');
+            });
+        }
 
         if ($categoryId && $categoryId !== 'all') {
             $query->where('inventory_items.category_id', $categoryId);
@@ -77,7 +86,28 @@ class InventoryReportController extends Controller
         }
 
         $items = $query->orderBy('inventory_categories.name')->orderBy('inventory_items.name')->get();
-        $locations = InventoryLocation::all();
+        $locations = $this->resolveStockStatusLocations($itemType);
+
+        // Categories for the type dropdown: only those with matching liquor/food items.
+        $categoryQuery = InventoryCategory::query()
+            ->whereHas('items', function ($q) use ($itemType) {
+                if ($itemType === 'liquor') {
+                    $q->where('is_alcohol', true);
+                } elseif ($itemType === 'food') {
+                    $q->where(function ($inner) {
+                        $inner->where('is_alcohol', false)->orWhereNull('is_alcohol');
+                    });
+                }
+            })
+            ->orderBy('name');
+
+        $categories = $categoryQuery->get(['id', 'name', 'parent_id']);
+
+        // Ignore a location filter that does not belong to this type (e.g. kitchen while on Liquor).
+        $allowedLocationIds = $locations->pluck('id')->map(fn ($id) => (int) $id)->all();
+        if ($locationId && $locationId !== 'all' && ! in_array((int) $locationId, $allowedLocationIds, true)) {
+            $locationId = null;
+        }
 
         // Cross-tabulate stock from inventory_item_locations
         $stockData = DB::table('inventory_item_locations')
@@ -95,7 +125,7 @@ class InventoryReportController extends Controller
                 $qty = (float) ($itemStocks->where('inventory_location_id', $loc->id)->first()?->quantity ?? 0);
                 $locationBreakdown[$loc->id] = $qty;
 
-                if (!$locationId || $locationId == $loc->id) {
+                if (! $locationId || $locationId === 'all' || (string) $locationId === (string) $loc->id) {
                     $totalQty += $qty;
                 }
             }
@@ -109,6 +139,7 @@ class InventoryReportController extends Controller
                 'name' => $item->name,
                 'sku' => $item->sku,
                 'category' => $item->category?->name ?? 'Uncategorized',
+                'item_type' => $item->is_alcohol ? 'liquor' : 'food',
                 'uom' => $item->issueUom?->short_name ?? 'unit',
                 'unit_cost' => round($unitCost, 4),
                 'total_qty' => round($totalQty, 3),
@@ -121,7 +152,7 @@ class InventoryReportController extends Controller
         });
 
         if ($locationId && $locationId !== 'all') {
-            $report = $report->filter(fn ($r) => $r['location_stock'][$locationId] != 0)->values();
+            $report = $report->filter(fn ($r) => ($r['location_stock'][$locationId] ?? 0) != 0)->values();
         }
 
         return response()->json([
@@ -132,7 +163,7 @@ class InventoryReportController extends Controller
                 'low_stock_count' => $report->where('is_low', true)->count(),
             ],
             'locations' => $locations,
-            'categories' => InventoryCategory::all(),
+            'categories' => $categories,
         ]);
     }
 
@@ -853,6 +884,62 @@ class InventoryReportController extends Controller
                     : null,
             ],
         ]);
+    }
+
+    /**
+     * Locations for Stock Status filters / totals by item type.
+     * Liquor: Main Store + bar stores (and outlet bar_location_id links).
+     * Food: Main Store + kitchen stores (and outlet kitchen_location_id links).
+     * All: every location.
+     *
+     * @return \Illuminate\Support\Collection<int, InventoryLocation>
+     */
+    private function resolveStockStatusLocations(string $itemType)
+    {
+        if ($itemType === 'liquor') {
+            $ids = collect($this->resolveExciseLocations())->pluck('id')->all();
+
+            return InventoryLocation::query()
+                ->whereIn('id', $ids)
+                ->orderBy('name')
+                ->get(['id', 'name', 'type']);
+        }
+
+        if ($itemType === 'food') {
+            $byId = [];
+
+            foreach (
+                InventoryLocation::query()
+                    ->where(function ($q) {
+                        $q->whereIn('type', ['main_store', 'kitchen_store'])
+                            ->orWhereIn('name', ['Main Store', 'Kitchen Store']);
+                    })
+                    ->orderBy('id')
+                    ->get(['id', 'name', 'type']) as $loc
+            ) {
+                $byId[(int) $loc->id] = $loc;
+            }
+
+            $linkedIds = DB::table('restaurant_masters')
+                ->whereNotNull('kitchen_location_id')
+                ->distinct()
+                ->pluck('kitchen_location_id');
+
+            if ($linkedIds->isNotEmpty()) {
+                foreach (
+                    InventoryLocation::query()
+                        ->whereIn('id', $linkedIds)
+                        ->orderBy('id')
+                        ->get(['id', 'name', 'type']) as $loc
+                ) {
+                    $byId[(int) $loc->id] = $loc;
+                }
+            }
+
+            return collect(array_values($byId))->sortBy('name')->values();
+        }
+
+        return InventoryLocation::query()->orderBy('name')->get(['id', 'name', 'type']);
     }
 
     /**
