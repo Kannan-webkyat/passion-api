@@ -1056,7 +1056,9 @@ class InventoryReportController extends Controller
      * - Opening: bottles + loose litres (hotel liquor stock at main + bars)
      * - Receipts: GRN purchases into those locations on the selected date
      * - Sales: bottles + pegs (1 peg = 60ml by default) — POS outs from bars
-     * - Closing: bottles + loose litres
+     * - Closing: bottles + pegs derived so Opening + Receipts − Sales = Closing
+     *   (paper-book view; real closing ml kept in debug)
+     * - Total: Opening + Receipts in the same BTL/PEG units
      *
      * Internal main→bar transfers are not counted as receipts (would double-count).
      *
@@ -1309,13 +1311,25 @@ class InventoryReportController extends Controller
             $otherDayNet = ($dayIn - $purchaseIn - $openingStockIn) - ($dayOut - $posOut - $openingStockOut);
             $totalQty = $openingQty + $receiptsQty;
 
-            // Spirits-like (ml tracked): sealed bottles + open stock as pegs
+            // Spirits-like (ml tracked): sealed bottles + open stock as pegs.
+            // Paper-book rule: Total = Opening + Receipts, Closing = Total − Sales
+            // using the *displayed* BTL/PEG figures (not a fresh round of closing ml).
+            // That way Opening + Receipts − Sales always equals Closing on the register.
+            // Real closing ml stays in debug for audit.
             if ($isMl && $bottleMl > 0) {
                 $opening = $splitBottlePeg($openingQty, $bottleMl, $pegMl);
                 $receipts = $splitBottlePeg($receiptsQty, $bottleMl, $pegMl);
-                $total = $splitBottlePeg($totalQty, $bottleMl, $pegMl);
                 $sales = $splitBottlePeg($salesQty, $bottleMl, $pegMl);
-                $closing = $splitBottlePeg($closingQty, $bottleMl, $pegMl);
+
+                $bpToMl = static function (array $bp) use ($bottleMl, $pegMl): float {
+                    return ((float) $bp['bottles'] * $bottleMl) + ((float) $bp['pegs'] * $pegMl);
+                };
+
+                $totalMlBook = $bpToMl($opening) + $bpToMl($receipts);
+                $total = $splitBottlePeg($totalMlBook, $bottleMl, $pegMl);
+
+                $closingMlBook = max(0.0, $totalMlBook - $bpToMl($sales));
+                $closing = $splitBottlePeg($closingMlBook, $bottleMl, $pegMl);
 
                 return [
                     'item_id' => $item->id,
@@ -1340,16 +1354,22 @@ class InventoryReportController extends Controller
                         'opening_stock_rolled_into_opening_ml' => round($openingStockNet, 3),
                         'receipts_purchase_ml' => round($receiptsQty, 3),
                         'total_qty_ml' => round($totalQty, 3),
+                        'total_book_ml' => round($totalMlBook, 3),
                         'pos_out_ml' => round($salesQty, 3),
                         'other_day_net_ml' => round($otherDayNet, 3),
                         'closing_qty_ml' => round($closingQty, 3),
+                        'closing_book_ml' => round($closingMlBook, 3),
                         'now_qty_ml' => round($nowQty, 3),
                         'peg_ml' => $pegMl,
+                        'register_balanced' => true,
                     ],
                 ];
             }
 
             // BTL / pcs — count only (no pegs). bottle_ml from name when available (excise label).
+            // Same paper-book rule: Closing = Opening + Receipts − Sales.
+            $closingBottlesBook = round($openingQty + $receiptsQty - $salesQty, 2);
+
             return [
                 'item_id' => $item->id,
                 'item_name' => $item->name,
@@ -1362,11 +1382,11 @@ class InventoryReportController extends Controller
                 'opening_pegs' => null,
                 'receipts_bottles' => round($receiptsQty, 2),
                 'receipts_pegs' => null,
-                'total_bottles' => round($totalQty, 2),
+                'total_bottles' => round($openingQty + $receiptsQty, 2),
                 'total_pegs' => null,
                 'sales_bottles' => round($salesQty, 2),
                 'sales_pegs' => null,
-                'closing_bottles' => round($closingQty, 2),
+                'closing_bottles' => $closingBottlesBook,
                 'closing_pegs' => null,
                 'debug' => [
                     'opening_qty' => round($openingQty, 3),
@@ -1376,8 +1396,10 @@ class InventoryReportController extends Controller
                     'pos_out' => round($salesQty, 3),
                     'other_day_net' => round($otherDayNet, 3),
                     'closing_qty' => round($closingQty, 3),
+                    'closing_book' => $closingBottlesBook,
                     'now_qty' => round($nowQty, 3),
                     'stock_uom' => $isBtl ? 'BTL' : ($item->issueUom?->short_name ?? ''),
+                    'register_balanced' => true,
                 ],
             ];
         })->values();
