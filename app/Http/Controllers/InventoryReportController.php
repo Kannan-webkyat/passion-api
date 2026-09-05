@@ -1313,23 +1313,36 @@ class InventoryReportController extends Controller
 
             // Spirits-like (ml tracked): sealed bottles + open stock as pegs.
             // Paper-book rule: Total = Opening + Receipts, Closing = Total − Sales
-            // using the *displayed* BTL/PEG figures (not a fresh round of closing ml).
-            // That way Opening + Receipts − Sales always equals Closing on the register.
-            // Real closing ml stays in debug for audit.
+            // in half-peg integer units (1 peg = 60ml → 2 half-pegs of 30ml;
+            // 1 bottle = floor(bottle_ml / 30) half-pegs). That avoids the
+            // 10ml remainder when 1000ml is not divisible by 30, so BTL/PEG
+            // columns always tie. Real closing ml stays in debug.
             if ($isMl && $bottleMl > 0) {
                 $opening = $splitBottlePeg($openingQty, $bottleMl, $pegMl);
                 $receipts = $splitBottlePeg($receiptsQty, $bottleMl, $pegMl);
                 $sales = $splitBottlePeg($salesQty, $bottleMl, $pegMl);
 
-                $bpToMl = static function (array $bp) use ($bottleMl, $pegMl): float {
-                    return ((float) $bp['bottles'] * $bottleMl) + ((float) $bp['pegs'] * $pegMl);
+                $halfPegMl = $pegMl / 2.0;
+                $halfPerBottle = max(1, (int) floor($bottleMl / $halfPegMl));
+
+                $toHalf = static function (array $bp) use ($halfPerBottle): int {
+                    return ((int) round((float) $bp['bottles'])) * $halfPerBottle
+                        + (int) round(((float) $bp['pegs']) * 2);
+                };
+                $fromHalf = static function (int $half) use ($halfPerBottle): array {
+                    $half = max(0, $half);
+                    $bottles = intdiv($half, $halfPerBottle);
+                    $remHalf = $half % $halfPerBottle;
+
+                    return [
+                        'bottles' => (float) $bottles,
+                        'pegs' => round($remHalf / 2, 2),
+                    ];
                 };
 
-                $totalMlBook = $bpToMl($opening) + $bpToMl($receipts);
-                $total = $splitBottlePeg($totalMlBook, $bottleMl, $pegMl);
-
-                $closingMlBook = max(0.0, $totalMlBook - $bpToMl($sales));
-                $closing = $splitBottlePeg($closingMlBook, $bottleMl, $pegMl);
+                $totalHalf = $toHalf($opening) + $toHalf($receipts);
+                $total = $fromHalf($totalHalf);
+                $closing = $fromHalf($totalHalf - $toHalf($sales));
 
                 return [
                     'item_id' => $item->id,
@@ -1354,13 +1367,12 @@ class InventoryReportController extends Controller
                         'opening_stock_rolled_into_opening_ml' => round($openingStockNet, 3),
                         'receipts_purchase_ml' => round($receiptsQty, 3),
                         'total_qty_ml' => round($totalQty, 3),
-                        'total_book_ml' => round($totalMlBook, 3),
                         'pos_out_ml' => round($salesQty, 3),
                         'other_day_net_ml' => round($otherDayNet, 3),
                         'closing_qty_ml' => round($closingQty, 3),
-                        'closing_book_ml' => round($closingMlBook, 3),
                         'now_qty_ml' => round($nowQty, 3),
                         'peg_ml' => $pegMl,
+                        'half_per_bottle' => $halfPerBottle,
                         'register_balanced' => true,
                     ],
                 ];
