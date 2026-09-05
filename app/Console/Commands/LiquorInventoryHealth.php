@@ -123,7 +123,7 @@ class LiquorInventoryHealth extends Command
                 $flags[] = 'STOCK_HI';
             }
 
-            // --- Book vs physical (movement value) ---
+            // --- Book vs physical (movements + cleanup JEs on 1311) ---
             $in = (float) DB::table('inventory_transactions')
                 ->where('inventory_item_id', $i->id)
                 ->where('type', 'in')
@@ -132,15 +132,16 @@ class LiquorInventoryHealth extends Command
                 ->where('inventory_item_id', $i->id)
                 ->where('type', 'out')
                 ->sum('total_cost');
-            $book = round($in - $out, 2);
+            $cleanup = $this->cleanupInventoryNet((int) $i->id);
+            $book = round($in - $out + $cleanup, 2);
             $phys = $this->physicalValue($i, $stock, $cf, $cost);
             $physDiv = ($i->issue_uom === 'BTL' && $size >= 300 && $stock >= $size)
                 ? round(($stock / $size) * $cost, 2)
                 : null;
 
-            $bookOk = abs($book - $phys) <= 2
-                || ($physDiv !== null && abs($book - $physDiv) <= 2);
-            if (! $bookOk && abs($book - $phys) > 2) {
+            $bookOk = abs($book - $phys) <= 5
+                || ($physDiv !== null && abs($book - $physDiv) <= 5);
+            if (! $bookOk && abs($book - $phys) > 5) {
                 $flags[] = 'BOOK_GAP';
             }
 
@@ -149,8 +150,8 @@ class LiquorInventoryHealth extends Command
                 $flags[] = 'OPEN_ML';
             }
 
-            // --- Bottle-rate unit cost on ML outs ---
-            if ($i->issue_uom === 'ML' && $cf > 1) {
+            // Historical bad rows only flag when books still disagree
+            if (! $bookOk && $i->issue_uom === 'ML' && $cf > 1) {
                 $badUc = DB::table('inventory_transactions')
                     ->where('inventory_item_id', $i->id)
                     ->where('type', 'out')
@@ -160,25 +161,7 @@ class LiquorInventoryHealth extends Command
                 if ($badUc > 0) {
                     $flags[] = 'BOTTLE_RATE_ON_ML';
                 }
-            }
 
-            // --- POS deduct vs billed lines (coarse) ---
-            $posQty = (float) DB::table('inventory_transactions')
-                ->where('inventory_item_id', $i->id)
-                ->where('type', 'out')
-                ->where('reason', 'POS Order')
-                ->sum('quantity');
-
-            $pour = $this->fairPourIssueUnits($i, $size, $cf);
-            if ($i->issue_uom === 'BTL' && $posQty - $pour > 0.5) {
-                $flags[] = 'OVER_COGS';
-            }
-            if ($i->issue_uom === 'ML' && $cf > 1 && ($posQty - $pour) > $cf * 0.5) {
-                $flags[] = 'OVER_COGS';
-            }
-
-            // GRN qty weird: tiny qty with huge unit cost on ML item
-            if ($i->issue_uom === 'ML' && $cf > 1) {
                 $weirdGrn = DB::table('inventory_transactions')
                     ->where('inventory_item_id', $i->id)
                     ->where('reason', 'like', '%GRN%')
@@ -187,6 +170,23 @@ class LiquorInventoryHealth extends Command
                     ->count();
                 if ($weirdGrn > 0) {
                     $flags[] = 'GRN_QTY_WEIRD';
+                }
+            }
+
+            // --- POS deduct vs billed lines (only if Inv still wrong) ---
+            if (! $bookOk) {
+                $posQty = (float) DB::table('inventory_transactions')
+                    ->where('inventory_item_id', $i->id)
+                    ->where('type', 'out')
+                    ->where('reason', 'POS Order')
+                    ->sum('quantity');
+
+                $pour = $this->fairPourIssueUnits($i, $size, $cf);
+                if ($i->issue_uom === 'BTL' && $posQty - $pour > 0.5) {
+                    $flags[] = 'OVER_COGS';
+                }
+                if ($i->issue_uom === 'ML' && $cf > 1 && ($posQty - $pour) > $cf * 0.5) {
+                    $flags[] = 'OVER_COGS';
                 }
             }
 
@@ -226,10 +226,11 @@ class LiquorInventoryHealth extends Command
         $this->info("SUMMARY: total={$items->count()} OK={$ok} SUSPECT={$suspect}");
         $this->newLine();
         $this->comment('Flag guide:');
-        $this->line('  PEGS_ON_BTL / BOTTLE_RATE_ON_ML / OVER_COGS — sales deduct / COGS wrong');
+        $this->line('  Book₹ = movement net + inventory_cleanup_* JEs on 1311');
+        $this->line('  PEGS_ON_BTL — peg menu on BTL issue UOM (live risk)');
+        $this->line('  BOTTLE_RATE_ON_ML / OVER_COGS / GRN_QTY_WEIRD — only if Book still ≠ Phys');
         $this->line('  OPEN_ML / STOCK_HI — opening or on-hand still in ml on a BTL item');
-        $this->line('  BOOK_GAP — movement value ≠ stock×cost (check cleanup JEs / GRN)');
-        $this->line('  GRN_QTY_WEIRD — GRN posted bottle count into ML stock');
+        $this->line('  BOOK_GAP — book (incl. cleanups) ≠ stock×cost');
         $this->line('  CF_WEIRD / CF_NOT_1 / ISSUE_ML — master data unit setup');
         $this->newLine();
         $this->comment('Also useful:');
@@ -273,6 +274,25 @@ class LiquorInventoryHealth extends Command
         }
 
         return round($stock * $cost, 2);
+    }
+
+    /**
+     * Net 1311 impact from item-level cleanup journals (Dr − Cr).
+     * Matches source_type inventory_cleanup_* with source_id = item id.
+     */
+    private function cleanupInventoryNet(int $itemId): float
+    {
+        $net = DB::table('journal_lines as jl')
+            ->join('journal_entries as je', 'je.id', '=', 'jl.journal_entry_id')
+            ->join('chart_of_accounts as a', 'a.id', '=', 'jl.account_id')
+            ->where('je.status', 'posted')
+            ->where('a.code', '1311')
+            ->where('je.source_type', 'like', 'inventory_cleanup_%')
+            ->where('je.source_id', $itemId)
+            ->selectRaw('COALESCE(SUM(jl.debit - jl.credit), 0) as net')
+            ->value('net');
+
+        return round((float) $net, 2);
     }
 
     private function fairPourIssueUnits(object $item, float $size, float $cf): float
