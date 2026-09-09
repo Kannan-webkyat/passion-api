@@ -18,6 +18,7 @@ use App\Models\PosOrder;
 use App\Models\PosOrderItem;
 use App\Models\PosOrderRefund;
 use App\Models\PosPayment;
+use App\Models\PosPaymentAmendment;
 use App\Models\PosVoidWaste;
 use App\Services\Accounting\InventoryCogsPoster;
 use App\Services\Accounting\InventoryAdjustmentPoster;
@@ -188,28 +189,56 @@ class PosController extends Controller
         );
     }
 
-    /** Kitchen KOT lines (bulk send, hold, fire). */
+    /** Kitchen KOT lines (bulk send, hold, fire). Never liquor / direct-sale. */
     private function orderItemRequiresKot(PosOrderItem $item, ?RestaurantMaster $restaurant = null): bool
     {
         if ($item->status !== 'active') {
             return false;
         }
-        if ($restaurant?->kot_include_all_items) {
-            return true;
-        }
-        if ($item->combo_id) {
-            return true;
-        }
-        if ($item->menu_item_id) {
-            $item->loadMissing('menuItem');
 
-            return (bool) ($item->menuItem?->requires_production ?? true);
-        }
-
-        return true;
+        return ! $this->orderItemIsBarTicketLine($item);
     }
 
-    /** Whether this outlet puts every cart line on BOT/KOT (bars: liquor + food). */
+    /** Bar BOT slip lines: liquor / direct-sale only. Plated food stays kitchen even if requires_production is false. */
+    private function orderItemIsBarTicketLine(PosOrderItem $item): bool
+    {
+        if ($item->combo_id) {
+            return false;
+        }
+        if (! $item->menu_item_id) {
+            return false;
+        }
+        $item->loadMissing(['menuItem.inventoryItem.tax', 'menuItem.tax']);
+        if ((bool) ($item->menuItem?->is_direct_sale ?? false)) {
+            return true;
+        }
+        if (($item->tax_regime ?? '') === 'vat_liquor') {
+            return true;
+        }
+        if ($item->menuItem && LiquorItemClassifier::menuItemIsLiquor($item->menuItem)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    private function orderItemRequiresBot(PosOrderItem $item, ?RestaurantMaster $restaurant = null): bool
+    {
+        if ($item->status !== 'active') {
+            return false;
+        }
+
+        return $this->restaurantIncludesAllItemsOnKot($restaurant)
+            && $this->orderItemIsBarTicketLine($item);
+    }
+
+    /** KOT or BOT already sent for this line. */
+    private function orderItemTicketSent(PosOrderItem $item): bool
+    {
+        return (bool) $item->kot_sent || (bool) ($item->bot_sent ?? false);
+    }
+
+    /** Whether this outlet puts liquor / direct-sale on BOT when Send is pressed. */
     private function restaurantIncludesAllItemsOnKot(?RestaurantMaster $restaurant): bool
     {
         return (bool) ($restaurant?->kot_include_all_items);
@@ -252,6 +281,10 @@ class PosController extends Controller
             ->get();
 
         if ($allKotItems->isEmpty()) {
+            if (in_array($order->kitchen_status, ['pending', 'preparing', 'ready'], true)) {
+                $order->update(['kitchen_status' => 'served']);
+            }
+
             return;
         }
 
@@ -3135,24 +3168,20 @@ class PosController extends Controller
 
         $activeItems = $order->items->where('status', 'active');
         $grossSubtotal = (float) $activeItems->sum(fn($i) => floatval($i->line_total));
-
-        $discountAmount = 0.0;
-        if ($order->discount_type === 'percent') {
-            $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
-        } elseif ($order->discount_type === 'flat') {
-            $discountAmount = min((float) ($order->discount_value ?? 0), $grossSubtotal);
-        }
-        $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0.0;
+        $foodDisc = $this->posFoodOnlyDiscount($activeItems, $order);
+        $discountAmount = $foodDisc['amount'];
+        $discountBase = $foodDisc['base'];
+        $lineRatio = $this->posLineDiscountRatio($item, $order, $discountAmount, $discountBase);
 
         $lineGross = (float) $item->line_total;
-        $lineDiscountShare = round($lineGross * $discountRatio, 2);
-        $lineAfterDiscount = round($lineGross * (1 - $discountRatio), 2);
+        $lineDiscountShare = round($lineGross * $lineRatio, 2);
+        $lineAfterDiscount = round($lineGross * (1 - $lineRatio), 2);
 
         $refundTotal = (float) $order->refunds->sum('amount');
         $share = $grossSubtotal > 0 ? ($lineGross / $grossSubtotal) : 0.0;
         $lineRefundAlloc = round($refundTotal * $share, 2);
 
-        [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($item, $order, $discountRatio);
+        [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($item, $order, $lineRatio);
         $kind = $this->posLineTaxSupplyKind($item, $order);
 
         $cgst = 0.0;
@@ -3982,7 +4011,9 @@ class PosController extends Controller
                         $deptSubtotal += (float) $item->line_total;
                     }
                 }
-                $amountTotal += (float) $o->discount_amount * ($deptSubtotal / $orderSubtotal);
+                $amountTotal += (float) $o->is_complimentary
+                    ? ((float) $o->discount_amount * ($deptSubtotal / $orderSubtotal))
+                    : ($isLiquor ? 0.0 : (float) $o->discount_amount);
             }
         }
         $entryCount = (clone $base)->count();
@@ -4029,7 +4060,9 @@ class PosController extends Controller
                             $deptSubtotal += (float) $item->line_total;
                         }
                     }
-                    $displayAmount = (float) $o->discount_amount * ($deptSubtotal / $orderSubtotal);
+                    $displayAmount = (float) $o->is_complimentary
+                        ? ((float) $o->discount_amount * ($deptSubtotal / $orderSubtotal))
+                        : ($isLiquor ? 0.0 : (float) $o->discount_amount);
                 }
             }
 
@@ -6286,7 +6319,7 @@ class PosController extends Controller
         $to = null;
         $dateWasExplicit = false;
         $statuses = match ($tab) {
-            'current' => ['open', 'billed', 'paid', 'refunded'],
+            'current' => ['open', 'billed', 'paid', 'refunded', 'void'],
             'running' => ['open', 'billed'],
             default => ['paid', 'refunded'],
         };
@@ -6890,7 +6923,7 @@ class PosController extends Controller
                         $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_sync_cancel', (string) $order->id);
                     }
 
-                    if ($item->kot_sent) {
+                    if ($this->orderItemTicketSent($item)) {
                         $item->update(['status' => 'cancelled']);
                     } else {
                         $item->delete();
@@ -7010,6 +7043,7 @@ class PosController extends Controller
                     'price_tax_inclusive' => $priceTaxInclusive,
                     'line_total' => $u * $q,
                     'kot_sent' => false,
+                    'bot_sent' => false,
                     'kot_hold' => false,
                     'status' => 'active',
                     'kot_batch' => null,
@@ -7018,7 +7052,7 @@ class PosController extends Controller
 
                 if ($totalCurrent < $qty) {
                     $delta = $qty - $totalCurrent;
-                    $unsent = $matching->first(fn($i) => ! $i->kot_sent);
+                    $unsent = $matching->first(fn($i) => ! $this->orderItemTicketSent($i));
                     if ($unsent) {
                         $unsent->update([
                             'quantity' => $unsent->quantity + $delta,
@@ -7036,7 +7070,7 @@ class PosController extends Controller
                     $toReduce = $totalCurrent - $qty;
                     // Prioritize cancellation: unsent first, then pending, started, ready, and finally served last.
                     $sortedMatching = $matching->sortBy(function ($item) {
-                        if (! $item->kot_sent) {
+                        if (! $this->orderItemTicketSent($item)) {
                             return 0;
                         }
                         if (! $item->kot_started_at && ! $item->kitchen_ready_at && ! $item->kitchen_served_at) {
@@ -7059,10 +7093,10 @@ class PosController extends Controller
                         if ($item->quantity <= $toReduce) {
                             $toReduce -= $item->quantity;
 
-                            if ($item->kot_sent) {
+                            if ($this->orderItemTicketSent($item)) {
                                 $name = $item->menuItem ? $item->menuItem->name : 'Item';
                                 throw new \Illuminate\Http\Exceptions\HttpResponseException(
-                                    response()->json(['message' => "Cannot silently remove '{$name}' from the cart because it has already been sent to the kitchen. Please use the Void feature instead."], 422)
+                                    response()->json(['message' => "Cannot silently remove '{$name}' from the cart because it has already been sent to kitchen or bar. Please use the Void feature instead."], 422)
                                 );
                             } else {
                                 $kitchenStore = $this->getKitchenForOrder($order);
@@ -7077,10 +7111,10 @@ class PosController extends Controller
                             }
                         } else {
                             $newQty = $item->quantity - $toReduce;
-                            if ($item->kot_sent) {
+                            if ($this->orderItemTicketSent($item)) {
                                 $name = $item->menuItem ? $item->menuItem->name : 'Item';
                                 throw new \Illuminate\Http\Exceptions\HttpResponseException(
-                                    response()->json(['message' => "Cannot reduce quantity of '{$name}' because it has already been sent to the kitchen. Please use the Void feature instead."], 422)
+                                    response()->json(['message' => "Cannot reduce quantity of '{$name}' because it has already been sent to kitchen or bar. Please use the Void feature instead."], 422)
                                 );
                             } else {
                                 $item->update([
@@ -7121,49 +7155,67 @@ class PosController extends Controller
         $this->assertBusinessDateOpenForPos($order);
 
         $order->loadMissing('restaurant');
-        $includeAll = $this->restaurantIncludesAllItemsOnKot($order->restaurant);
+        $includeBarBot = $this->restaurantIncludesAllItemsOnKot($order->restaurant);
 
         $batch = null;
         $errorResponse = null;
-        DB::transaction(function () use ($order, $includeAll, &$batch, &$errorResponse) {
+        DB::transaction(function () use ($order, $includeBarBot, &$batch, &$errorResponse) {
             // Lock the order to prevent concurrent simultaneous KOT triggers issuing the same batch number
             $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
 
-            // Production items always go to KOT. Bar outlets (kot_include_all_items) also
-            // send direct-sale liquor so every beer gets a BOT batch.
-            $kotQuery = $order->items()
+            $unheld = $order->items()
                 ->where('status', 'active')
-                ->where('kot_sent', false)
-                ->where('kot_hold', false);
-            if (! $includeAll) {
-                $kotQuery->where(function ($q) {
-                    $q->whereNull('menu_item_id')
-                        ->orWhereHas('menuItem', fn ($mq) => $mq->where('requires_production', true));
-                });
+                ->where('kot_hold', false)
+                ->with(['menuItem.inventoryItem.tax', 'menuItem.tax', 'variant', 'combo.menuItems'])
+                ->orderBy('id')
+                ->get();
+
+            $kitchenToSend = $unheld->filter(
+                fn ($i) => ! $i->kot_sent && $this->orderItemRequiresKot($i, $order->restaurant)
+            )->values();
+
+            $barToSend = collect();
+            if ($includeBarBot) {
+                $barToSend = $unheld->filter(
+                    fn ($i) => ! $i->bot_sent && $this->orderItemRequiresBot($i, $order->restaurant)
+                )->values();
             }
 
-            $toSend = $kotQuery->with(['menuItem', 'variant', 'combo.menuItems'])->orderBy('id')->get();
-            if ($toSend->isEmpty()) {
+            if ($kitchenToSend->isEmpty() && $barToSend->isEmpty()) {
                 return;
             }
 
-            // Fire = commit: block KOT when MTO ingredients (incl. shared BOM across this fire) are short.
-            $insufficient = $this->checkMadeToOrderStock($order, $toSend);
-            if (count($insufficient) > 0) {
-                $errorResponse = $this->insufficientKotStockResponse($insufficient);
-                return;
+            // Fire = commit: block kitchen send when MTO ingredients are short.
+            if ($kitchenToSend->isNotEmpty()) {
+                $insufficient = $this->checkMadeToOrderStock($order, $kitchenToSend);
+                if (count($insufficient) > 0) {
+                    $errorResponse = $this->insufficientKotStockResponse($insufficient);
+
+                    return;
+                }
             }
 
             $order->increment('current_kot_batch');
             $batch = $order->current_kot_batch;
+            $now = now();
 
-            PosOrderItem::whereIn('id', $toSend->pluck('id')->all())->update([
-                'kot_sent' => true,
-                'kot_sent_at' => now(),
-                'kot_batch' => $batch,
-            ]);
+            if ($kitchenToSend->isNotEmpty()) {
+                PosOrderItem::whereIn('id', $kitchenToSend->pluck('id')->all())->update([
+                    'kot_sent' => true,
+                    'kot_sent_at' => $now,
+                    'kot_batch' => $batch,
+                ]);
+            }
 
-            if (! in_array($order->kitchen_status, ['pending', 'preparing'])) {
+            if ($barToSend->isNotEmpty()) {
+                PosOrderItem::whereIn('id', $barToSend->pluck('id')->all())->update([
+                    'bot_sent' => true,
+                    'bot_sent_at' => $now,
+                    'kot_batch' => $batch,
+                ]);
+            }
+
+            if ($kitchenToSend->isNotEmpty() && ! in_array($order->kitchen_status, ['pending', 'preparing'])) {
                 $order->update(['kitchen_status' => 'pending']);
             }
         });
@@ -7228,11 +7280,12 @@ class PosController extends Controller
             if ($item->order_id !== $order->id) {
                 return response()->json(['message' => 'Invalid order line.'], 422);
             }
-            if ($item->status !== 'active' || $item->kot_sent) {
+            if ($item->status !== 'active' || $this->orderItemTicketSent($item)) {
                 return response()->json(['message' => 'Only unsent active lines can be held or released.'], 422);
             }
-            if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
-                return response()->json(['message' => 'This line does not use kitchen KOT.'], 422);
+            if (! $this->orderItemRequiresKot($item, $order->restaurant)
+                && ! $this->orderItemRequiresBot($item, $order->restaurant)) {
+                return response()->json(['message' => 'This line does not use kitchen KOT or bar BOT.'], 422);
             }
         }
 
@@ -7449,14 +7502,15 @@ class PosController extends Controller
             if ($item->order_id !== $order->id) {
                 return response()->json(['message' => 'Invalid order line.'], 422);
             }
-            if ($item->status !== 'active' || $item->kot_sent) {
+            if ($item->status !== 'active' || $this->orderItemTicketSent($item)) {
                 return response()->json(['message' => 'Only unsent active lines can be fired.'], 422);
             }
             if (! $item->kot_hold) {
                 return response()->json(['message' => 'Only held lines can be fired.'], 422);
             }
-            if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
-                return response()->json(['message' => 'This line does not use kitchen KOT.'], 422);
+            if (! $this->orderItemRequiresKot($item, $order->restaurant)
+                && ! $this->orderItemRequiresBot($item, $order->restaurant)) {
+                return response()->json(['message' => 'This line does not use kitchen KOT or bar BOT.'], 422);
             }
         }
 
@@ -7464,23 +7518,43 @@ class PosController extends Controller
         DB::transaction(function () use ($order, $ids, $items, &$errorResponse) {
             $locked = PosOrder::where('id', $order->id)->lockForUpdate()->first();
 
-            $insufficient = $this->checkMadeToOrderStock($locked, $items);
-            if (count($insufficient) > 0) {
-                $errorResponse = $this->insufficientKotStockResponse($insufficient);
-                return;
+            $kitchenItems = $items->filter(fn ($i) => $this->orderItemRequiresKot($i, $locked->restaurant));
+            if ($kitchenItems->isNotEmpty()) {
+                $insufficient = $this->checkMadeToOrderStock($locked, $kitchenItems);
+                if (count($insufficient) > 0) {
+                    $errorResponse = $this->insufficientKotStockResponse($insufficient);
+
+                    return;
+                }
             }
 
             $locked->increment('current_kot_batch');
             $batch = $locked->fresh()->current_kot_batch;
+            $now = now();
 
-            PosOrderItem::whereIn('id', $ids)->update([
-                'kot_sent' => true,
-                'kot_sent_at' => now(),
-                'kot_batch' => $batch,
-                'kot_hold' => false,
-            ]);
+            $kitchenIds = $kitchenItems->pluck('id')->all();
+            if ($kitchenIds !== []) {
+                PosOrderItem::whereIn('id', $kitchenIds)->update([
+                    'kot_sent' => true,
+                    'kot_sent_at' => $now,
+                    'kot_batch' => $batch,
+                    'kot_hold' => false,
+                ]);
+            }
 
-            if (! in_array($locked->kitchen_status, ['pending', 'preparing'])) {
+            $barIds = $items->filter(fn ($i) => $this->orderItemRequiresBot($i, $locked->restaurant))
+                ->pluck('id')
+                ->all();
+            if ($barIds !== []) {
+                PosOrderItem::whereIn('id', $barIds)->update([
+                    'bot_sent' => true,
+                    'bot_sent_at' => $now,
+                    'kot_batch' => $batch,
+                    'kot_hold' => false,
+                ]);
+            }
+
+            if ($kitchenIds !== [] && ! in_array($locked->kitchen_status, ['pending', 'preparing'])) {
                 $locked->update(['kitchen_status' => 'pending']);
             }
         });
@@ -7769,14 +7843,159 @@ class PosController extends Controller
         return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
     }
 
+    /**
+     * Correct tender on a paid bill (same total). Does not change items, tax, or discount.
+     */
+    public function amendPayments(Request $request, PosOrder $order)
+    {
+        $this->checkPermission('pos-amend-payment');
+        $this->authorizeOrderAccess($order);
+        $this->assertBusinessDateOpenForPos($order, 'Cannot amend payment: this order\'s business date is already closed for this outlet.');
+
+        $validated = $request->validate([
+            'reason' => 'required|string|min:3|max:500',
+            'payments' => 'required|array|min:1',
+            'payments.*.method' => 'required|in:cash,card,upi,room_charge',
+            'payments.*.amount' => 'required|numeric|min:0.01',
+            'payments.*.reference_no' => 'nullable|string|max:100',
+        ]);
+
+        if (! in_array($order->status, ['paid'], true)) {
+            return response()->json(['message' => 'Only paid orders can have payment method corrected.'], 422);
+        }
+        if ($order->is_complimentary) {
+            return response()->json(['message' => 'Complimentary bills have no tender to correct.'], 422);
+        }
+        if ($order->refunds()->exists()) {
+            return response()->json(['message' => 'Cannot amend payment after a refund. Use a new bill if needed.'], 422);
+        }
+
+        foreach ($validated['payments'] as $pay) {
+            if ($pay['method'] === 'room_charge' && ! $order->booking_id) {
+                return response()->json([
+                    'message' => 'Room Charge is only available for orders with a linked Checked-in Room.',
+                ], 422);
+            }
+        }
+        $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
+        if ($hasRoomCharge && ($order->order_type !== 'room_service' || ! $order->booking_id)) {
+            return response()->json(['message' => 'Room charge is only available for room service orders with a linked booking.'], 422);
+        }
+
+        $paymentsTotal = round((float) collect($validated['payments'])->sum('amount'), 2);
+        $orderTotal = round((float) $order->total_amount, 2);
+        if (abs($paymentsTotal - $orderTotal) > 0.01) {
+            return response()->json([
+                'message' => 'Payment total ('.number_format($paymentsTotal, 2).') must equal bill total ('.number_format($orderTotal, 2).'). Items and tax cannot be changed here.',
+            ], 422);
+        }
+
+        $businessDate = $this->businessDateStringForOrder($order);
+        $folioDelta = 0.0;
+
+        app(LedgerBackedTransaction::class)->run(
+            mutate: function () use ($order, $validated, $businessDate, &$folioDelta) {
+                $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+                if ($order->status !== 'paid') {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json(['message' => 'Only paid orders can have payment method corrected.'], 422)
+                    );
+                }
+                if ($order->refunds()->exists()) {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json(['message' => 'Cannot amend payment after a refund.'], 422)
+                    );
+                }
+
+                $hasRoomCharge = collect($validated['payments'])->contains('method', 'room_charge');
+                if ($hasRoomCharge && $order->booking_id) {
+                    $booking = Booking::lockForUpdate()->find($order->booking_id);
+                    if (! $booking || $booking->status !== 'checked_in') {
+                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                            response()->json(['message' => 'Linked booking is no longer checked-in. Cannot set room charge.'], 422)
+                        );
+                    }
+                }
+
+                $previous = $order->payments()->get(['method', 'amount', 'reference_no'])->map(fn ($p) => [
+                    'method' => $p->method,
+                    'amount' => (float) $p->amount,
+                    'reference_no' => $p->reference_no,
+                ])->values()->all();
+
+                $oldRoom = (float) $order->payments()->where('method', 'room_charge')->sum('amount');
+                $newRoom = (float) collect($validated['payments'])->where('method', 'room_charge')->sum('amount');
+                $folioDelta = round($newRoom - $oldRoom, 2);
+
+                if (abs($folioDelta) > 0.004 && $order->booking_id) {
+                    $booking = Booking::lockForUpdate()->find($order->booking_id);
+                    if ($booking) {
+                        $booking->update([
+                            'extra_charges' => max(0, (float) $booking->extra_charges + $folioDelta),
+                        ]);
+                    }
+                }
+
+                $order->payments()->delete();
+                foreach ($validated['payments'] as $pay) {
+                    PosPayment::create([
+                        'order_id' => $order->id,
+                        'business_date' => $businessDate,
+                        'method' => $pay['method'],
+                        'amount' => $pay['amount'],
+                        'reference_no' => $pay['reference_no'] ?? null,
+                        'paid_at' => now(),
+                        'received_by' => auth()->id(),
+                    ]);
+                }
+
+                PosPaymentAmendment::create([
+                    'pos_order_id' => $order->id,
+                    'previous_payments' => $previous,
+                    'new_payments' => collect($validated['payments'])->map(fn ($p) => [
+                        'method' => $p['method'],
+                        'amount' => (float) $p['amount'],
+                        'reference_no' => $p['reference_no'] ?? null,
+                    ])->values()->all(),
+                    'reason' => $validated['reason'],
+                    'amended_by' => auth()->id(),
+                    'amended_at' => now(),
+                ]);
+
+                return $order->fresh(['payments']);
+            },
+            postJournal: fn (PosOrder $orderForAccounting) => app(PosSettlePoster::class)->repost($orderForAccounting, auth()->id()),
+            journalRequired: fn (PosOrder $orderForAccounting) => app(PosSettlePoster::class)->isJournalRequired($orderForAccounting),
+        );
+
+        $fresh = $order->fresh();
+        $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
+        if (abs($folioDelta) > 0.004 && $fresh->booking_id) {
+            $this->broadcastBookingFolioAfterPosRoomCharge(
+                (int) $fresh->booking_id,
+                $this->resolveRoomIdForPosBookingFolioBroadcast($fresh),
+                $folioDelta,
+                'POS payment amended'
+            );
+        }
+
+        return response()->json($this->formatOrder($fresh->load('items.menuItem.tax', 'items.menuItem.category', 'items.combo', 'items.variant', 'payments', 'refunds', 'room', 'table', 'waiter', 'openedBy', 'voidedBy', 'discountApprovedBy')));
+    }
+
     // ── Void ──────────────────────────────────────────────────────────────────
 
     public function void(Request $request, PosOrder $order)
     {
         $this->checkPermission('pos-void-item');
         $this->authorizeOrderAccess($order);
-        if (in_array($order->status, ['paid', 'refunded', 'void'])) {
-            return response()->json(['message' => 'Cannot void a paid, refunded, or already-voided order.'], 422);
+        if (in_array($order->status, ['refunded', 'void'], true)) {
+            return response()->json(['message' => 'Cannot void a refunded or already-voided order.'], 422);
+        }
+        if ($order->status === 'paid' && $order->refunds()->exists()) {
+            return response()->json(['message' => 'Cannot void after a refund. Guest already paid — use refund only for money returned.'], 422);
+        }
+        if (! in_array($order->status, ['open', 'billed', 'paid'], true)) {
+            return response()->json(['message' => 'This order cannot be voided.'], 422);
         }
 
         $this->assertBusinessDateOpenForPos($order, 'Cannot void orders from a closed business date.');
@@ -7786,63 +8005,81 @@ class PosController extends Controller
             'void_notes' => 'nullable|string|max:500',
         ]);
 
-        $blocked = false;
+        $wasPaid = $order->status === 'paid';
+        $folioDelta = 0.0;
+
+        $runVoid = function () use ($order, $validated, $wasPaid, &$folioDelta) {
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            if (! $order) {
+                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                    response()->json(['message' => 'Order not found.'], 404)
+                );
+            }
+            if ($wasPaid) {
+                if ($order->status !== 'paid') {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json(['message' => 'Order can no longer be voided (status changed).'], 422)
+                    );
+                }
+                if ($order->refunds()->exists()) {
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json(['message' => 'Cannot void after a refund.'], 422)
+                    );
+                }
+            } elseif (! in_array($order->status, ['open', 'billed'], true)) {
+                throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                    response()->json(['message' => 'Order can no longer be voided (status changed).'], 422)
+                );
+            }
+
+            $order->loadMissing('restaurant', 'payments');
+            $businessDate = $order->business_date?->format('Y-m-d')
+                ?? BusinessDateService::resolve($order->restaurant);
+
+            if ($wasPaid && $order->booking_id) {
+                $roomChargeTotal = (float) $order->payments->where('method', 'room_charge')->sum('amount');
+                if ($roomChargeTotal > 0.004) {
+                    $booking = Booking::lockForUpdate()->find($order->booking_id);
+                    if ($booking) {
+                        $booking->update([
+                            'extra_charges' => max(0, (float) $booking->extra_charges - $roomChargeTotal),
+                        ]);
+                        $folioDelta = -round($roomChargeTotal, 2);
+                    }
+                }
+            }
+
+            $order->update([
+                'status' => 'void',
+                'business_date' => $businessDate,
+                'closed_at' => $order->closed_at ?? now(),
+                'void_reason' => $validated['void_reason'],
+                'void_notes' => $validated['void_notes'] ?? null,
+                'voided_by' => auth()->id(),
+                'voided_at' => now(),
+            ]);
+
+            // Unpaid void frees the table. Paid settle already released it (cleaning);
+            // do not mark available — another guest may already be seated.
+            if (! $wasPaid && $order->table_id) {
+                RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
+            }
+
+            $this->cancelActiveItemsOnVoid($order, $validated['void_reason'], $validated['void_notes'] ?? null);
+
+            return $order->fresh();
+        };
+
         try {
-            DB::transaction(function () use ($order, $validated, &$blocked) {
-                $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
-                if (! in_array($order->status, ['open', 'billed'])) {
-                    $blocked = true;
-
-                    return;
-                }
-
-                $order->loadMissing('restaurant');
-                $businessDate = $order->business_date?->format('Y-m-d')
-                    ?? BusinessDateService::resolve($order->restaurant);
-
-                $order->update([
-                    'status' => 'void',
-                    'business_date' => $businessDate,
-                    'closed_at' => now(),
-                    'void_reason' => $validated['void_reason'],
-                    'void_notes' => $validated['void_notes'] ?? null,
-                    'voided_by' => auth()->id(),
-                    'voided_at' => now(),
-                ]);
-
-                if ($order->table_id) {
-                    RestaurantTable::where('id', $order->table_id)->update(['status' => 'available']);
-                }
-
-                $kitchenStore = $this->getKitchenForOrder($order);
-                $barLocationId = $order->restaurant?->bar_location_id;
-                $barStore = $barLocationId
-                    ? InventoryLocation::find($barLocationId)
-                    : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
-
-                // Don't reverse if kitchen started cooking (kot_started_at) — ingredients in use or used.
-                // System deducts at "Mark Ready", but physically they use ingredients when they start.
-                foreach ($order->items()->where('status', 'active')->with(['menuItem', 'combo.menuItems'])->get() as $item) {
-                    $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
-                    $cancelMeta = [
-                        'status' => 'cancelled',
-                        'cancel_reason' => $validated['void_reason'],
-                        'cancel_notes' => $validated['void_notes'] ?? null,
-                        'cancelled_by' => auth()->id(),
-                        'cancelled_at' => now(),
-                    ];
-                    if ($item->kot_started_at || $item->kitchen_ready_at) {
-                        $this->recordVoidWaste($order, $item, $targetStore, $validated['void_reason']);
-                        $item->update($cancelMeta);
-
-                        continue;
-                    }
-                    if ($item->inventory_deducted && $targetStore) {
-                        $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_void', (string) $order->id);
-                    }
-                    $item->update($cancelMeta);
-                }
-            });
+            if ($wasPaid) {
+                app(LedgerBackedTransaction::class)->run(
+                    mutate: $runVoid,
+                    postJournal: fn (PosOrder $voided) => app(PosSettlePoster::class)->reverse($voided, auth()->id()),
+                    journalRequired: fn (PosOrder $voided) => app(PosSettlePoster::class)->hasPostedSettleJournal($voided),
+                );
+            } else {
+                DB::transaction($runVoid);
+            }
         } catch (\Illuminate\Http\Exceptions\HttpResponseException $e) {
             throw $e;
         } catch (\Throwable $e) {
@@ -7853,17 +8090,55 @@ class PosController extends Controller
             ], 422);
         }
 
-        if ($blocked) {
-            return response()->json(['message' => 'Order can no longer be voided (status changed).'], 422);
-        }
-
         try {
             $this->broadcastPosOutletUpdate((int) $order->restaurant_id, (int) $order->id);
         } catch (\Throwable $e) {
             report($e);
         }
 
-        return response()->json(['message' => 'Order voided.']);
+        if ($wasPaid && abs($folioDelta) > 0.004 && $order->booking_id) {
+            $this->broadcastBookingFolioAfterPosRoomCharge(
+                (int) $order->booking_id,
+                $this->resolveRoomIdForPosBookingFolioBroadcast($order->fresh()),
+                $folioDelta,
+                'POS paid void — room charge reversed'
+            );
+        }
+
+        return response()->json(['message' => $wasPaid
+            ? 'Settled bill voided. Sale removed and unused stock put back.'
+            : 'Order voided.']);
+    }
+
+    /** Cancel active lines on void. Puts stock back unless kitchen already started. */
+    private function cancelActiveItemsOnVoid(PosOrder $order, string $voidReason, ?string $voidNotes): void
+    {
+        $kitchenStore = $this->getKitchenForOrder($order);
+        $barLocationId = $order->restaurant?->bar_location_id;
+        $barStore = $barLocationId
+            ? InventoryLocation::find($barLocationId)
+            : InventoryLocation::query()->where('type', 'bar_store')->where('department_id', $order->restaurant?->department_id)->first();
+
+        foreach ($order->items()->where('status', 'active')->with(['menuItem', 'combo.menuItems'])->get() as $item) {
+            $targetStore = $this->resolveInventoryDeductionStore($item->menuItem, $kitchenStore, $barStore, $order->restaurant);
+            $cancelMeta = [
+                'status' => 'cancelled',
+                'cancel_reason' => $voidReason,
+                'cancel_notes' => $voidNotes,
+                'cancelled_by' => auth()->id(),
+                'cancelled_at' => now(),
+            ];
+            if ($item->kot_started_at || $item->kitchen_ready_at) {
+                $this->recordVoidWaste($order, $item, $targetStore, $voidReason);
+                $item->update($cancelMeta);
+
+                continue;
+            }
+            if ($item->inventory_deducted && $targetStore) {
+                $this->reverseOrderItemInventory($item, $targetStore, 'pos_order_void', (string) $order->id);
+            }
+            $item->update($cancelMeta);
+        }
     }
 
     // ── Void item(s) (individual line cancellation) ─────────────────────────────
@@ -8189,21 +8464,7 @@ class PosController extends Controller
                 // Bar uses thermal BOT print; liquor must not appear on Kitchen Display
                 // (including All outlets).
                 $passesKdsStation = function ($item) use ($order) {
-                    if (! $this->orderItemRequiresKot($item, $order->restaurant)) {
-                        return false;
-                    }
-
-                    if ($item->combo_id) {
-                        return true;
-                    }
-
-                    $isBarLine = (bool) ($item->menuItem?->is_direct_sale ?? false)
-                        || (
-                            $item->menu_item_id
-                            && ! (bool) ($item->menuItem?->requires_production ?? true)
-                        );
-
-                    return ! $isBarLine;
+                    return $this->orderItemRequiresKot($item, $order->restaurant);
                 };
 
                 $allKotItems = $order->items->where('status', 'active')->where('kot_sent', true)
@@ -9590,14 +9851,9 @@ class PosController extends Controller
             'items.combo.menuItems.tax',
         ]);
         $activeItems = $order->items->where('status', 'active');
-        $grossSubtotal = $activeItems->sum(fn($i) => floatval($i->line_total));
-        $discountAmount = 0;
-        if ($order->discount_type === 'percent') {
-            $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
-        } elseif ($order->discount_type === 'flat') {
-            $discountAmount = min(floatval($order->discount_value ?? 0), $grossSubtotal);
-        }
-        $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
+        $foodDisc = $this->posFoodOnlyDiscount($activeItems, $order);
+        $discountAmount = $foodDisc['amount'];
+        $discountBase = $foodDisc['base'];
 
         $byLocalRate = [];
         $byIgstRate = [];
@@ -9607,7 +9863,11 @@ class PosController extends Controller
             if ($order->tax_exempt || $order->is_complimentary) {
                 continue;
             }
-            [$lineTax] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
+            [$lineTax] = $this->posLineTaxAndNetTaxable(
+                $i,
+                $order,
+                $this->posLineDiscountRatio($i, $order, $discountAmount, $discountBase),
+            );
             $r = round(floatval($i->tax_rate), 4);
             $kind = $this->posLineTaxSupplyKind($i, $order);
             if ($lineTax <= 0 && $r <= 0) {
@@ -9648,6 +9908,56 @@ class PosController extends Controller
         return [$gstLines, []];
     }
 
+    /**
+     * Commercial discount never applies to liquor (VAT / KGST). Complimentary still covers the whole bill.
+     *
+     * @param  iterable<PosOrderItem>  $activeItems
+     * @return array{amount: float, base: float}
+     */
+    private function posFoodOnlyDiscount(iterable $activeItems, PosOrder $order): array
+    {
+        $items = collect($activeItems);
+        $base = 0.0;
+        foreach ($items as $i) {
+            if ($this->posLineTakesCommercialDiscount($i, $order)) {
+                $base += floatval($i->line_total);
+            }
+        }
+
+        $amount = 0.0;
+        if ($order->discount_type === 'percent') {
+            $amount = $base * (floatval($order->discount_value ?? 0) / 100);
+        } elseif ($order->discount_type === 'flat') {
+            $amount = min((float) ($order->discount_value ?? 0), $base);
+        }
+
+        return ['amount' => $amount, 'base' => $base];
+    }
+
+    private function posLineTakesCommercialDiscount(PosOrderItem $i, PosOrder $order): bool
+    {
+        if ($order->is_complimentary) {
+            return true;
+        }
+        if (($i->tax_regime ?? '') === 'vat_liquor') {
+            return false;
+        }
+
+        return $this->posLineTaxSupplyKind($i, $order) !== 'vat';
+    }
+
+    private function posLineDiscountRatio(PosOrderItem $i, PosOrder $order, float $discountAmount, float $discountBase): float
+    {
+        if ($discountAmount <= 0.00001 || $discountBase <= 0.00001) {
+            return 0.0;
+        }
+        if (! $this->posLineTakesCommercialDiscount($i, $order)) {
+            return 0.0;
+        }
+
+        return $discountAmount / $discountBase;
+    }
+
     private function recalculate(PosOrder $order): void
     {
         $order->refresh();
@@ -9660,15 +9970,10 @@ class PosController extends Controller
         // 1. Calculate Gross Sum (Menu Prices * Qty)
         $grossSubtotal = $activeItems->sum(fn($i) => floatval($i->line_total));
 
-        // 2. Calculate Order-level Discount
-        $discountAmount = 0;
-        if ($order->discount_type === 'percent') {
-            $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
-        } elseif ($order->discount_type === 'flat') {
-            $discountAmount = min(floatval($order->discount_value ?? 0), $grossSubtotal);
-        }
-
-        $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
+        // 2. Commercial discount — food / GST only (liquor stays full price)
+        $foodDisc = $this->posFoodOnlyDiscount($activeItems, $order);
+        $discountAmount = $foodDisc['amount'];
+        $discountBase = $foodDisc['base'];
 
         // 3. Extract Tax and calculate true Net Subtotal; CGST/SGST/IGST/VAT buckets
         $totalTaxAmount = 0.0;
@@ -9696,7 +10001,11 @@ class PosController extends Controller
             if ($lineUpdates !== []) {
                 PosOrderItem::where('id', $i->id)->update($lineUpdates);
             }
-            [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
+            [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable(
+                $i,
+                $order,
+                $this->posLineDiscountRatio($i, $order, $discountAmount, $discountBase),
+            );
             $totalTaxAmount += $lineTax;
             $totalNetTaxable += $lineNet;
             $kind = $this->posLineTaxSupplyKind($i, $order);
@@ -9745,8 +10054,9 @@ class PosController extends Controller
         } else {
             // Gross Total = Items (After Discount) + Tax (if extra) + Extras
             // Note: If inclusive, Tax is already in effGross, but linePaySum calculation below is clearer
-            $billPaySum = $activeItems->sum(function ($i) use ($discountRatio, $order) {
-                $eff = floatval($i->line_total) * (1 - $discountRatio);
+            $billPaySum = $activeItems->sum(function ($i) use ($order, $discountAmount, $discountBase) {
+                $ratio = $this->posLineDiscountRatio($i, $order, $discountAmount, $discountBase);
+                $eff = floatval($i->line_total) * (1 - $ratio);
                 $r = floatval($i->tax_rate);
                 if ($this->linePriceTaxInclusive($i, $order)) {
                     return $eff;
@@ -9756,7 +10066,11 @@ class PosController extends Controller
             });
 
             if ($order->tax_exempt) {
-                $billPaySum = $activeItems->sum(fn ($i) => floatval($i->line_total) * (1 - $discountRatio));
+                $billPaySum = $activeItems->sum(function ($i) use ($order, $discountAmount, $discountBase) {
+                    $ratio = $this->posLineDiscountRatio($i, $order, $discountAmount, $discountBase);
+
+                    return floatval($i->line_total) * (1 - $ratio);
+                });
             }
 
             $finalTotal = round($billPaySum + $serviceChargeAmount + $tipAmount + $deliveryCharge + $packingCharge, 2);
@@ -9782,7 +10096,7 @@ class PosController extends Controller
     }
 
     /**
-     * Tax amount and net taxable base for one line after bill-level discount ratio (same rules as receipts).
+     * Tax amount and net taxable base for one line after that line's discount ratio.
      *
      * @return array{0: float, 1: float} [tax_amount, net_taxable]
      */
@@ -10007,9 +10321,11 @@ class PosController extends Controller
                 'price_tax_inclusive' => $i->price_tax_inclusive === null ? null : (bool) $i->price_tax_inclusive,
                 'line_total' => (float) $i->line_total,
                 'kot_sent' => $i->kot_sent,
+                'bot_sent' => (bool) ($i->bot_sent ?? false),
                 'kot_hold' => (bool) ($i->kot_hold ?? false),
                 'kot_batch' => $i->kot_batch,
                 'kot_sent_at' => $i->kot_sent_at?->toIso8601String(),
+                'bot_sent_at' => $i->bot_sent_at?->toIso8601String(),
                 'kot_started_at' => $i->kot_started_at?->toIso8601String(),
                 'ml_quantity' => $i->menu_item_variant_id && $i->variant ? (float) ($i->variant->ml_quantity ?? 1) : 1,
                 'requires_production' => (bool) ($i->menuItem?->requires_production ?? true),
@@ -10048,6 +10364,8 @@ class PosController extends Controller
                 'refunded_at' => $r->refunded_at,
             ]),
             'refunded_amount' => (float) $order->refunds->sum('amount'),
+            'payment_amended' => \Illuminate\Support\Facades\Schema::hasTable('pos_payment_amendments')
+                && $order->paymentAmendments()->exists(),
         ];
     }
 
@@ -10507,17 +10825,16 @@ class PosController extends Controller
 
         foreach ($orders as $order) {
             $activeItems = $order->items;
-            $grossSubtotal = $activeItems->sum(fn($i) => floatval($i->line_total));
-            $discountAmount = 0;
-            if ($order->discount_type === 'percent') {
-                $discountAmount = $grossSubtotal * (floatval($order->discount_value ?? 0) / 100);
-            } elseif ($order->discount_type === 'flat') {
-                $discountAmount = min(floatval($order->discount_value ?? 0), $grossSubtotal);
-            }
-            $discountRatio = $grossSubtotal > 0 ? ($discountAmount / $grossSubtotal) : 0;
+            $foodDisc = $this->posFoodOnlyDiscount($activeItems, $order);
+            $discountAmount = $foodDisc['amount'];
+            $discountBase = $foodDisc['base'];
 
             foreach ($activeItems as $i) {
-                [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable($i, $order, $discountRatio);
+                [$lineTax, $lineNet] = $this->posLineTaxAndNetTaxable(
+                    $i,
+                    $order,
+                    $this->posLineDiscountRatio($i, $order, $discountAmount, $discountBase),
+                );
                 $r = round((float) $i->tax_rate, 2);
                 $kind = $this->posLineTaxSupplyKind($i, $order);
 

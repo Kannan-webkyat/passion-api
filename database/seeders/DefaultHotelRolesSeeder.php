@@ -60,6 +60,7 @@ class DefaultHotelRolesSeeder extends Seeder
                 'pos-refund',
                 'pos-discount',
                 'pos-reopen-order',
+                'pos-amend-payment',
                 'report-sales',
                 'report-day-closings',
                 'report-refunds-adjustments',

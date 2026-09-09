@@ -44,6 +44,7 @@ return Application::configure(basePath: dirname(__DIR__))
             $sql = $e->getMessage();
             $message = match (true) {
                 str_contains($sql, 'pos_void_waste') => 'POS void waste table is missing. Run database migrations on the server.',
+                str_contains($sql, 'bot_sent') => 'BOT tracking columns are missing. Run database migrations (php artisan migrate).',
                 str_contains($sql, 'journal_entries'),
                 str_contains($sql, 'chart_of_accounts') => 'Accounting tables are missing or incomplete. Run database migrations on the server.',
                 str_contains($sql, "Column 'type' cannot be null") => 'Dietary type is required. Select Veg, Non-Veg, or another type.',

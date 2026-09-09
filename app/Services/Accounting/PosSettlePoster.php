@@ -4,7 +4,7 @@ namespace App\Services\Accounting;
 
 use App\Models\JournalEntry;
 use App\Models\PosOrder;
-use App\Models\PosPayment;
+use Illuminate\Support\Facades\Schema;
 
 final class PosSettlePoster
 {
@@ -87,6 +87,41 @@ final class PosSettlePoster
             sourceRef: 'POS #'.$order->id,
             memo: 'POS order settled',
             lines: $lines,
+            postedBy: $postedBy,
+        );
+    }
+
+    public function hasPostedSettleJournal(PosOrder $order): bool
+    {
+        if (! Schema::hasTable('journal_entries')) {
+            return false;
+        }
+
+        return JournalEntry::query()
+            ->where('source_type', 'pos_settle')
+            ->where('source_id', $order->id)
+            ->where('status', JournalEntry::STATUS_POSTED)
+            ->exists();
+    }
+
+    /** Reverse settle GL when a paid bill is voided (guest never paid). */
+    public function reverse(PosOrder $order, ?int $postedBy = null): ?JournalEntry
+    {
+        if (! $this->hasPostedSettleJournal($order)) {
+            return null;
+        }
+
+        $entryDate = ($order->business_date ?? $order->voided_at ?? $order->closed_at ?? now())->toDateString();
+
+        return $this->journal->reversePosted(
+            sourceType: 'pos_settle',
+            sourceId: (int) $order->id,
+            reversalSourceType: 'pos_settle_reversal',
+            reversalSourceId: (int) $order->id,
+            entryDate: $entryDate,
+            businessDate: $order->business_date?->toDateString(),
+            sourceRef: 'POS void #'.$order->id,
+            memo: 'POS settle reversed — void #'.$order->id,
             postedBy: $postedBy,
         );
     }

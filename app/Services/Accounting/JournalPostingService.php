@@ -179,6 +179,75 @@ final class JournalPostingService
     }
 
     /**
+     * Post the opposite of a posted journal (same-day void of a mistaken settle).
+     * Original stays posted; trial balance nets to zero via this reversal.
+     */
+    public function reversePosted(
+        string $sourceType,
+        int $sourceId,
+        string $reversalSourceType,
+        int $reversalSourceId,
+        string $entryDate,
+        ?string $businessDate,
+        ?string $sourceRef,
+        ?string $memo,
+        ?int $postedBy = null
+    ): ?JournalEntry {
+        $existingReversal = JournalEntry::query()
+            ->where('source_type', $reversalSourceType)
+            ->where('source_id', $reversalSourceId)
+            ->where('status', JournalEntry::STATUS_POSTED)
+            ->first();
+        if ($existingReversal) {
+            return $existingReversal->load('lines.account');
+        }
+
+        $original = JournalEntry::query()
+            ->where('source_type', $sourceType)
+            ->where('source_id', $sourceId)
+            ->where('status', JournalEntry::STATUS_POSTED)
+            ->with('lines.account')
+            ->first();
+        if (! $original) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($original->lines as $line) {
+            $code = trim((string) ($line->account?->code ?? ''));
+            if ($code === '') {
+                continue;
+            }
+            $debit = round((float) $line->debit, 2);
+            $credit = round((float) $line->credit, 2);
+            $lines[] = [
+                'account_code' => $code,
+                'debit' => $credit,
+                'credit' => $debit,
+                'tax_tag' => $line->tax_tag,
+                'meta' => $line->meta,
+            ];
+        }
+        if ($lines === []) {
+            return null;
+        }
+
+        $reversal = $this->post(
+            sourceType: $reversalSourceType,
+            sourceId: $reversalSourceId,
+            entryDate: $entryDate,
+            businessDate: $businessDate,
+            sourceRef: $sourceRef,
+            memo: $memo,
+            lines: $lines,
+            postedBy: $postedBy
+        );
+        $reversal->update(['reverses_entry_id' => $original->id]);
+
+        return $reversal->fresh(['lines.account']);
+    }
+
+    /**
      * @param  list<array{account_code: string, debit: float, credit: float, tax_tag: ?string, meta: ?array}>  $normalized
      * @return list<array{account_code: string, debit?: float, credit?: float, tax_tag?: ?string, meta?: ?array}>
      */

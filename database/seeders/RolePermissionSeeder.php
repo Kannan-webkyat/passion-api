@@ -85,6 +85,7 @@ class RolePermissionSeeder extends Seeder
             'pos-refund',
             'pos-discount',
             'pos-reopen-order',
+            'pos-amend-payment',
             'pos-day-closing',
             'pos-day-closing-override',
             'pos-day-closing-unlock',
@@ -129,6 +130,12 @@ class RolePermissionSeeder extends Seeder
         if ($admin) {
             $admin->givePermissionTo($split);
             $admin->givePermissionTo('pos-refund');
+            $admin->givePermissionTo('pos-amend-payment');
+        }
+
+        $outletManager = \Spatie\Permission\Models\Role::where('name', 'Outlet Manager')->where('guard_name', $guardName)->first();
+        if ($outletManager) {
+            $outletManager->givePermissionTo('pos-amend-payment');
         }
 
         // Roles that could void (previous refund gate) also get dedicated refund access
@@ -136,5 +143,8 @@ class RolePermissionSeeder extends Seeder
         foreach ($rolesWithVoid as $role) {
             $role->givePermissionTo('pos-refund');
         }
+
+        // pos-amend-payment is manager-only (Admin + Outlet Manager). Do not copy
+        // onto every role that can reopen — cashiers must not correct tender.
     }
 }

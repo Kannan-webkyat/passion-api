@@ -227,6 +227,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::post('orders/{order}/settle', [PosController::class, 'settle']);
         Route::post('orders/{order}/void', [PosController::class, 'void']);
         Route::post('orders/{order}/refund', [PosController::class, 'refund']);
+        Route::post('orders/{order}/amend-payments', [PosController::class, 'amendPayments']);
         Route::get('reports/sales', [PosController::class, 'salesReport']);
         Route::get('reports/dashboard-summary', [PosController::class, 'salesDashboardSummary']);
         Route::get('reports/mini-dash', [PosController::class, 'miniDash']);

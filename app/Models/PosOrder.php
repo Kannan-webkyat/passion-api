@@ -92,6 +92,11 @@ class PosOrder extends Model
         return $this->hasMany(PosOrderRefund::class, 'order_id');
     }
 
+    public function paymentAmendments()
+    {
+        return $this->hasMany(PosPaymentAmendment::class, 'pos_order_id');
+    }
+
     public function voidedBy()
     {
         return $this->belongsTo(User::class, 'voided_by');
