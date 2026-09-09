@@ -189,17 +189,28 @@ class PosController extends Controller
         );
     }
 
-    /** Kitchen KOT lines (bulk send, hold, fire). Never liquor / direct-sale. */
+    /** Kitchen KOT / KDS: "Send to KOT" on, and not liquor / direct-sale. */
     private function orderItemRequiresKot(PosOrderItem $item, ?RestaurantMaster $restaurant = null): bool
     {
         if ($item->status !== 'active') {
             return false;
         }
+        if ($this->orderItemIsBarTicketLine($item)) {
+            return false;
+        }
+        if ($item->combo_id) {
+            return true;
+        }
+        if ($item->menu_item_id) {
+            $item->loadMissing('menuItem');
 
-        return ! $this->orderItemIsBarTicketLine($item);
+            return (bool) ($item->menuItem?->requires_production ?? true);
+        }
+
+        return true;
     }
 
-    /** Bar BOT slip lines: liquor / direct-sale only. Plated food stays kitchen even if requires_production is false. */
+    /** Bar BOT: liquor / bottled direct-sale only. KOT-off food (boiled egg) is neither. */
     private function orderItemIsBarTicketLine(PosOrderItem $item): bool
     {
         if ($item->combo_id) {
