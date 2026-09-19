@@ -1055,7 +1055,8 @@ class InventoryReportController extends Controller
      * Excel-style output:
      * - Opening: bottles + loose litres (hotel liquor stock at main + bars)
      * - Receipts: GRN purchases into those locations on the selected date
-     * - Sales: bottles + pegs (1 peg = 60ml by default) — POS outs from bars
+     * - Sales: bottles + pegs (1 peg = 60ml by default) — net POS outs from bars
+     *   (POS Order − Inventory Reversal for voids / cancel / reduce)
      * - Closing: bottles + pegs derived so Opening + Receipts − Sales = Closing
      *   (paper-book view; real closing ml kept in debug)
      * - Total: Opening + Receipts in the same BTL/PEG units
@@ -1067,6 +1068,8 @@ class InventoryReportController extends Controller
      * - Full-bottle spirits on BTL: issue UOM = BTL, cf = 1 → bottle counts (bottle size from name)
      * - Beer: issue UOM = BTL/Pcs → bottle/piece counts (no pegs)
      * - POS generates inventory_transactions out rows with reason 'POS Order'
+     * - Void / cancel / reduce puts stock back as type in, reason 'Inventory Reversal'
+     *   → Sales = POS Order outs − Inventory Reversal ins (net sold that day)
      * - Supplier receipts post as reason 'GRN Receipt' at Main Store
      * - After ML→BTL conversion, older spirit POS lines may still store qty in ml (750/1500);
      *   those outbound aggregates are normalized to bottles when stock is BTL.
@@ -1199,6 +1202,7 @@ class InventoryReportController extends Controller
                 SUM(CASE WHEN type = 'out' THEN quantity ELSE 0 END) as out_qty,
                 SUM(CASE WHEN type = 'in' AND reason IN ({$purchaseReasonList}) THEN quantity ELSE 0 END) as purchase_in_qty,
                 SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty,
+                SUM(CASE WHEN type = 'in' AND reason = 'Inventory Reversal' THEN quantity ELSE 0 END) as pos_reversal_in_qty,
                 SUM(CASE WHEN type = 'in' AND reason = 'Opening Stock' THEN quantity ELSE 0 END) as opening_stock_in_qty,
                 SUM(CASE WHEN type = 'out' AND reason = 'Opening Stock' THEN quantity ELSE 0 END) as opening_stock_out_qty
             ")
@@ -1275,6 +1279,7 @@ class InventoryReportController extends Controller
             $dayOut = (float) ($day?->out_qty ?? 0);
             $purchaseIn = (float) ($day?->purchase_in_qty ?? 0);
             $posOut = (float) ($day?->pos_out_qty ?? 0);
+            $posReversalIn = (float) ($day?->pos_reversal_in_qty ?? 0);
             $openingStockIn = (float) ($day?->opening_stock_in_qty ?? 0);
             $openingStockOut = (float) ($day?->opening_stock_out_qty ?? 0);
 
@@ -1283,10 +1288,12 @@ class InventoryReportController extends Controller
             $afterOut = (float) ($after?->out_qty ?? 0);
 
             // BTL stock: only rewrite legacy ML-sized *outbound* aggregates (POS).
-            // Never touch GRN / opening / inbound — e.g. receipt of 900 bottles must stay 900.
+            // Also normalize void put-backs when those outs were stored in ml.
+            // Never touch GRN / opening / other inbound — e.g. receipt of 900 bottles must stay 900.
             if ($isBtl && ! $isMl && $bottleMl >= 100) {
                 $dayOut = $this->exciseNormalizeToBottles($dayOut, $bottleMl);
                 $posOut = $this->exciseNormalizeToBottles($posOut, $bottleMl);
+                $posReversalIn = $this->exciseNormalizeToBottles($posReversalIn, $bottleMl);
                 $afterOut = $this->exciseNormalizeToBottles($afterOut, $bottleMl);
             }
 
@@ -1303,12 +1310,16 @@ class InventoryReportController extends Controller
             $openingStockNet = $openingStockIn - $openingStockOut;
             $openingQty += $openingStockNet;
 
-            // Register columns: Receipts = GRN only; Sales = POS only.
+            // Register columns: Receipts = GRN only; Sales = net POS (outs − void reversals).
             // Other day movements (adjustments, wastage, transfers net, etc.) explain
             // Opening + Receipts − Sales ≠ Closing when present.
+            // Only reverse up to same-day POS outs so a next-day void put-back stays visible
+            // in other_day_net instead of vanishing or making sales negative.
             $receiptsQty = $purchaseIn;
-            $salesQty = $posOut;
-            $otherDayNet = ($dayIn - $purchaseIn - $openingStockIn) - ($dayOut - $posOut - $openingStockOut);
+            $reversalAppliedToSales = min($posOut, $posReversalIn);
+            $salesQty = $posOut - $reversalAppliedToSales;
+            $otherDayNet = ($dayIn - $purchaseIn - $openingStockIn - $reversalAppliedToSales)
+                - ($dayOut - $posOut - $openingStockOut);
             $totalQty = $openingQty + $receiptsQty;
 
             // Spirits-like (ml tracked): sealed bottles + open stock as pegs.
@@ -1367,7 +1378,9 @@ class InventoryReportController extends Controller
                         'opening_stock_rolled_into_opening_ml' => round($openingStockNet, 3),
                         'receipts_purchase_ml' => round($receiptsQty, 3),
                         'total_qty_ml' => round($totalQty, 3),
-                        'pos_out_ml' => round($salesQty, 3),
+                        'pos_out_ml' => round($posOut, 3),
+                        'pos_reversal_in_ml' => round($posReversalIn, 3),
+                        'sales_net_ml' => round($salesQty, 3),
                         'other_day_net_ml' => round($otherDayNet, 3),
                         'closing_qty_ml' => round($closingQty, 3),
                         'now_qty_ml' => round($nowQty, 3),
@@ -1405,7 +1418,9 @@ class InventoryReportController extends Controller
                     'opening_stock_rolled_into_opening' => round($openingStockNet, 3),
                     'receipts_purchase' => round($receiptsQty, 3),
                     'total_qty' => round($totalQty, 3),
-                    'pos_out' => round($salesQty, 3),
+                    'pos_out' => round($posOut, 3),
+                    'pos_reversal_in' => round($posReversalIn, 3),
+                    'sales_net' => round($salesQty, 3),
                     'other_day_net' => round($otherDayNet, 3),
                     'closing_qty' => round($closingQty, 3),
                     'closing_book' => $closingBottlesBook,
