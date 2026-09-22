@@ -268,6 +268,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::post('orders/{order}/mark-order-item-ready', [PosController::class, 'markOrderItemReady']);
         Route::post('orders/{order}/mark-order-item-served', [PosController::class, 'markOrderItemServed']);
         Route::post('orders/{order}/mark-batch-delivered', [PosController::class, 'markBatchDelivered']);
+        Route::post('orders/{order}/force-clear-kds', [PosController::class, 'forceClearKds']);
     });
 
     // F&B Module (Menu Configuration)

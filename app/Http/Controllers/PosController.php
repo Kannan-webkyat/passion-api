@@ -1062,7 +1062,7 @@ class PosController extends Controller
      */
     public function miniDash(Request $request)
     {
-        $this->checkAnyPermission(['pos-order', 'report-sales', 'pos-day-closing', 'view-dashboard']);
+        $this->checkAnyPermission(['pos-mini-dash', 'report-sales']);
 
         $validated = $request->validate([
             'date' => 'nullable|date',
@@ -4599,6 +4599,7 @@ class PosController extends Controller
             'page' => 'nullable|integer|min:1',
             'category' => 'nullable|string|in:all,kitchen,bar',
             'summarize' => 'nullable|boolean',
+            'search' => 'nullable|string|max:120',
         ]);
 
         $user = auth()->user();
@@ -4608,6 +4609,7 @@ class PosController extends Controller
         $restaurantId = $validated['restaurant_id'] ?? null;
         $category = $validated['category'] ?? 'all';
         $summarize = filter_var($validated['summarize'] ?? false, FILTER_VALIDATE_BOOLEAN);
+        $search = trim((string) ($validated['search'] ?? ''));
 
         if ($restaurantId) {
             $this->authorizeRestaurantId((int) $restaurantId);
@@ -4668,6 +4670,8 @@ class PosController extends Controller
         if ($summarize) {
             $rows = app(MenuPerformanceSummarizer::class)->summarize($rows);
         }
+
+        $rows = $this->filterMenuPerformanceRowsBySearch($rows, $search);
 
         $summary = $this->buildMenuPerformanceSummary($rid, $from, $to, $rows, $category);
 
@@ -4737,6 +4741,7 @@ class PosController extends Controller
         $restaurant = RestaurantMaster::findOrFail((int) $restaurantId);
         $category = $request->query('category', 'all');
         $summarize = filter_var($request->query('summarize', false), FILTER_VALIDATE_BOOLEAN);
+        $search = trim((string) $request->query('search', ''));
         $allRows = $this->buildMenuPerformanceRows((int) $restaurantId, $from, $to);
 
         $rows = $allRows;
@@ -4749,6 +4754,8 @@ class PosController extends Controller
         if ($summarize) {
             $rows = app(MenuPerformanceSummarizer::class)->summarize($rows);
         }
+
+        $rows = $this->filterMenuPerformanceRowsBySearch($rows, $search);
 
         $summary = $this->buildMenuPerformanceSummary((int) $restaurantId, $from, $to, $rows, $category);
         $export = $this->buildMenuPerformanceExportTable($rows, $summary, $summarize);
@@ -4884,6 +4891,34 @@ class PosController extends Controller
         ];
 
         return ['headers' => $headers, 'rows' => $data];
+    }
+
+    /**
+     * Filter menu-performance rows by item / combo / category / variant name (case-insensitive).
+     *
+     * @param  \Illuminate\Support\Collection<int, object>  $rows
+     * @return \Illuminate\Support\Collection<int, object>
+     */
+    private function filterMenuPerformanceRowsBySearch($rows, string $search)
+    {
+        $needle = trim($search);
+        if ($needle === '') {
+            return $rows;
+        }
+
+        $needle = mb_strtolower($needle);
+
+        return $rows->filter(function ($r) use ($needle) {
+            $hay = mb_strtolower(trim(implode(' ', array_filter([
+                (string) ($r->name ?? ''),
+                (string) ($r->variant_label ?? ''),
+                (string) ($r->category_name ?? ''),
+                (string) ($r->qty_display ?? ''),
+                (($r->row_kind ?? '') === 'combo' ? 'combo' : ''),
+            ]))));
+
+            return $hay !== '' && str_contains($hay, $needle);
+        })->values();
     }
 
     private function menuPerformanceExportItemLabel(object $r): string
@@ -9496,6 +9531,74 @@ class PosController extends Controller
             return response()->json([
                 'id' => $fresh->id,
                 'kitchen_status' => $fresh->kitchen_status,
+            ]);
+        });
+    }
+
+    /**
+     * Manager override: remove a stuck KDS ticket without open-day / stock gates.
+     * Kitchen timestamps only — does not post inventory (settle / prior Ready already handle stock).
+     */
+    public function forceClearKds(Request $request, PosOrder $order)
+    {
+        $this->checkPermission('pos-kds-force-clear');
+        $this->authorizeOrderAccess($order);
+        $validated = $request->validate([
+            'batch' => 'nullable|integer|min:1',
+        ]);
+        $batch = isset($validated['batch']) ? (int) $validated['batch'] : null;
+
+        return DB::transaction(function () use ($order, $batch) {
+            $order = PosOrder::where('id', $order->id)->lockForUpdate()->first();
+            $order->loadMissing('restaurant');
+            $now = now();
+
+            $query = $order->items()
+                ->where('kot_sent', true)
+                ->where('status', 'active')
+                ->with('menuItem');
+            if ($batch !== null) {
+                $query->where('kot_batch', $batch);
+            }
+
+            // Only kitchen-station lines (same filter as Kitchen Display) — do not touch bar/BOT.
+            $lines = $query->get()->filter(
+                fn ($item) => $this->orderItemRequiresKot($item, $order->restaurant)
+            )->values();
+
+            if ($lines->isEmpty()) {
+                return response()->json([
+                    'message' => $batch !== null
+                        ? 'No active kitchen KOT lines in this batch.'
+                        : 'No active kitchen KOT lines on this order.',
+                ], 422);
+            }
+
+            foreach ($lines as $line) {
+                $line->update([
+                    'kot_started_at' => $line->kot_started_at ?? $now,
+                    'kitchen_ready_at' => $line->kitchen_ready_at ?? $now,
+                    'kitchen_served_at' => $line->kitchen_served_at ?? $now,
+                ]);
+            }
+
+            $this->syncOrderKitchenStatusFromKotItems($order->fresh());
+
+            $fresh = $order->fresh();
+            Log::info('KDS force-clear', [
+                'order_id' => $fresh->id,
+                'batch' => $batch,
+                'user_id' => auth()->id(),
+                'kitchen_status' => $fresh->kitchen_status,
+                'cleared_item_ids' => $lines->pluck('id')->all(),
+            ]);
+            $this->broadcastPosOutletUpdate((int) $fresh->restaurant_id, (int) $fresh->id);
+
+            return response()->json([
+                'id' => $fresh->id,
+                'kitchen_status' => $fresh->kitchen_status,
+                'ready_batches' => $this->getReadyBatches($fresh->load('items')),
+                'served_batches' => $this->getServedBatches($fresh),
             ]);
         });
     }
