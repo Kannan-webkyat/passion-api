@@ -6751,6 +6751,101 @@ class PosController extends Controller
                 ->map(fn ($id) => (int) $id)
                 ->flip();
 
+            // Full-cart finished-good demand in ISSUE units (same as settle) so pegs cannot oversell.
+            $order->loadMissing('restaurant');
+            $kitchenStoreForShelf = $this->getKitchenForOrder($order);
+            $barStoreForShelf = $this->getBarLocationForRestaurant($order->restaurant);
+            $incomingShelfDemandByInvId = [];
+            $incomingShelfLabelByInvId = [];
+            $incomingShelfStoreByInvId = [];
+
+            foreach ($validated['items'] as $row) {
+                $rowsToCheck = [];
+                if (array_key_exists('menu_item_id', $row) && $row['menu_item_id'] !== null && $row['menu_item_id'] !== '') {
+                    $rowsToCheck[] = [
+                        'menu_item_id' => (int) $row['menu_item_id'],
+                        'quantity' => (float) $row['quantity'],
+                        'variant_id' => ! empty($row['menu_item_variant_id']) ? (int) $row['menu_item_variant_id'] : null,
+                    ];
+                } elseif (array_key_exists('combo_id', $row) && $row['combo_id'] !== null && $row['combo_id'] !== '') {
+                    $combo = \App\Models\Combo::with('menuItems')->find($row['combo_id']);
+                    if ($combo) {
+                        foreach ($combo->menuItems as $cmi) {
+                            $rowsToCheck[] = [
+                                'menu_item_id' => (int) $cmi->id,
+                                'quantity' => (float) $row['quantity'],
+                                'variant_id' => null,
+                            ];
+                        }
+                    }
+                }
+
+                foreach ($rowsToCheck as $check) {
+                    $mid = $check['menu_item_id'];
+                    $shelfItem = \App\Models\MenuItem::with('inventoryItem.issueUom')->find($mid);
+                    if (! $shelfItem || ! $shelfItem->inventory_item_id) {
+                        continue;
+                    }
+                    $usesBatchPool = $batchRecipeMenuIds->has($mid)
+                        || ($shelfItem->requires_production && ! $mtoMenuItemIds->has($mid));
+                    $isMtoTracked = $mtoMenuItemIds->has($mid);
+                    $enforceShelf = BomEnforcementConfig::isEnabled()
+                        || $this->posItemUsesDirectSaleStock($shelfItem, $usesBatchPool, $isMtoTracked);
+                    if (! $enforceShelf) {
+                        continue;
+                    }
+
+                    $variant = $check['variant_id']
+                        ? \App\Models\MenuItemVariant::find($check['variant_id'])
+                        : null;
+                    $issueQty = $this->finishedGoodIssueQtyFromParts(
+                        $shelfItem->inventoryItem,
+                        $check['quantity'],
+                        $variant ? (float) ($variant->ml_quantity ?? 0) : null,
+                        $variant ? (string) ($variant->size_label ?? '') : null,
+                        (bool) ($shelfItem->is_direct_sale ?? false),
+                        (bool) $check['variant_id'],
+                    );
+                    if ($issueQty <= 0) {
+                        continue;
+                    }
+
+                    $invId = (int) $shelfItem->inventory_item_id;
+                    $incomingShelfDemandByInvId[$invId] = ($incomingShelfDemandByInvId[$invId] ?? 0) + $issueQty;
+                    $incomingShelfLabelByInvId[$invId] = $shelfItem->name;
+                    if (! isset($incomingShelfStoreByInvId[$invId])) {
+                        $incomingShelfStoreByInvId[$invId] = $this->resolveInventoryDeductionStore(
+                            $shelfItem,
+                            $kitchenStoreForShelf,
+                            $barStoreForShelf,
+                            $order->restaurant
+                        );
+                    }
+                }
+            }
+
+            foreach ($incomingShelfDemandByInvId as $invId => $neededIssueQty) {
+                $targetStore = $incomingShelfStoreByInvId[$invId] ?? null;
+                $physical = $targetStore
+                    ? (float) (DB::table('inventory_item_locations')
+                        ->where('inventory_location_id', $targetStore->id)
+                        ->where('inventory_item_id', $invId)
+                        ->value('quantity') ?? 0)
+                    : 0.0;
+                $reservedOther = $targetStore
+                    ? $this->reservedFinishedGoodQtyAtLocation($invId, (int) $targetStore->id, (int) $order->id)
+                    : 0.0;
+                $available = max(0.0, $physical - $reservedOther);
+                if ($neededIssueQty > $available + 0.001) {
+                    $label = $incomingShelfLabelByInvId[$invId] ?? 'item';
+                    throw new \Illuminate\Http\Exceptions\HttpResponseException(
+                        response()->json([
+                            'message' => "Insufficient stock for \"{$label}\". Only {$available} available, requested {$neededIssueQty}.",
+                        ], 422)
+                    );
+                }
+            }
+
             foreach ($incomingByItem as $menuItemId => $incomingQty) {
                 $item = \App\Models\MenuItem::find($menuItemId);
                 if (! $item) {
@@ -6804,39 +6899,7 @@ class PosController extends Controller
                 );
 
                 if ($enforceShelfStock) {
-                    // Direct-sale / liquor — validate shelf stock (always when enforcement on).
-                    $order->loadMissing('restaurant');
-                    $kitchenStore = $this->getKitchenForOrder($order);
-                    $barStore = $this->getBarLocationForRestaurant($order->restaurant);
-                    $targetStore = $this->resolveInventoryDeductionStore(
-                        $item,
-                        $kitchenStore,
-                        $barStore,
-                        $order->restaurant
-                    );
-                    $physical = $targetStore
-                        ? (float) (DB::table('inventory_item_locations')
-                            ->where('inventory_location_id', $targetStore->id)
-                            ->where('inventory_item_id', $item->inventory_item_id)
-                            ->value('quantity') ?? 0)
-                        : 0.0;
-                    $reserved = $targetStore
-                        ? $this->reservedFinishedGoodQtyAtLocation(
-                            (int) $item->inventory_item_id,
-                            (int) $targetStore->id,
-                            (int) $order->id
-                        )
-                        : 0.0;
-                    $available = max(0, $physical - $reserved);
-
-                    if ($qtyToValidate > $available + 0.001) {
-                        throw new \Illuminate\Http\Exceptions\HttpResponseException(
-                            response()->json([
-                                'message' => "Insufficient stock for \"{$item->name}\". Only {$available} available, requested {$qtyToValidate}.",
-                            ], 422)
-                        );
-                    }
-
+                    // Full-cart issue-unit check already ran above.
                     continue;
                 }
 
@@ -8959,19 +9022,21 @@ class PosController extends Controller
     }
 
     /**
-     * Undeducted open/billed finished-good demand at one shelf.
-     * Only outlets whose kitchen_location_id or bar_location_id is this location —
-     * Brews open beer must not reserve Champions bar stock via a shared kitchen id.
-     * Peg-style variant ml (1–10) scales; bottle-size ml values are treated as 1×.
+     * Undeducted open/billed finished-good demand at one shelf, in inventory issue units
+     * (ml for spirits, bottles for beer/soda) — same math as settle deduction.
+     * Only outlets whose kitchen_location_id or bar_location_id is this location.
      */
     private function reservedFinishedGoodQtyAtLocation(
         int $inventoryItemId,
         int $locationId,
         ?int $excludeOrderId = null
     ): float {
-        $mlScale = 'CASE WHEN menu_item_variants.ml_quantity > 0 AND menu_item_variants.ml_quantity <= 10 THEN menu_item_variants.ml_quantity ELSE 1 END';
+        $invItem = InventoryItem::with('issueUom')->find($inventoryItemId);
+        if (! $invItem) {
+            return 0.0;
+        }
 
-        $itemQty = (float) (DB::table('pos_order_items')
+        $directLines = DB::table('pos_order_items')
             ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
             ->join('restaurant_masters', 'pos_orders.restaurant_id', '=', 'restaurant_masters.id')
             ->join('menu_items', 'pos_order_items.menu_item_id', '=', 'menu_items.id')
@@ -8979,16 +9044,22 @@ class PosController extends Controller
             ->whereIn('pos_orders.status', ['open', 'billed'])
             ->where('pos_order_items.status', 'active')
             ->where('pos_order_items.inventory_deducted', false)
+            ->whereNull('pos_order_items.combo_id')
             ->where('menu_items.inventory_item_id', $inventoryItemId)
             ->where(function ($q) use ($locationId) {
                 $q->where('restaurant_masters.bar_location_id', $locationId)
                     ->orWhere('restaurant_masters.kitchen_location_id', $locationId);
             })
             ->when($excludeOrderId, fn ($q) => $q->where('pos_order_items.order_id', '!=', $excludeOrderId))
-            ->selectRaw("SUM(pos_order_items.quantity * {$mlScale}) as total")
-            ->value('total') ?? 0);
+            ->get([
+                'pos_order_items.quantity',
+                'pos_order_items.menu_item_variant_id',
+                'menu_items.is_direct_sale as menu_is_direct_sale',
+                'menu_item_variants.ml_quantity as variant_ml',
+                'menu_item_variants.size_label as variant_label',
+            ]);
 
-        $comboQty = (float) (DB::table('pos_order_items')
+        $comboLines = DB::table('pos_order_items')
             ->join('pos_orders', 'pos_order_items.order_id', '=', 'pos_orders.id')
             ->join('restaurant_masters', 'pos_orders.restaurant_id', '=', 'restaurant_masters.id')
             ->join('combo_items', 'pos_order_items.combo_id', '=', 'combo_items.combo_id')
@@ -8996,15 +9067,43 @@ class PosController extends Controller
             ->whereIn('pos_orders.status', ['open', 'billed'])
             ->where('pos_order_items.status', 'active')
             ->where('pos_order_items.inventory_deducted', false)
+            ->whereNotNull('pos_order_items.combo_id')
             ->where('menu_items.inventory_item_id', $inventoryItemId)
             ->where(function ($q) use ($locationId) {
                 $q->where('restaurant_masters.bar_location_id', $locationId)
                     ->orWhere('restaurant_masters.kitchen_location_id', $locationId);
             })
             ->when($excludeOrderId, fn ($q) => $q->where('pos_order_items.order_id', '!=', $excludeOrderId))
-            ->sum('pos_order_items.quantity') ?? 0);
+            ->get([
+                'pos_order_items.quantity',
+                'menu_items.is_direct_sale as menu_is_direct_sale',
+            ]);
 
-        return max(0.0, $itemQty + $comboQty);
+        $total = 0.0;
+        foreach ($directLines as $line) {
+            $hasVariant = $line->menu_item_variant_id !== null && (int) $line->menu_item_variant_id > 0;
+            $total += $this->finishedGoodIssueQtyFromParts(
+                $invItem,
+                (float) $line->quantity,
+                $hasVariant && $line->variant_ml !== null ? (float) $line->variant_ml : null,
+                $hasVariant && $line->variant_label !== null ? (string) $line->variant_label : null,
+                (bool) ($line->menu_is_direct_sale ?? false),
+                $hasVariant,
+            );
+        }
+        foreach ($comboLines as $line) {
+            // Combos have no peg variant — count as whole issue units (bottle/ml cf rules).
+            $total += $this->finishedGoodIssueQtyFromParts(
+                $invItem,
+                (float) $line->quantity,
+                null,
+                null,
+                (bool) ($line->menu_is_direct_sale ?? false),
+                false,
+            );
+        }
+
+        return max(0.0, $total);
     }
 
     /**
@@ -9437,14 +9536,43 @@ class PosController extends Controller
     {
         $orderItem->loadMissing('variant');
         $menuItem->loadMissing('inventoryItem.issueUom');
-        $invItem = $menuItem->inventoryItem;
-        $qty = max(0.0, (float) ($quantityOverride ?? $orderItem->quantity));
-        $cf = max(1.0, (float) ($invItem?->conversion_factor ?? 1));
-        $ml = (float) ($orderItem->variant?->ml_quantity ?? 0);
-        $label = strtolower(trim((string) ($orderItem->variant?->size_label ?? '')));
-        $stockInMl = $this->inventoryIssueTrackedInMl($invItem);
 
-        if ($orderItem->menu_item_variant_id && $ml > 0) {
+        return $this->finishedGoodIssueQtyFromParts(
+            $menuItem->inventoryItem,
+            max(0.0, (float) ($quantityOverride ?? $orderItem->quantity)),
+            $orderItem->menu_item_variant_id ? (float) ($orderItem->variant?->ml_quantity ?? 0) : null,
+            $orderItem->menu_item_variant_id ? (string) ($orderItem->variant?->size_label ?? '') : null,
+            (bool) ($menuItem->is_direct_sale ?? false),
+            (bool) $orderItem->menu_item_variant_id,
+        );
+    }
+
+    /**
+     * Shared issue-unit math for settle deduction, cart reserve, and sync stock checks.
+     *
+     * @param  bool  $hasVariant  True when the POS line is tied to a menu_item_variant row.
+     */
+    private function finishedGoodIssueQtyFromParts(
+        ?InventoryItem $invItem,
+        float $qty,
+        ?float $variantMl,
+        ?string $variantLabel,
+        bool $menuIsDirectSale = false,
+        bool $hasVariant = false,
+    ): float {
+        $qty = max(0.0, $qty);
+        if ($qty <= 0.0 || ! $invItem) {
+            return 0.0;
+        }
+
+        $invItem->loadMissing('issueUom');
+        $cf = max(1.0, (float) ($invItem->conversion_factor ?? 1));
+        $ml = (float) ($variantMl ?? 0);
+        $label = strtolower(trim((string) ($variantLabel ?? '')));
+        $stockInMl = $this->inventoryIssueTrackedInMl($invItem);
+        $invDirectSale = (bool) ($invItem->is_direct_sale ?? false);
+
+        if ($hasVariant && $ml > 0) {
             // Misconfigured "full bottle" with ml_quantity=1 while stock is in ML (cf=375).
             if (
                 $stockInMl
@@ -9472,10 +9600,7 @@ class PosController extends Controller
         if (
             $stockInMl
             && $cf > 1.0001
-            && (
-                (bool) ($menuItem->is_direct_sale ?? false)
-                || (bool) ($invItem?->is_direct_sale ?? false)
-            )
+            && ($menuIsDirectSale || $invDirectSale)
         ) {
             return $cf * $qty;
         }
