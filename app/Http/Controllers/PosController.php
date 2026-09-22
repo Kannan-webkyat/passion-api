@@ -1477,7 +1477,9 @@ class PosController extends Controller
             SUM(CASE WHEN pos_order_items.status = \'cancelled\' THEN 1 ELSE 0 END) as cancelled_lines_count,
             COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.quantity ELSE 0 END), 0) as qty_total,
             COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.line_total ELSE 0 END), 0) as revenue_total,
-            COUNT(DISTINCT pos_orders.id) as bills_count'
+            COUNT(DISTINCT pos_orders.id) as bills_count,
+            COUNT(DISTINCT CASE WHEN COALESCE(pos_orders.is_complimentary, 0) = 1 THEN pos_orders.id END) as complimentary_bills,
+            COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' AND COALESCE(pos_orders.is_complimentary, 0) = 1 THEN pos_order_items.line_total ELSE 0 END), 0) as complimentary_line_gross'
         )->first();
 
         $vatFiling = $this->registerStatutoryFilingSummaryFromBase($base);
@@ -1491,6 +1493,8 @@ class PosController extends Controller
             'bar_turnover' => $kgstSummary['bar_turnover'],
             'kgst_tot_liability' => $kgstSummary['tot_liability'],
             'bills_count' => (int) ($agg->bills_count ?? 0),
+            'complimentary_bills' => (int) ($agg->complimentary_bills ?? 0),
+            'complimentary_line_gross' => (float) ($agg->complimentary_line_gross ?? 0),
         ];
 
         if ($groupBy === 'item' || $groupBy === 'invoice') {
@@ -1532,6 +1536,7 @@ class PosController extends Controller
                 'pos_orders.closed_at',
                 'pos_orders.voided_at',
                 'pos_orders.status as order_status',
+                'pos_orders.is_complimentary as is_complimentary',
                 'pos_orders.customer_name',
                 'pos_orders.customer_gstin',
                 'users.name as waiter_name',
@@ -1631,6 +1636,7 @@ class PosController extends Controller
                 'closed_at' => $row->closed_at,
                 'voided_at' => $row->voided_at,
                 'order_status' => (string) $row->order_status,
+                'is_complimentary' => (bool) ($row->is_complimentary ?? false),
                 'payment_methods' => $paymentByOrder[(int) $row->order_id] ?? '—',
                 'waiter' => $row->waiter_name ?? '—',
                 'cashier' => $row->cashier_name !== null && trim((string) $row->cashier_name) !== ''
@@ -1887,10 +1893,22 @@ class PosController extends Controller
             SUM(CASE WHEN pos_order_items.status = \'cancelled\' THEN 1 ELSE 0 END) as cancelled_lines_count,
             COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.quantity ELSE 0 END), 0) as qty_total,
             COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' THEN pos_order_items.line_total ELSE 0 END), 0) as revenue_total,
-            COUNT(DISTINCT pos_orders.id) as bills_count'
+            COUNT(DISTINCT pos_orders.id) as bills_count,
+            COUNT(DISTINCT CASE WHEN COALESCE(pos_orders.is_complimentary, 0) = 1 THEN pos_orders.id END) as complimentary_bills,
+            COALESCE(SUM(CASE WHEN pos_order_items.status = \'active\' AND COALESCE(pos_orders.is_complimentary, 0) = 1 THEN pos_order_items.line_total ELSE 0 END), 0) as complimentary_line_gross'
         )->first();
 
         $gstFiling = $this->registerStatutoryFilingSummaryFromBase($base);
+        $summaryBase = [
+            'lines_count' => (int) ($agg->lines_count ?? 0),
+            'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
+            'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
+            'qty_total' => (float) ($agg->qty_total ?? 0),
+            'revenue_total' => (float) ($agg->revenue_total ?? 0),
+            'bills_count' => (int) ($agg->bills_count ?? 0),
+            'complimentary_bills' => (int) ($agg->complimentary_bills ?? 0),
+            'complimentary_line_gross' => (float) ($agg->complimentary_line_gross ?? 0),
+        ];
 
         if ($groupBy === 'item' || $groupBy === 'invoice') {
             $perPage = 50;
@@ -1901,14 +1919,7 @@ class PosController extends Controller
             $slice = array_slice($allRows, ($page - 1) * $perPage, $perPage);
 
             return response()->json([
-                'summary' => [
-                    'lines_count' => (int) ($agg->lines_count ?? 0),
-                    'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
-                    'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
-                    'qty_total' => (float) ($agg->qty_total ?? 0),
-                    'revenue_total' => (float) ($agg->revenue_total ?? 0),
-                    'bills_count' => (int) ($agg->bills_count ?? 0),
-                ],
+                'summary' => $summaryBase,
                 'gst_filing' => $gstFiling,
                 'data' => $slice,
                 'meta' => [
@@ -1937,6 +1948,7 @@ class PosController extends Controller
                 'pos_orders.closed_at',
                 'pos_orders.voided_at',
                 'pos_orders.status as order_status',
+                'pos_orders.is_complimentary as is_complimentary',
                 'pos_orders.customer_name',
                 'pos_orders.customer_gstin',
                 'users.name as waiter_name',
@@ -2034,6 +2046,7 @@ class PosController extends Controller
                 'closed_at' => $row->closed_at,
                 'voided_at' => $row->voided_at,
                 'order_status' => (string) $row->order_status,
+                'is_complimentary' => (bool) ($row->is_complimentary ?? false),
                 'payment_methods' => $paymentByOrder[(int) $row->order_id] ?? '—',
                 'waiter' => $row->waiter_name ?? '—',
                 'cashier' => $row->cashier_name !== null && trim((string) $row->cashier_name) !== ''
@@ -2043,14 +2056,7 @@ class PosController extends Controller
         })->values();
 
         return response()->json([
-            'summary' => [
-                'lines_count' => (int) ($agg->lines_count ?? 0),
-                'active_lines_count' => (int) ($agg->active_lines_count ?? 0),
-                'cancelled_lines_count' => (int) ($agg->cancelled_lines_count ?? 0),
-                'qty_total' => (float) ($agg->qty_total ?? 0),
-                'revenue_total' => (float) ($agg->revenue_total ?? 0),
-                'bills_count' => (int) ($agg->bills_count ?? 0),
-            ],
+            'summary' => $summaryBase,
             'gst_filing' => $gstFiling,
             'data' => $data,
             'meta' => [
@@ -2972,6 +2978,7 @@ class PosController extends Controller
                             'tax_inclusives' => [],
                             'tax_pricings' => [],
                             'display_name' => $this->foodSalesItemDisplayName($poi),
+                            'is_complimentary' => false,
                         ];
                     } else {
                         $buckets[$k] = [
@@ -3007,6 +3014,7 @@ class PosController extends Controller
                             'closed_at' => $order->closed_at?->toDateTimeString(),
                             'voided_at' => $order->voided_at?->toDateTimeString(),
                             'order_status' => (string) $order->status,
+                            'is_complimentary' => (bool) ($order->is_complimentary ?? false),
                             'waiter' => $order->waiter?->name ?? '—',
                             'cashier' => $cashierByOrder[(int) $order->id] ?? '—',
                             'payment_methods' => $paymentByOrder[(int) $order->id] ?? '—',
@@ -3017,6 +3025,9 @@ class PosController extends Controller
                 $b = &$buckets[$k];
                 $b['lines_count']++;
                 $b['quantity'] += (float) $poi->quantity;
+                if ($groupBy === 'item' && ($order->is_complimentary ?? false)) {
+                    $b['is_complimentary'] = true;
+                }
                 $b['line_gross'] += $ex['line_gross'];
                 $b['line_discount'] += $ex['line_discount'];
                 $b['line_after_discount'] += $ex['line_after_discount'];
@@ -3091,6 +3102,7 @@ class PosController extends Controller
                     'closed_at' => null,
                     'voided_at' => null,
                     'order_status' => '—',
+                    'is_complimentary' => (bool) ($b['is_complimentary'] ?? false),
                     'waiter' => '—',
                     'cashier' => '—',
                     'payment_methods' => '—',
@@ -3135,6 +3147,7 @@ class PosController extends Controller
                     'closed_at' => $b['closed_at'],
                     'voided_at' => $b['voided_at'],
                     'order_status' => (string) $b['order_status'],
+                    'is_complimentary' => (bool) ($b['is_complimentary'] ?? false),
                     'waiter' => (string) $b['waiter'],
                     'cashier' => (string) $b['cashier'],
                     'payment_methods' => (string) ($b['payment_methods'] ?? '—'),
