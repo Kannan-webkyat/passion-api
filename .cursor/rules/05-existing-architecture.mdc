@@ -1,0 +1,66 @@
+---
+description: The request pipeline and layering that actually exist in passion-api, including absent layers and per-module variants
+alwaysApply: true
+---
+
+# 05 — Existing architecture (do not normalize)
+
+## Purpose
+Keep new code inside the layering this project already uses, and stop Cursor from introducing
+standard-Laravel layers the project does not have.
+
+## When it applies
+Any change to application code under `app/`, `routes/`, `database/` or `tests/`.
+
+## Existing project convention
+Request pipeline as it runs today:
+```
+routes/api.php (one auth:sanctum + active group, implicit model binding)
+  → Controller method
+      1. authorization helper (see 40-security)
+      2. optional $request->merge() normalization
+      3. $request->validate([...])            (no FormRequest)
+      4. business guards → return response()->json(['message' => ...], 422)
+      5. work: inline Eloquent / DB::table, static Support class, container Service,
+         or LedgerBackedTransaction::run(...)
+      6. side effects: rooms.status, room_status_blocks, broadcasts
+         (deferred in HK / booking-folio code, immediate in POS)
+  → response()->json(model | array)            (no JsonResource)
+```
+Absent layers: Form Requests, API Resources, Policies/Gates, Repositories, Actions, PHP `enum`,
+Jobs/queued work, Listeners, Notifications, Observers/model events, scheduler, API versioning,
+route-level `permission:` middleware.
+
+Where logic lives, per module (intentionally different):
+| Module | Pattern |
+|---|---|
+| Reservations | `BookingController` inline + static `app/Support/Booking*` helpers |
+| HK turnover | `HousekeepingController` inline, manual `DB::beginTransaction` |
+| Cleaning releases | thin `RoomCleaningReleaseController` → `RoomCleaningAvailabilityService` |
+| GRN / PO | thin controller → `GrnService` / `PurchaseOrderService` → `RuntimeException` → 422 |
+| POS | `PosController` inline + `LedgerBackedTransaction` + posters |
+| Master data | minimal CRUD, e.g. `PaymentMethodController`, `RoomTypeController` |
+
+## Required behavior
+- Put new behavior where that module already puts it. Extend the owning controller, Support
+  class or Service; follow the neighbouring method's style.
+- `app/Support/*` = static-method classes, almost all `final` (`RoomParInventoryContext` is not).
+  `BookingRoomTransferService` lives in `app/Support` and is static despite its name.
+  `app/Services/*` mixes container-resolved instances (`DayClosingService`, `GrnService`, posters)
+  and static helpers (`BusinessDateService::resolve()`, `PosOutletBroadcast`,
+  `InventoryAuthorization`). Match the file you are editing.
+- Reach dependencies the way the surrounding code does: constructor promotion
+  (`RoomCleaningReleaseController`), method injection (`AccountingController::trialBalance`), or
+  `app(X::class)` inline (`BookingController`, `PosController`, `GrnController`).
+
+## Things Cursor must NOT do
+- Do not create `app/Http/Requests`, `app/Http/Resources`, `app/Policies`, `app/Repositories`,
+  `app/Actions`, `app/Enums`, `app/Jobs`, `app/Listeners`, `app/Observers` or `app/Traits`.
+- Do not move logic between layers (e.g. extract booking logic into a new service) unless asked.
+- Do not unify the three authorization styles, the transaction styles, or the error-signaling
+  styles across modules.
+
+## Important examples from the existing codebase
+- Inline controller flow: `BookingController::storePayment()`.
+- Thin controller over service: `RoomCleaningReleaseController::store()` catching `InvalidArgumentException`.
+- Service + presenter: `GrnController` with `GrnService` and `GrnApiPresenter::withCostSnapshots()`.

@@ -1,0 +1,50 @@
+---
+description: What passion-api is, what it talks to, and the ground rules for changing it
+alwaysApply: true
+---
+
+# 00 — Project context: Passion Hotel PMS API
+
+## Purpose
+Orient every change in `passion-api` around what this codebase actually is, so Cursor does not
+apply generic Laravel assumptions.
+
+## When it applies
+Always, for any task in the `passion-api` repository.
+
+## Existing project convention
+- Laravel 12 (slim `bootstrap/app.php` skeleton, no `Http/Kernel.php`, no `Exceptions/Handler.php`), PHP `^8.2`.
+- Pure JSON API consumed by the separate Next.js app in `../passion`. Also serves DomPDF/CSV/XLSX
+  downloads and Laravel Reverb broadcasts.
+- **Single property.** There is no `hotel_id`, `property_id` or `tenant_id` anywhere. The only
+  partition is the F&B outlet (`restaurant_masters`), enforced in POS / day closing.
+- MySQL in real environments, `APP_TIMEZONE=Asia/Kolkata` ("hotel wall time").
+- Auth: Sanctum personal access tokens. Roles/permissions: Spatie, guard `web`.
+- Full factual reference: `PASSION_LARAVEL_ARCHITECTURE.md` (repo root). Section numbers there
+  match topics (e.g. §32 reservations, §33 availability, §34 check-in/out, §35 billing, §36 housekeeping).
+- Topic rules: `.cursor/rules/grn-frozen-cost.mdc` (GRN inventory cost is read-only from frozen
+  fields), `.cursor/rules/55-pos.mdc` (POS outlet access, business date, day closing).
+
+## Required behavior
+- Treat the existing implementation as the source of truth. Before changing a module, read the
+  controller / Support / Service class that already owns that behavior.
+- Keep diffs minimal and local to the module being changed.
+- Assume the frontend in `../passion` reads the current JSON keys, status strings, permission names
+  and broadcast event names. Changing any of them is a cross-repo change; call it out.
+- When unsure whether behavior is intentional, list it as a question instead of "fixing" it.
+
+## Things Cursor must NOT do
+- Do not add tenant/hotel/property scoping, columns or global scopes.
+- Do not refactor or reorganize files you were not asked to touch (e.g. splitting
+  `PosController`, `BookingController` or `HousekeepingController`).
+- Do not rename routes, JSON keys, permission names, status values or event names.
+- Do not "clean up" root-level artifacts (`debug_*.php`, `fix_plan.md`, `passion_db`, `scripts/*`)
+  or `app/Models/Role.php` / `Permission.php` without being asked.
+
+## Important examples from the existing codebase
+- Largest logic owners: `app/Http/Controllers/PosController.php`, `BookingController.php`,
+  `HousekeepingController.php`.
+- Shared reservation rules: `app/Support/BookingRoomAvailability.php`,
+  `app/Support/BookingPaymentLedger.php`, `app/Support/BookingCancellationPolicy.php`.
+- Accounting atomicity: `app/Services/Accounting/LedgerBackedTransaction.php`,
+  `app/Services/Accounting/JournalPostingService.php`.

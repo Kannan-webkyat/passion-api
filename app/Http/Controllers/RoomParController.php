@@ -714,18 +714,23 @@ class RoomParController extends Controller
             'lines.*.meta' => 'nullable|array',
         ]);
 
+        $name = trim((string) ($validated['name'] ?? 'Default')) ?: 'Default';
+        $duplicate = RoomParTemplate::where('room_type_id', $validated['room_type_id'])
+            ->where('name', $name)
+            ->exists();
+        if ($duplicate) {
+            return response()->json([
+                'message' => "A template named \"{$name}\" already exists for this room type. Open it to edit, or use a different name.",
+            ], 422);
+        }
+
         DB::beginTransaction();
         try {
             /** @var RoomParTemplate $template */
-            $template = RoomParTemplate::firstOrCreate(
-                [
-                    'room_type_id' => $validated['room_type_id'],
-                    'name' => trim((string) ($validated['name'] ?? 'Default')) ?: 'Default',
-                ],
-                []
-            );
-
-            $template->lines()->delete();
+            $template = RoomParTemplate::create([
+                'room_type_id' => $validated['room_type_id'],
+                'name' => $name,
+            ]);
 
             foreach (($validated['lines'] ?? []) as $ln) {
                 $qty = (float) ($ln['par_qty'] ?? 0);
@@ -761,6 +766,19 @@ class RoomParController extends Controller
             'lines.*.par_qty' => 'required|numeric|min:0',
             'lines.*.meta' => 'nullable|array',
         ]);
+
+        $newName = trim((string) ($validated['name'] ?? ''));
+        if ($newName !== '' && $newName !== $template->name) {
+            $duplicate = RoomParTemplate::where('room_type_id', $template->room_type_id)
+                ->where('name', $newName)
+                ->where('id', '!=', $template->id)
+                ->exists();
+            if ($duplicate) {
+                return response()->json([
+                    'message' => "A template named \"{$newName}\" already exists for this room type.",
+                ], 422);
+            }
+        }
 
         DB::beginTransaction();
         try {

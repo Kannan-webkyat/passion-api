@@ -440,10 +440,10 @@ class BookingController extends Controller
         // end is a date on the grid; include the whole end day by making end-exclusive = next day start
         $rangeEndAt = $end->copy()->addDay()->startOfDay();
 
-        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons', 'statusBlocks' => function ($q) use ($start, $end) {
+        $rooms = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons', 'statusBlocks' => function ($q) use ($start, $rangeEndAt) {
             // Active HK workflow blocks + closed checkout-inspection records (inactive but with snapshot)
             // so Room Chart / drawer still show "inspected" and inspection details after apply/clear.
-            $q->where('start_date', '<', $end->toDateString())
+            $q->where('start_date', '<', $rangeEndAt->toDateString())
                 ->where('end_date', '>', $start->toDateString())
                 ->where(function ($w) {
                     $w->where('is_active', true)
@@ -546,6 +546,7 @@ class BookingController extends Controller
             'occupied' => 0,
             'reserved' => 0,
             'maintenance' => 0,
+            'on_hold' => 0,
             'dirty' => 0,
             'cleaning' => 0,
             'available' => 0,
@@ -572,6 +573,8 @@ class BookingController extends Controller
                 $st = $room->statusBlocks->first()->status;
                 if ($st === 'maintenance') {
                     $counts['maintenance']++;
+                } elseif ($st === 'on_hold') {
+                    $counts['on_hold']++;
                 } elseif ($st === 'dirty') {
                     $counts['dirty']++;
                 } elseif ($st === 'cleaning') {
@@ -649,9 +652,10 @@ class BookingController extends Controller
         }
 
         $today = now()->toDateString();
+        $allowBeforeCheckoutDay = config('booking.allow_early_checkout_inspection') && ! app()->isProduction();
         foreach ($segments as $segment) {
             $checkoutDay = $this->bookingCheckoutCalendarDay($booking, $segment);
-            if ($checkoutDay !== $today) {
+            if ($checkoutDay !== $today && ! $allowBeforeCheckoutDay) {
                 return response()->json([
                     'message' => 'Checkout inspection can only be requested on the guest\'s checkout date.',
                     'checkout_date' => $checkoutDay,
@@ -862,10 +866,10 @@ class BookingController extends Controller
             $group = BookingGroup::create([
                 'name' => $request->input('group_name') ?: ('Group - ' . $validated['first_name'] . ' ' . $validated['last_name']),
                 'contact_person' => $validated['first_name'] . ' ' . $validated['last_name'],
-                'phone' => $validated['phone'],
-                'email' => $validated['email'],
+                'phone' => $validated['phone'] ?? null,
+                'email' => $validated['email'] ?? null,
                 'status' => 'confirmed',
-                'notes' => $validated['notes'],
+                'notes' => $validated['notes'] ?? null,
             ]);
             $bookingGroupId = $group->id;
         }
@@ -912,6 +916,10 @@ class BookingController extends Controller
             $bookingData['child_breakfast_count'] = $validated['child_breakfast_count'] ?? 0;
             $bookingData['rate_plan_id'] = $validated['rate_plan_id'] ?? null;
             $bookingData['booking_unit'] = $bookingUnit;
+            $bookingData['adults_count'] = (int) ($bookingData['adults_count'] ?? 1);
+            $bookingData['children_count'] = (int) ($bookingData['children_count'] ?? 0);
+            $bookingData['infants_count'] = (int) ($bookingData['infants_count'] ?? 0);
+            $bookingData['extra_beds_count'] = (int) ($bookingData['extra_beds_count'] ?? 0);
 
             // Audit Fix: Only apply group deposit/discount to the FIRST booking in the loop
             if ($isGroup && $index > 0) {
@@ -1386,6 +1394,7 @@ class BookingController extends Controller
             $today = Carbon::today()->toDateString();
             $currentCheckOut = $validated['check_out'] ?? $booking->check_out;
             if ($currentCheckOut > $today) {
+                $earlyCheckoutDate = $today;
                 $validated['check_out'] = $today;
                 // Keep segment/chart/HK on the same departure calendar day (date-only checkout).
                 $validated['check_out_at'] = Carbon::parse($today)->startOfDay()->addDay();
@@ -1451,6 +1460,10 @@ class BookingController extends Controller
             $co = $this->parseHotelDateTime((string) $validated['check_out']);
             $validated['check_out_at'] = $co;
             $validated['check_out'] = $co->toDateString();
+        }
+        // Early checkout keeps check_out_at at next midnight but the departure date is today.
+        if (isset($earlyCheckoutDate)) {
+            $validated['check_out'] = $earlyCheckoutDate;
         }
 
         // Dual-write: absolute deposit/refund patches become ledger postings (keeps history).
@@ -1867,7 +1880,7 @@ class BookingController extends Controller
         if ($rt && $time < $standardTime) {
             $policyTime = Carbon::createFromFormat('H:i', $standardTime);
             $actualTime = Carbon::createFromFormat('H:i', $time);
-            $totalGapMins = $policyTime->diffInMinutes($actualTime);
+            $totalGapMins = (int) $actualTime->diffInMinutes($policyTime);
 
             $bufferMins = (int) ($rt->early_check_in_buffer_minutes ?? 0);
             $billableMins = max(0, $totalGapMins - $bufferMins);
@@ -1890,11 +1903,22 @@ class BookingController extends Controller
             $auditMsg .= " Fee: ₹{$fee} {$units} applied.";
         }
 
+        // Re-setting the time replaces the fee charged by the previous "[Early CI: ...]" audit line.
+        $prevFee = 0.0;
+        foreach (array_reverse(preg_split('/\R/', (string) $booking->notes) ?: []) as $line) {
+            if (str_starts_with($line, '[Early CI:')) {
+                if (preg_match('/Fee: ₹([0-9]+(?:\.[0-9]+)?)/u', $line, $m)) {
+                    $prevFee = (float) $m[1];
+                }
+                break;
+            }
+        }
+
         $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
             'early_checkin_time' => $time,
-            'extra_charges' => (float) ($booking->extra_charges ?? 0) + $fee,
+            'extra_charges' => max(0.0, (float) ($booking->extra_charges ?? 0) + $fee - $prevFee),
             'notes' => $notes,
         ]);
 
@@ -1979,7 +2003,7 @@ class BookingController extends Controller
 
             $policyTime = Carbon::createFromFormat('H:i', $standardTime);
             $actualTime = Carbon::createFromFormat('H:i', $t);
-            $totalGapMins = $actualTime->diffInMinutes($policyTime);
+            $totalGapMins = (int) $policyTime->diffInMinutes($actualTime);
 
             $bufferMins = (int) ($rt->late_check_out_buffer_minutes ?? 0);
             $billableMins = max(0, $totalGapMins - $bufferMins);
@@ -2034,6 +2058,12 @@ class BookingController extends Controller
     public function extendReservation(Request $request, Booking $booking)
     {
         $this->allowReservationEdit();
+
+        if (in_array($booking->status, ['cancelled', 'checked_out'], true)) {
+            return response()->json([
+                'message' => 'Cannot extend a ' . str_replace('_', ' ', $booking->status) . ' reservation.',
+            ], 422);
+        }
 
         // IMPORTANT: for multi-segment (room-change) stays, extensions continue from the
         // LAST segment (latest check_out). Validate against that anchor — not only
@@ -2103,6 +2133,21 @@ class BookingController extends Controller
             ], 409);
         }
 
+        $maintenanceBlock = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+            ->where('is_active', true)
+            ->where('status', 'maintenance')
+            ->where('start_date', '<', $newCheckOut)
+            ->where('end_date', '>', $oldCheckOut)
+            ->first();
+
+        if ($maintenanceBlock) {
+            $roomNumber = Room::whereKey($roomId)->value('room_number');
+
+            return response()->json([
+                'message' => "Room #{$roomNumber} is under maintenance for the extension dates.",
+            ], 422);
+        }
+
         // Recalculate total price using rate plan if available (based on the room being extended)
         $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->find($roomId);
         $extraNights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
@@ -2124,12 +2169,12 @@ class BookingController extends Controller
 
             $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
 
-            // Breakfast inclusion
-            if ($ratePlan && $ratePlan->includes_breakfast) {
-                $adults = $booking->adults_count ?? 1;
-                $children = $booking->children_count ?? 0;
-                $nightlyRoomCost += ($rt->breakfast_price * $adults) + ($rt->child_breakfast_price * $children);
-            }
+            $nightlyRoomCost += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
+                $rt,
+                $ratePlan,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+            );
 
             $subtotalExtension = $nightlyRoomCost * $extraNights;
             $extraCost = $subtotalExtension;
@@ -2209,11 +2254,13 @@ class BookingController extends Controller
         $nightlyRoom = $basePrice + ($extraBedCost * $extraBeds);
 
         $mealSubtotal = 0.0;
-        if ($includeMeals && $ratePlan && $ratePlan->includes_breakfast) {
-            $adults = (int) ($booking->adults_count ?? 1);
-            $children = (int) ($booking->children_count ?? 0);
-            $nightlyMeal = ((float) ($rt->breakfast_price ?? 0) * $adults)
-                + ((float) ($rt->child_breakfast_price ?? 0) * $children);
+        if ($includeMeals) {
+            $nightlyMeal = BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
+                $rt,
+                $ratePlan,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+            );
             $mealSubtotal = round($nightlyMeal * $nights, 2);
         }
 
@@ -2318,11 +2365,14 @@ class BookingController extends Controller
             $recalcTax,
         );
 
+        // Split / transferred stays: only the last segment is re-priced; earlier segments keep their charges.
+        $otherSegmentsTotal = round((float) $booking->segments()->whereKeyNot($lastSegment->id)->sum('total_price'), 2);
+
         $originalRoomCharges = $recalcRoom
-            ? $originalBreakdown['total']
+            ? $otherSegmentsTotal + $originalBreakdown['total']
             : (float) ($booking->total_price ?? 0);
         $updatedRoomCharges = $recalcRoom
-            ? $updatedBreakdown['total']
+            ? $otherSegmentsTotal + $updatedBreakdown['total']
             : (float) ($booking->total_price ?? 0);
 
         $taxAdjustment = round($updatedBreakdown['tax'] - $originalBreakdown['tax'], 2);
@@ -2349,6 +2399,7 @@ class BookingController extends Controller
             'additional_due' => round($additionalDue, 2),
             'credit_balance' => round($creditBalance, 2),
             'deposit_amount' => round($deposit, 2),
+            'other_segments_total' => $otherSegmentsTotal,
             'original_breakdown' => $originalBreakdown,
             'updated_breakdown' => $updatedBreakdown,
         ]);
@@ -2430,10 +2481,12 @@ class BookingController extends Controller
 
         $segmentTotal = $newTotal;
         if ($booking->segments()->count() > 1) {
-            $segmentTotal = round(
-                (float) $lastSegment->total_price * ($preview['new_nights'] / max(1, $preview['original_nights'])),
-                2,
-            );
+            $segmentTotal = $request->boolean('recalculate_room_charges', true)
+                ? round((float) $preview['updated_breakdown']['total'], 2)
+                : round(
+                    (float) $lastSegment->total_price * ($preview['new_nights'] / max(1, $preview['original_nights'])),
+                    2,
+                );
         }
 
         $lastSegment->update([
@@ -2667,12 +2720,12 @@ class BookingController extends Controller
 
             $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
 
-            // Breakfast inclusion
-            if ($ratePlan && $ratePlan->includes_breakfast) {
-                $adults = $booking->adults_count ?? 1;
-                $children = $booking->children_count ?? 0;
-                $nightlyRoomCost += (($rt->breakfast_price ?? 0) * $adults) + (($rt->child_breakfast_price ?? 0) * $children);
-            }
+            $nightlyRoomCost += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
+                $rt,
+                $ratePlan,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+            );
 
             $segmentSubtotal = $nightlyRoomCost * $nights;
             $segmentTotal = $segmentSubtotal;
@@ -2680,6 +2733,20 @@ class BookingController extends Controller
             if ($rt->tax) {
                 $segmentTotal += $segmentSubtotal * ($rt->tax->rate / 100);
             }
+        }
+
+        try {
+            BookingRoomAvailability::assertSellable(
+                (int) $newRoomId,
+                Carbon::parse($oldCheckOut)->startOfDay(),
+                Carbon::parse($newCheckOut)->startOfDay(),
+                'confirmed',
+                (int) $booking->id,
+            );
+        } catch (ValidationException $e) {
+            return response()->json([
+                'message' => collect($e->errors())->flatten()->first() ?: 'Room is not available for the selected dates.',
+            ], 422);
         }
 
         // End the stay in the current room at $oldCheckOut (same as booking.check_out) before adding
@@ -3580,7 +3647,6 @@ class BookingController extends Controller
             $booking->segments()->update(['status' => 'cancelled']);
 
             $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
-            Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => 'available']);
 
             // Release any active holds tied to this booking window so inventory is sellable.
             RoomStatusBlock::query()
@@ -3590,6 +3656,23 @@ class BookingController extends Controller
                 ->where('start_date', '<', Carbon::parse($booking->check_out)->toDateString())
                 ->where('end_date', '>', Carbon::parse($booking->check_in)->toDateString())
                 ->update(['is_active' => false]);
+
+            // Leave rooms alone that another in-house guest or an active block (today) still owns.
+            $today = Carbon::today()->toDateString();
+            $roomsStillInUse = BookingSegment::query()
+                ->whereIn('room_id', $allRoomIds->all())
+                ->where('booking_id', '!=', $booking->id)
+                ->where('status', 'checked_in')
+                ->pluck('room_id')
+                ->merge(
+                    RoomStatusBlock::query()
+                        ->whereIn('room_id', $allRoomIds->all())
+                        ->where('is_active', true)
+                        ->where('start_date', '<=', $today)
+                        ->where('end_date', '>', $today)
+                        ->pluck('room_id')
+                );
+            Room::whereIn('id', $allRoomIds->diff($roomsStillInUse)->all(), 'and', false)->update(['status' => 'available']);
         });
 
         $booking->refresh()->load(['room.roomType', 'segments', 'bookingGroup']);

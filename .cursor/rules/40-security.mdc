@@ -1,0 +1,80 @@
+---
+description: Authentication, Spatie permission checks (three coexisting styles), permission registry, outlet and department scoping and account security in passion-api
+globs: app/Http/**/*.php, app/Services/InventoryAuthorization.php, routes/**/*.php, database/seeders/RolePermissionSeeder.php, database/seeders/DefaultHotelRolesSeeder.php, database/migrations/*permission*.php
+alwaysApply: false
+---
+
+# 40 — Security: auth and authorization
+
+## Purpose
+Keep every endpoint protected exactly the way its module already protects endpoints, and keep the
+permission registry consistent with the frontend's permission gating.
+
+## When it applies
+Adding/changing endpoints, permission checks, roles/permissions, auth/user code or broadcast channels.
+
+## Existing project convention
+- Auth: Sanctum Bearer tokens (`expiration => null`). `EnsureUserIsActive` (alias `active`) deletes the
+  current token and returns 403 for inactive users. `UserController::deactivateUser` deletes all tokens.
+- Spatie guard is always `web`. No Policies, Gates, `$this->authorize()` or route `permission:` middleware.
+- Authorization is **imperative, at the top of the action method**, in one of three styles. The style
+  is per controller — and `RoomParController` mixes two:
+
+| Style | Used by | Admin bypass |
+|---|---|---|
+| `AuthorizesSpatiePermissions::authorizePermissions([...anyOf])` + domain `allow*()` wrappers | `BookingController`, `RoomController`, `RoomTypeController`, `RoomStatusBlockController`, `Housekeeping*Controller`, `LaundryRequestController`, `RoomCleaningReleaseController` | **none** |
+| private `checkPermission(string)` copied per controller | `PosController`, `DayClosingController`, F&B and inventory masters, settings, users/roles, `RoomParController` (12 of its 13 checks) | `Admin` (some copies also `Super Admin`) |
+| `App\Services\InventoryAuthorization::assert*()` (static) | inventory, GRN, procurement, accounting | `Admin` + `Super Admin` |
+
+- Permission names are kebab-case `{module}-{action}` (`reservation-edit`, `housekeeping-assignable`,
+  `pos-settle`); legacy coarse names (`reservation`, `manage-rooms`, `view-rooms`) are still accepted
+  in any-of lists.
+- **Permission registry — two coexisting paths:**
+  - Canonical list `Database\Seeders\RolePermissionSeeder::permissionNames()`. `RoleController::permissions()`,
+    `store()` and `update()` call `ensureCanonicalPermissionsExist()`, which `firstOrCreate`s every name
+    (guard `web`) but grants nothing. HK and reservation permissions (`housekeeping-assignable`,
+    `housekeeping-cleaning-availability`, `reservation-hold-room`) exist only this way.
+  - Permission migrations, used for POS permissions that must exist **and be granted to roles** on
+    deploy: `add_pos_day_closing_unlock_permission`, `add_pos_business_date_override_permission`,
+    `add_pos_kds_force_clear_permission`, `add_pos_mini_dash_permission`.
+- Row scope:
+  - F&B outlet access via `PosController::userCanAccessRestaurant()` → `authorizeOrderAccess()` /
+    `authorizeRestaurantId()` (403 `'You do not have access to this outlet.'`); duplicated in
+    `DayClosingController`, `routes/channels.php`, `PropertyFinancialSummaryService`.
+  - HK room stock: `HousekeepingRoomStockController::requireHkDepartmentForUser()` requires membership
+    of department `HKP` (Admin exempt) → 403 `'Only Housekeeping department users can manage room stock.'`
+  - Bookings, rooms and other HK endpoints have no row scope.
+- HK assignment needs `housekeeping-assignable` (cleaning) or `housekeeping-checkout-inspection-assign`
+  (pending checkout inspection), and the assignee must be an active user in an active `is_housekeeping` department
+  (`assertCanAssignHousekeepingStaff()`, `assertCanAssignCheckoutInspection()`, `housekeepingAssignableStaff()`).
+- Guest ID images are stored on `config('guest_identity.disk')` (default `public`) and returned as paths /
+  public URLs in booking responses (see 30-api-contract).
+
+## Required behavior
+- New action method: call the **same helper the surrounding methods of that controller use**, at the top.
+  In `BookingController`, add/reuse an `allowReservation*()` wrapper; in HK controllers use
+  `allowHousekeepingOperate([self::HK_...])` / `allowHousekeepingViewSection()`; in `RoomParController`
+  use its `checkPermission` like its neighbours.
+- Copy the exact `checkPermission` variant of the controller you are in (null-user handling and
+  Super Admin bypass differ between copies).
+- New permission: always add it to `RolePermissionSeeder::permissionNames()`. Also ship a migration like
+  `2026_09_22_085400_add_pos_mini_dash_permission.php` (`firstOrCreate` with `guard_name => 'web'`,
+  grant to named roles if present, `forgetCachedPermissions()`, `down()` deletes it) when existing roles
+  must receive it on deploy — follow what sibling permissions of the same module do, and ask if unclear.
+- POS/day-closing endpoints taking an order/outlet must call `authorizeOrderAccess()` / `authorizeRestaurantId()` like siblings do.
+- HK room-stock endpoints keep `requireHkDepartmentForUser()`.
+- Only an `Admin` may assign/modify the `Admin` role; keep the last-active-admin guard in `UserController`.
+
+## Things Cursor must NOT do
+- Do not add an Admin bypass to `AuthorizesSpatiePermissions` or remove it from `checkPermission`.
+- Do not "unify" `RoomParController` onto one helper style as a side change.
+- Do not introduce Policies/Gates or route middleware for permissions.
+- Do not remove legacy permission names from any-of lists (existing roles rely on them).
+- Do not use the `sanctum` guard for roles/permissions.
+- Do not change how guest ID images are stored or exposed as a side change; raise it as a question.
+
+## Important examples from the existing codebase
+- `BookingController::allowReservationCreateSingle()` vs `allowReservationCreateGroup()` (decided from raw input before validation in `store()`).
+- `PosController::checkPermission()` (401 when no user; Admin + Super Admin bypass) vs `DepartmentController::checkPermission()` (Admin bypass; passes when user is null) vs `RoomParController::checkPermission()` (Admin bypass; passes when user is null).
+- `RoomStatusBlockController::authorizeStatusBlockStore()` — permission depends on block status.
+- `RoleController::ensureCanonicalPermissionsExist()` — runtime registry sync from the seeder list.

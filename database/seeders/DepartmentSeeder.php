@@ -11,7 +11,7 @@ class DepartmentSeeder extends Seeder
     {
         $depts = [
             ['name' => 'Food & Beverage',  'code' => 'FNB', 'is_active' => true],
-            ['name' => 'Housekeeping',     'code' => 'HKP', 'is_active' => true],
+            ['name' => 'Housekeeping',     'code' => 'HKP', 'is_active' => true, 'is_housekeeping' => true],
             ['name' => 'Engineering',      'code' => 'ENG', 'is_active' => true],
             ['name' => 'Front Office',     'code' => 'FRO', 'is_active' => true],
             ['name' => 'Administration',   'code' => 'ADM', 'is_active' => true],

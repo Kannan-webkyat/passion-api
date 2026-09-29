@@ -1,0 +1,70 @@
+---
+description: JSON response shapes, status codes, error body, pagination and broadcast contract the passion frontend depends on
+globs: app/Http/Controllers/**/*.php, app/Events/**/*.php, routes/api.php, routes/channels.php
+alwaysApply: false
+---
+
+# 30 — API contract (response shapes the frontend reads)
+
+## Purpose
+Preserve the response and event contract that `../passion` consumes. There is no envelope or
+resource layer, so the contract is whatever each endpoint returns today.
+
+## When it applies
+Adding or changing any endpoint response, status code, pagination, or broadcast payload.
+
+## Existing project convention
+- **No envelope.** Reads return the bare model/collection (`return response()->json($rooms)`).
+  Create returns the model with **201**. Most deletes return `response()->json(null, 204)`
+  (`BookingController::destroy()`, `RoomTypeController::destroy()`), but not all:
+  `UserController::destroy()` deactivates the user and returns 200 `{message}`;
+  `HousekeepingChecklistController::destroy()` returns 200 `{message: 'Checklist item deleted.'}`.
+- **Actions** return an object with named keys, usually including `message`:
+  `storePayment` → `{message, payment, booking, totals}` (201); `voidPayment` → `{message, payment, booking, totals}`.
+- **Errors**: `{"message": "..."}`. Framework `ValidationException` adds `errors`. 403 from
+  `abort()`, 404 model binding, 409 FK-blocked delete or room conflict on extend
+  (`{message, conflict, suggestion}`), 422 business rule, 503 when an optional
+  table/config is missing (`booking_payments`, QZ). `BookingController` flattens availability
+  `ValidationException`s into a single `{message}` 422. Any uncaught `QueryException` becomes a generic
+  422 `{message}` via `bootstrap/app.php`.
+- **Keys** are snake_case DB columns; relations serialize as snake_case (`room_type`, `segments`,
+  `booking_group`); computed attributes via `$appends` (`Booking::guest_name`, `RoomType::seasonal_prices`).
+- **Numbers**: arrays built by hand cast `(float)` + `round(..., 2)`; `decimal:2` casts serialize as strings.
+- **Pagination**: most lists are unpaginated `->get()` (sometimes `->limit(N)`). Where it exists it
+  varies: bare paginator (`StockMovementController::index`), flattened `{data, current_page, ...}`
+  (`PosController::orderHistory`), `{summary, data, meta}` (`PosController::salesReport`).
+- **No versioning.** Single `routes/api.php`.
+- **Broadcasts** (`routes/channels.php`): `private-reception.housekeeping` (`housekeeping.state_updated`,
+  `daily_cleaning.desk_notify`), `private-reception.booking.{id}` (`booking.charges_updated`),
+  `private-inventory.room-par` (`room_par.stock_updated`), `private-pos.restaurant.{id}` (`pos.updated`),
+  plus the default `App.Models.User.{id}` channel.
+- **Guest identity**: booking JSON includes `guest_identities` (stored image paths on
+  `config('guest_identity.disk')`, default `public`); create/update add `guest_identity_upload_meta`
+  with public `url`s (`GuestIdentityImageService`, `BookingController::bookingJsonWithGuestIdentityMeta()`).
+  The reception room chart reads these.
+- **Auth payload**: `/login` → `{token, user (departments, restaurants), permissions[], roles[]}`; `/me` same minus `token`.
+
+## Required behavior
+- For an existing endpoint, keep every existing key and type; add keys rather than rename/remove.
+- When changing an eager load (`with()`/`load()`) on an endpoint that returns a model, remember the
+  JSON keys change with it.
+- New endpoints: copy the shape and status codes of the closest sibling endpoint in the same
+  controller (including its delete style: 204 vs 200 `{message}`).
+- Business-rule failures return 422 `{message}` with a human-readable sentence (the UI shows it).
+- New broadcast events: `ShouldBroadcastNow`, `PrivateChannel`, snake_case `broadcastAs` of form
+  `domain.action`, plus an authorization entry in `routes/channels.php`.
+
+## Things Cursor must NOT do
+- Do not wrap responses in `{data: ...}` / `{success: true}` or introduce a response helper.
+- Do not add pagination to an endpoint that currently returns a full list (the UI expects an array).
+- Do not change status codes of existing endpoints (e.g. 201 → 200, 422 → 400, 200 → 204).
+- Do not remove `guest_identities` / `guest_identity_upload_meta` from booking responses or change
+  the storage disk as a side change; raise exposure concerns instead.
+- Do not rename channels, `broadcastAs` names or payload keys (`room_ids`, `reason`, `booking_id`,
+  `extra_charges`, `added_amount`, `badge`).
+
+## Important examples from the existing codebase
+- Action response with totals: `BookingController::storePayment()`.
+- Hand-shaped arrays: `LaundryRequestController::formatRequest()`, `PosController::formatOrder()`.
+- Presenter enrichment: `GrnApiPresenter::withCostSnapshots()`.
+- Model + extra meta: `BookingController::bookingJsonWithGuestIdentityMeta()`.

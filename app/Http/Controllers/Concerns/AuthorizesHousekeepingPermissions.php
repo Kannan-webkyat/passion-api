@@ -28,7 +28,8 @@ trait AuthorizesHousekeepingPermissions
     /** Permission to change staff assignment on room cleaning tasks. */
     public const HK_ASSIGNABLE = 'housekeeping-assignable';
 
-    public const HK_STAFF_ROLE = 'Housekeeping';
+    /** Permission to assign staff to pending checkout inspections (and act on any inspection). */
+    public const HK_CHECKOUT_ASSIGN = 'housekeeping-checkout-inspection-assign';
 
     /** @return array<int, string> */
     private static function granularHousekeepingMenuPermissions(): array
@@ -45,14 +46,16 @@ trait AuthorizesHousekeepingPermissions
     }
 
     /**
-     * Users who can be selected in room-cleaning assign dropdowns (Housekeeping role).
+     * Users who can be selected in room-cleaning assign dropdowns: active members of any active
+     * department flagged `is_housekeeping` in Department Master.
      *
      * @return Collection<int, User>
      */
     protected function housekeepingAssignableStaff(): Collection
     {
         return User::query()
-            ->whereHas('roles', fn ($q) => $q->where('name', self::HK_STAFF_ROLE))
+            ->where('is_active', true)
+            ->whereHas('departments', fn ($q) => $q->where('departments.is_housekeeping', true)->where('departments.is_active', true))
             ->orderBy('name')
             ->get(['id', 'name']);
     }
@@ -60,6 +63,11 @@ trait AuthorizesHousekeepingPermissions
     protected function assertCanAssignHousekeepingStaff(): void
     {
         $this->authorizePermissions([self::HK_ASSIGNABLE]);
+    }
+
+    protected function assertCanAssignCheckoutInspection(): void
+    {
+        $this->authorizePermissions([self::HK_CHECKOUT_ASSIGN]);
     }
 
     /**

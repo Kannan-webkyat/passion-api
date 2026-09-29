@@ -1,0 +1,79 @@
+---
+description: POS / F&B conventions in passion-api — outlet access, business date and day closing locks, ledger-backed settle, POS payments and immediate outlet broadcasts
+globs: app/Http/Controllers/PosController.php, app/Http/Controllers/DayClosingController.php, app/Http/Controllers/TableController.php, app/Services/BusinessDateService.php, app/Services/DayClosingService.php, app/Services/PosOutletBroadcast.php, app/Services/Accounting/Pos*.php, app/Models/Pos*.php, app/Models/RestaurantMaster.php, app/Events/PosRestaurantUpdated.php
+alwaysApply: false
+---
+
+# 55 — POS, business date and day closing
+
+## Purpose
+Keep POS changes inside the outlet, business-date and journal guarantees that `PosController` and
+`DayClosingController` already enforce.
+
+## When it applies
+Changing POS orders, items, KOT/BOT/kitchen actions, settle/refund/void/amend, tables, or day closing.
+
+## Existing project convention
+- **Outlet = `restaurant_masters`**, the only data partition. Access is decided by
+  `PosController::userCanAccessRestaurant()`: Admin/Super Admin → all; else the user's assigned
+  restaurants; else active outlets of the user's departments (or with no department).
+  Enforced with `authorizeOrderAccess($order)` / `authorizeRestaurantId($id)` → 403
+  `'You do not have access to this outlet.'`
+- **Authorization**: private `checkPermission()` / `checkAnyPermission()` / `checkKitchenActionPermission()`
+  (401 when no user; Admin + Super Admin bypass). Names include `pos-order`, `pos-settle`, `pos-discount`
+  (discount or complimentary on settle), `pos-void-item`, `pos-refund`, `pos-reopen-order`,
+  `pos-amend-payment`, `pos-kds-force-clear`, `pos-business-date-override`, `kitchen-production`, `report-*`.
+  `DayClosingController` has its own copy (`pos-day-closing`, `DayClosingService::PERMISSION_UNLOCK`,
+  `report-day-closings`).
+- **Business date**: `BusinessDateService::resolve($restaurant, $at)` applies the outlet's
+  `business_day_cutoff_time` (default `04:00:00`); before the cut-off belongs to the previous day.
+  Orders store `business_date`; legacy rows fall back to `opened_at` via `businessDateStringForOrder()`.
+  Opening an order on a non-automatic date needs `pos-business-date-override`.
+- **Closed-day lock**: mutating order actions call `assertBusinessDateOpenForPos($order, 'Cannot …')`
+  near the top; it throws `HttpResponseException` 422 when a `PosDayClosing` row exists for that
+  outlet/date, then calls `DayClosingService::assertSequentialOrAbort()` (422 unless prior days are
+  closed or the user has `pos-day-closing-override` / Admin / Super Admin).
+- **Day close** (`DayClosingController::close()`): one `DB::transaction` that `lockForUpdate()`s the
+  `RestaurantMaster` row (`openOrder()` takes the same lock), asserts sequential close, and aborts 422 on
+  open/billed orders, occupied/cleaning tables or inventory precheck failures; re-close updates the row
+  and appends a note. Returns 201 on first close, 200 on re-close.
+- **Settle** (`PosController::settle()`): guards → `app(LedgerBackedTransaction::class)->run(mutate:
+  …, postJournal: fn ($o) => app(PosSettlePoster::class)->postStrict($o, auth()->id()), journalRequired:
+  fn ($o) => app(PosSettlePoster::class)->isJournalRequired($o))`. Inside `mutate`: re-lock the order,
+  re-check status, replace `pos_payments` (method `in:cash,card,upi,room_charge`), close order, deduct
+  inventory, table → `cleaning`, and for `room_charge` require a `checked_in` booking and
+  `Booking::increment('extra_charges', …)`.
+- **Broadcasts**: outlet updates are **immediate** (`broadcastPosOutletUpdate()`,
+  `PosOutletBroadcast::forRestaurant()/forLocation()` → `PosRestaurantUpdated`), sometimes inside the
+  transaction closure (kitchen methods). Room-charge folio updates are deferred
+  (`broadcastBookingFolioAfterPosRoomCharge()` → `BookingChargesUpdated` + `HousekeepingStateUpdated`).
+- Kitchen methods use `return DB::transaction(function () { … })` and return early `{message}` 422
+  responses from inside the closure before any write.
+
+## Required behavior
+- Every new action on an order or outlet: permission helper, then `authorizeOrderAccess()` /
+  `authorizeRestaurantId()`, then (for mutations) `assertBusinessDateOpenForPos()` with a specific
+  `'Cannot …'` message, like its siblings.
+- Derive business dates with `BusinessDateService::resolve()` / `businessDateStringForOrder()`, never `today()`.
+- Money-moving POS actions post their journal inside the same transaction, in the style of the closest
+  sibling: settle → `LedgerBackedTransaction` + `PosSettlePoster::postStrict()`; amend payment →
+  `LedgerBackedTransaction` + `PosSettlePoster::repost()`; void of a paid order →
+  `LedgerBackedTransaction` + `PosSettlePoster::reverse()` (unpaid void → plain `DB::transaction`);
+  refund → plain `DB::transaction` calling `PosRefundPoster::post()`.
+- Room charges keep the checked-in booking guard and the deferred folio broadcast; a `room_charge`
+  refund lowers `bookings.extra_charges` under `lockForUpdate()` (`refund()`).
+- After a POS state change, call `broadcastPosOutletUpdate()` like the sibling action.
+
+## Things Cursor must NOT do
+- Do not bypass the closed-day lock or sequential-close check for new mutations.
+- Do not apply booking-ledger rules here: POS payments are `pos_payments` (settle replaces them),
+  not `booking_payments`, and POS methods include `room_charge`.
+- Do not defer POS outlet broadcasts or move kitchen-method returns as a side change.
+- Do not split `PosController` or move its helpers into services unless asked.
+
+## Important examples from the existing codebase
+- `PosController::openOrder()` — outlet check, business date + override permission, restaurant row lock.
+- `PosController::settle()` — full settle flow with `LedgerBackedTransaction` and `PosSettlePoster::postStrict()`.
+- `PosController::assertBusinessDateOpenForRestaurant()` / `assertBusinessDateOpenForPos()`.
+- `DayClosingController::close()` and `DayClosingService::assertSequentialOrAbort()`.
+- `tests/Unit/DayClosingServiceTest.php` — sequential-close rules.

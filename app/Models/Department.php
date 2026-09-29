@@ -6,7 +6,11 @@ use Illuminate\Database\Eloquent\Model;
 
 class Department extends Model
 {
-    protected $fillable = ['name', 'code', 'is_active'];
+    protected $fillable = ['name', 'code', 'is_active', 'is_housekeeping'];
+
+    protected $casts = [
+        'is_housekeeping' => 'boolean',
+    ];
 
     public function users()
     {

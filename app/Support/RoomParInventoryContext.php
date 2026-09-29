@@ -64,6 +64,7 @@ class RoomParInventoryContext
                     'item_name' => (string) ($ln->inventoryItem?->name ?? ''),
                     'sku' => (string) ($ln->inventoryItem?->sku ?? ''),
                     'is_direct_sale' => (bool) ($ln->inventoryItem?->is_direct_sale ?? false),
+                    'is_minibar' => (bool) ($ln->inventoryItem?->is_minibar ?? false),
                     'required_qty' => $requiredQty,
                     'par_qty' => $requiredQty,
                     'on_hand_qty' => $onHandQty,
@@ -84,13 +85,14 @@ class RoomParInventoryContext
         if (! empty($positiveIds)) {
             $items = InventoryItem::query()
                 ->whereIn('id', $positiveIds, 'and', false)
-                ->get(['id', 'name', 'sku', 'is_direct_sale']);
+                ->get(['id', 'name', 'sku', 'is_direct_sale', 'is_minibar']);
             foreach ($items as $it) {
                 $row = [
                     'inventory_item_id' => (int) $it->id,
                     'name' => (string) $it->name,
                     'sku' => (string) $it->sku,
                     'is_direct_sale' => (bool) $it->is_direct_sale,
+                    'is_minibar' => (bool) $it->is_minibar,
                     'qty' => (float) ($onHand[(int) $it->id] ?? 0),
                 ];
                 $onHandItems[] = $row;

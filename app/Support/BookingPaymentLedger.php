@@ -189,6 +189,15 @@ final class BookingPaymentLedger
             : null;
 
         return DB::transaction(function () use ($booking, $type, $attrs, $amount, $method, $paidAt, $billTotal) {
+            if ($type === BookingPayment::TYPE_REFUND) {
+                $netCollected = self::totals($booking)['net'];
+                if ($amount > $netCollected + 0.004) {
+                    throw ValidationException::withMessages([
+                        'amount' => 'Refund cannot exceed the net amount collected (₹' . number_format($netCollected, 2) . ').',
+                    ]);
+                }
+            }
+
             $row = BookingPayment::create([
                 'booking_id' => $booking->id,
                 'type' => $type,

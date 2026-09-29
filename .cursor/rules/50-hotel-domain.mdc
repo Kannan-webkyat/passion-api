@@ -1,0 +1,82 @@
+---
+description: Front-office and housekeeping invariants (segments, availability, check-in/out, folio, payments, journals, room/HK states) that passion-api code must keep true
+globs: app/Http/Controllers/Booking*.php, app/Http/Controllers/RoomController.php, app/Http/Controllers/RoomStatusBlockController.php, app/Http/Controllers/RoomCleaningReleaseController.php, app/Http/Controllers/Housekeeping*.php, app/Http/Controllers/LaundryRequestController.php, app/Support/Booking*.php, app/Support/Cleaning*.php, app/Services/RoomCleaningAvailabilityService.php, app/Services/Accounting/BookingCheckoutPoster.php, app/Services/Accounting/JournalPostingService.php, app/Services/Accounting/LedgerBackedTransaction.php, app/Models/Booking*.php, app/Models/Room.php, app/Models/RoomStatusBlock.php, app/Models/RoomCleaningRelease*.php
+alwaysApply: false
+---
+
+# 50 — Hotel PMS domain invariants
+
+## Purpose
+List what must stay true for reservations, rooms, folios and housekeeping. The step-by-step
+workflows are in the `reservation`, `room-availability`, `check-in-check-out`, `billing` and
+`housekeeping` skills.
+
+## When it applies
+Any change touching bookings, segments, rooms, room status blocks, payments, folio charges,
+checkout journals or housekeeping state.
+
+## Existing project convention
+- **Occupancy = `booking_segments`**, not `rooms.status`. `rooms.status` is a denormalized
+  "current" status set imperatively by booking/HK actions.
+- **Availability rules** live in `App\Support\BookingRoomAvailability`: segment datetime overlap
+  (`check_in_at < end AND check_out_at > start`) ignoring `INACTIVE_SEGMENT_STATUSES`
+  (`cancelled, checked_out, completed`); `HARD_BLOCK_STATUSES` (`maintenance, on_hold`) never
+  sellable; `CHECKIN_ONLY_BLOCK_STATUSES` (`dirty, cleaning`) block only `checked_in`; block
+  `end_date` is exclusive. Used by `BookingController::store()` / `update()`.
+- Other paths carry **their own** availability variants (keep them as they are unless asked):
+  `getAvailableRooms()` (same constants, Eloquent `whereDoesntHave`), `extendReservation()` /
+  `extendHourlyReservation()` (segment overlap → 409 with `conflict`, plus `on_hold` block → 422),
+  `BookingRoomTransferService::isRoomAvailable()` (any active block rejects), `splitStay()` (no check).
+- **Time**: `BookingController::parseHotelDateTime()` converts to `config('app.timezone')`
+  (Asia/Kolkata); day stays normalize `check_in_at`/`check_out_at` to midnight; DATE + DATETIME columns kept aligned.
+- **Status transitions**: check-in / check-out are `PATCH /bookings/{id}` with `status`; cancel is
+  only `POST /bookings/{id}/cancel`; room moves go through `POST /bookings/{id}/room-transfer`
+  (static `App\Support\BookingRoomTransferService`), `update()` rejects them without `force_room_change`.
+- **Room transfer** has two shapes in `BookingRoomTransferService::applyTransfer()`:
+  pre-arrival swap (`confirmed`, before arrival) updates the existing segment's room/price in place;
+  otherwise the active segment is closed as `checked_out` at the transfer time and a new segment is
+  created. `applyHousekeeping()` (source room `dirty` + dirty block) runs only for `checked_in` bookings.
+- **Checkout** atomically updates the booking and calls `BookingCheckoutPoster::post()` inside one
+  `DB::transaction`; journals are idempotent per `(source_type, source_id)` in `JournalPostingService::post()`.
+- **Payments** are recorded through `BookingPaymentLedger`: append-only rows, soft voids, `METHODS`
+  `cash, card, upi, bank_transfer`, `source` tags (`booking_create, deposit, checkout, manual,
+  legacy_patch, cancellation`), then `syncScalars()` updates `bookings.deposit_amount/refund_amount/payment_method/payment_status`.
+  Existing direct scalar writes, each part of its flow:
+  - `store()`: `forceFill(['deposit_amount' => 0])` right before seeding the ledger with `source => 'booking_create'`.
+  - `cancelReservation()`: writes `payment_status` (and `cancellation_fee_amount`); writes
+    `deposit_amount/refund_amount/refund_method/payment_method` itself only when the ledger is disabled.
+  - `update()`: converts patched `deposit_amount`/`refund_amount` into `legacy_patch` ledger rows and
+    unsets them, but passes a patched `payment_status` through unless a bill hint is present.
+  - When `BookingPaymentLedger::enabled()` is false, callers fall back to scalar writes or 503 (`storePayment()`).
+- **Folio charges**: increment `bookings.extra_charges` and/or create `booking_extra_charges` with
+  `source` (`inspection`, `laundry`); POS `room_charge` settles into `extra_charges`; broadcast `BookingChargesUpdated`.
+- **Audit**: bracketed lines appended to `bookings.notes`: `[Tag: ... by {Name} on Y-m-d H:i:s]`.
+- **HK states**: `room_status_blocks.status` `dirty → cleaning → inspected` (or `maintenance`),
+  `pending_inspection` for pre-checkout inspection; checkout creates a one-day `dirty` block
+  (`note => 'Auto: checkout'`). Release statuses on `RoomCleaningRelease::STATUS_*` with audit rows.
+
+## Required behavior
+- New code that creates a stay or changes its room/dates must check availability. Reuse
+  `BookingRoomAvailability::assertSellable()` (and `assertCapacity()` when occupancy changes), with
+  `withRoomLocks()` around creation, as `store()` does. When editing an existing path, keep that path's own check.
+- Any code writing booking status/dates must mirror them onto segments and the rooms of all segments.
+- Record new payments/refunds/adjustments via `BookingPaymentLedger::record*()`. Do not add new direct
+  writes to `deposit_amount`/`refund_amount` when the ledger is enabled; keep the existing ones listed above.
+- Anything that changes a booking's status to `checked_out` must post the checkout journal in the same transaction.
+- Append an audit line to `bookings.notes` for new booking-changing actions, same format.
+- Fire `HousekeepingStateUpdated::dispatchIfEnabled($roomIds, 'snake_reason')` after HK/room state changes.
+
+## Things Cursor must NOT do
+- Do not compute availability from `rooms.status`.
+- Do not delete or edit individual `booking_payments` rows in new code; void instead. (Existing:
+  `destroy()` hard-deletes the booking and the FK cascade removes its payments.)
+- Do not add a `/check-in` or `/check-out` endpoint or allow `status=cancelled` via PATCH.
+- Do not journal deposits at receipt or change what `BookingCheckoutPoster` posts without being asked.
+- Do not "fix" known gaps (`splitStay` lacks availability/transaction, post-transaction side effects in
+  `update()`, hard-delete in `destroy()`, client-supplied single-room day `total_price`) as a side change —
+  raise them instead.
+
+## Important examples from the existing codebase
+- `BookingController::update()` check-in/out guards and post-commit segment/room/HK sync.
+- `BookingController::cancelReservation()` with `BookingCancellationPolicy::preview()`.
+- `HousekeepingController::finish()`, `LaundryRequestController::postToRoom()`.

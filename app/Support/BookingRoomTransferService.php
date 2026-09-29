@@ -202,9 +202,8 @@ final class BookingRoomTransferService
             'transfer_at' => $transferAt,
             'segment_end' => $segmentEnd,
             'is_category_change' => $isCategoryChange,
-            'pre_arrival_swap' => $booking->status === 'confirmed' && now()->lt(
-                Carbon::parse($activeSegment->check_in_at ?? $activeSegment->check_in)
-            ),
+            // Not checked in yet: the transfer starts at the segment's own check-in, so move it instead of splitting.
+            'pre_arrival_swap' => $booking->status === 'confirmed',
         ];
     }
 
@@ -449,11 +448,14 @@ final class BookingRoomTransferService
             $room->roomType?->seasons ?? []
         );
 
-        if ($plan->includes_breakfast ?? false) {
-            $adults = (int) ($booking->adults_count ?? 1);
-            $children = (int) ($booking->children_count ?? 0);
+        if ($room->roomType) {
             $nights = max(1, $from->copy()->startOfDay()->diffInDays($to->copy()->startOfDay()));
-            $beforeTax += (($room->roomType?->breakfast_price ?? 0) * $adults + ($room->roomType?->child_breakfast_price ?? 0) * $children) * $nights;
+            $beforeTax += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
+                $room->roomType,
+                $plan,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+            ) * $nights;
         }
 
         $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);

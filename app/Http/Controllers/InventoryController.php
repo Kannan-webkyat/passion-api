@@ -131,6 +131,7 @@ class InventoryController extends Controller
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
             'is_alcohol' => 'nullable|boolean',
+            'is_minibar' => 'nullable|boolean',
             'is_cess_applicable' => 'nullable|boolean',
             'cess_amount' => 'nullable|numeric|min:0',
             'liquor_category' => 'nullable|string|max:32',
@@ -139,6 +140,7 @@ class InventoryController extends Controller
 
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        $validated['is_minibar'] = (bool) ($validated['is_minibar'] ?? false);
         $this->normalizeAlcoholLiquorFields($validated);
 
         try {
@@ -193,6 +195,7 @@ class InventoryController extends Controller
             'is_direct_sale' => 'nullable|boolean',
             'is_prepared_item' => 'nullable|boolean',
             'is_alcohol' => 'nullable|boolean',
+            'is_minibar' => 'nullable|boolean',
             'is_cess_applicable' => 'nullable|boolean',
             'cess_amount' => 'nullable|numeric|min:0',
             'liquor_category' => 'nullable|string|max:32',
@@ -201,6 +204,9 @@ class InventoryController extends Controller
 
         $validated['is_direct_sale'] = (bool) ($validated['is_direct_sale'] ?? false);
         $validated['is_prepared_item'] = (bool) ($validated['is_prepared_item'] ?? false);
+        if (array_key_exists('is_minibar', $validated)) {
+            $validated['is_minibar'] = (bool) $validated['is_minibar'];
+        }
         $this->normalizeAlcoholLiquorFields($validated);
 
         try {

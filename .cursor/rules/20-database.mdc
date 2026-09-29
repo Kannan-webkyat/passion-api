@@ -1,0 +1,72 @@
+---
+description: Migration, schema and Eloquent model conventions of passion-api (MySQL, ENUM statuses, no PHP enums)
+globs: database/**/*.php, app/Models/**/*.php
+alwaysApply: false
+---
+
+# 20 — Database, migrations and models
+
+## Purpose
+Keep schema changes deployable to the existing (possibly partially migrated) MySQL databases and
+keep models consistent with how they are written today.
+
+## When it applies
+Creating/editing migrations, seeders or Eloquent models, or adding columns/statuses.
+
+## Existing project convention
+- Migrations are **anonymous classes** (`return new class extends Migration`), named
+  `YYYY_MM_DD_HHMMSS_{verb}_{object}.php` (`create_*_table`, `add_*_to_*`, `widen_*`, `backfill_*`,
+  `add_*_permission`). Some (about a quarter) guard with `Schema::hasTable/hasColumn`; most do not.
+- Status vocabularies are **MySQL ENUM columns** changed by raw SQL, e.g.
+  `2026_05_08_170000_add_pending_inspection_to_rooms_status_enum.php`:
+  `DB::statement("ALTER TABLE rooms MODIFY COLUMN status ENUM(...)")`, with a `down()` restoring the
+  previous list. No PHP `enum`.
+- Data backfills ship as migrations. Permissions are registered two ways (seeder list + runtime
+  ensure, or a permission migration) — see 40-security.
+- Models: `$fillable` (never `$guarded`), `protected $casts` (only `User` uses `casts()`), no
+  `SoftDeletes`, no observers/`booted()`. Newer models have typed relations and `public const`
+  status/type lists (`BookingPayment::TYPE_*`, `RoomCleaningRelease::STATUS_*`, `GRN::STATUS_*`);
+  older ones (`Booking`, `Room`, `RoomStatusBlock`, `PosOrder`) use raw strings and untyped relations.
+- Stays store dates twice: `check_in`/`check_out` (DATE) **and** `check_in_at`/`check_out_at`
+  (DATETIME) on `bookings` and `booking_segments`.
+- Booking money is both scalars on `bookings` and ledger rows (`booking_payments`,
+  `booking_extra_charges`); `BookingPaymentLedger::syncScalars()` reconciles them. A few flows also
+  write the scalars directly (see 50-hotel-domain).
+- `booking_payments.booking_id` is `cascadeOnDelete()`: deleting a booking deletes its payment rows.
+- Inventory on-hand lives in pivot `inventory_item_locations` accessed via `DB::table()` +
+  `lockForUpdate()`; `InventoryItem::syncStoredCurrentStockFromLocations()` updates the denormalized total.
+  Stock moves write an `inventory_transactions` row with `type` `in|out` and a string
+  `reference_type` + `reference_id` (`grn`, `requisition`, `production`, `production_finished`,
+  `room_par`, `housekeeping`, `housekeeping_room_stock`, `daily_room_cleaning`, `checkout_inspection`).
+- App code tolerates missing tables/columns with runtime `Schema::hasTable/hasColumn`
+  (`BookingPaymentLedger::enabled()`, `LaundryRequestController::postToRoom()`).
+
+## Required behavior
+- Put a schema change in a new anonymous-class migration. The history fixes forward
+  (`2026_09_01_203000_fix_bevco_po_lines_non_taxable.php` after `2026_09_01_130000_bevco_po_non_taxable.php`).
+  Before editing an existing migration, ask: databases that already ran it will not re-run it.
+- To add a status value: widen the ENUM with raw `ALTER TABLE ... MODIFY COLUMN` (include the full
+  existing list + default, and a `down()` restoring the old list), then update every `in:` rule,
+  constant and switch that lists statuses.
+- Add `Schema::hasColumn`/`hasTable` guards when the change may run against databases in unknown state.
+- Keep both date and datetime columns in sync when writing stays.
+- When editing a model, keep its existing style (raw strings vs constants, typed vs untyped relations).
+  For a new model, copy the closest related model in the same module.
+- A new stock movement writes `inventory_item_locations` (locked), an `inventory_transactions` row with
+  a `reference_type` tag, and re-syncs the item total, like the existing writers.
+
+## Things Cursor must NOT do
+- Do not add PHP enums, `SoftDeletes`, `$guarded`, observers or model events.
+- Do not add `hotel_id`/`tenant_id` columns.
+- Do not drop the legacy DATE columns, the booking money scalars, or `inventory_items.current_stock`.
+- Do not rely on `php artisan migrate` running under SQLite: several migrations are MySQL-only.
+- Do not write/modify seeders as a substitute for a migration when production data must change.
+- Do not convert older models to constants/typed relations as a side change.
+
+## Important examples from the existing codebase
+- Plain column add: `2026_09_09_220000_add_bot_sent_to_pos_order_items.php`.
+- Fix-forward: `2026_09_01_203000_fix_bevco_po_lines_non_taxable.php`.
+- Permission migration: `2026_09_22_085400_add_pos_mini_dash_permission.php`.
+- Model with constants + typed relations: `app/Models/BookingPayment.php`, `app/Models/RoomCleaningRelease.php`.
+- Stock move with transaction log: `HousekeepingController::finish()` (`reference_type = 'housekeeping'`), `GrnService`.
+- Settings key/value with cache: `Setting::get()` / `Setting::set()` (stored `"0"` is a real value; booleans saved as `'1'/'0'`).

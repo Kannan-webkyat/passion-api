@@ -32,7 +32,7 @@ class RoomChartTestReservationsSeeder extends Seeder
         /** @var list<array<string, mixed>> $rows */
         $rows = [
             [
-                'room_number' => '103',
+                'room_number' => '207',
                 'first_name' => 'Ravi',
                 'last_name' => 'Checkout',
                 'phone' => '9876500999',
@@ -47,7 +47,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'notes' => '[Test seed] In-house — checkout today for testing.',
             ],
             [
-                'room_number' => '104',
+                'room_number' => '211',
                 'first_name' => 'Rahul',
                 'last_name' => 'Varma',
                 'phone' => '9876500104',
@@ -61,7 +61,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'notes' => '[Test seed] Confirmed arrival today.',
             ],
             [
-                'room_number' => '105',
+                'room_number' => '212',
                 'first_name' => 'Meera',
                 'last_name' => 'Nair',
                 'phone' => '9876500105',
@@ -76,7 +76,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'notes' => '[Test seed] Future stay — mid-week block.',
             ],
             [
-                'room_number' => '201',
+                'room_number' => '209',
                 'first_name' => 'Arjun',
                 'last_name' => 'Kapoor',
                 'phone' => '9876500201',
@@ -87,7 +87,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 6800,
                 'booking_source' => 'walk-in',
                 'adults_count' => 2,
-                'notes' => '[Test seed] Deluxe in-house — single night.',
+                'notes' => '[Test seed] Deluxe Room in-house — single night.',
             ],
             [
                 'room_number' => '202',
@@ -101,7 +101,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 0,
                 'booking_source' => 'website',
                 'adults_count' => 1,
-                'notes' => '[Test seed] Deluxe weekend reservation.',
+                'notes' => '[Test seed] Premium Deluxe weekend reservation.',
             ],
             [
                 'room_number' => '203',
@@ -115,7 +115,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 12000,
                 'booking_source' => 'corporate',
                 'adults_count' => 1,
-                'notes' => '[Test seed] Longer deluxe stay.',
+                'notes' => '[Test seed] Longer Premium Deluxe stay.',
             ],
             // ── Batch 2: fill empty rooms + back-to-back on partially booked rooms ──
             [
@@ -130,7 +130,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 2000,
                 'booking_source' => 'ota',
                 'adults_count' => 2,
-                'notes' => '[Test seed] Deluxe #204 — 3-night block.',
+                'notes' => '[Test seed] Premium Deluxe #204 — 3-night block.',
             ],
             [
                 'room_number' => '205',
@@ -144,7 +144,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 7500,
                 'booking_source' => 'walk-in',
                 'adults_count' => 1,
-                'notes' => '[Test seed] Deluxe #205 in-house.',
+                'notes' => '[Test seed] Premium Deluxe #205 in-house.',
             ],
             [
                 'room_number' => '206',
@@ -158,10 +158,10 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 0,
                 'booking_source' => 'website',
                 'adults_count' => 2,
-                'notes' => '[Test seed] Deluxe #206 — later week.',
+                'notes' => '[Test seed] Premium Deluxe #206 — later week.',
             ],
             [
-                'room_number' => '301',
+                'room_number' => '201',
                 'first_name' => 'Raj',
                 'last_name' => 'Family',
                 'phone' => '9876500301',
@@ -176,7 +176,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'notes' => '[Test seed] Family room — 2 adults + 2 children.',
             ],
             [
-                'room_number' => '302',
+                'room_number' => '208',
                 'first_name' => 'Anitha',
                 'last_name' => 'Joseph',
                 'phone' => '9876500302',
@@ -187,10 +187,10 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 0,
                 'booking_source' => 'ota',
                 'adults_count' => 3,
-                'notes' => '[Test seed] Family room — mid chart.',
+                'notes' => '[Test seed] Premium Deluxe #208 — mid chart.',
             ],
             [
-                'room_number' => '401',
+                'room_number' => '210',
                 'first_name' => 'Thomas',
                 'last_name' => 'George',
                 'phone' => '9876500401',
@@ -201,10 +201,10 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 9500,
                 'booking_source' => 'walk-in',
                 'adults_count' => 2,
-                'notes' => '[Test seed] Suite in-house — premium checkout test.',
+                'notes' => '[Test seed] Junior Suite in-house — premium checkout test.',
             ],
             [
-                'room_number' => '402',
+                'room_number' => '210',
                 'first_name' => 'Diana',
                 'last_name' => 'Smith',
                 'phone' => '9876500402',
@@ -215,10 +215,10 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 18000,
                 'booking_source' => 'corporate',
                 'adults_count' => 1,
-                'notes' => '[Test seed] Suite — corporate block.',
+                'notes' => '[Test seed] Junior Suite — corporate block.',
             ],
             [
-                'room_number' => '201',
+                'room_number' => '209',
                 'first_name' => 'Kiran',
                 'last_name' => 'Menon',
                 'phone' => '9876500211',
@@ -229,10 +229,10 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 0,
                 'booking_source' => 'ota',
                 'adults_count' => 1,
-                'notes' => '[Test seed] Back-to-back on #201 after Arjun.',
+                'notes' => '[Test seed] Back-to-back on #209 after Arjun.',
             ],
             [
-                'room_number' => '104',
+                'room_number' => '211',
                 'first_name' => 'Geeta',
                 'last_name' => 'Pillai',
                 'phone' => '9876500114',
@@ -243,10 +243,10 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 1000,
                 'booking_source' => 'phone',
                 'adults_count' => 2,
-                'notes' => '[Test seed] Back-to-back on #104 after Rahul.',
+                'notes' => '[Test seed] Back-to-back on #211 after Rahul.',
             ],
             [
-                'room_number' => '103',
+                'room_number' => '207',
                 'first_name' => 'Suresh',
                 'last_name' => 'Babu',
                 'phone' => '9876500113',
@@ -257,7 +257,7 @@ class RoomChartTestReservationsSeeder extends Seeder
                 'deposit_amount' => 0,
                 'booking_source' => 'website',
                 'adults_count' => 1,
-                'notes' => '[Test seed] Follows Priya on #103.',
+                'notes' => '[Test seed] Follows Ravi on #207.',
             ],
         ];
 
@@ -445,7 +445,7 @@ class RoomChartTestReservationsSeeder extends Seeder
         int &$skipped,
         bool $quiet = false,
     ): bool {
-        $room = Room::query()->with('roomType')->where('room_number', '=', (string) $row['room_number'])->first();
+        $room = Room::query()->with('roomType.tax')->where('room_number', '=', (string) $row['room_number'])->first();
         if (! $room) {
             if (! $quiet) {
                 $this->command?->warn("Room #{$row['room_number']} not found — skipped.");
@@ -468,16 +468,16 @@ class RoomChartTestReservationsSeeder extends Seeder
             return false;
         }
 
-        $ratePlanId = RatePlan::query()
+        $ratePlan = RatePlan::query()
             ->where('room_type_id', '=', (int) $room->room_type_id)
+            ->where('billing_unit', '=', 'day')
             ->orderBy('id')
-            ->value('id');
+            ->first(['id', 'base_price']);
+        $ratePlanId = $ratePlan?->id;
 
         $nights = max(1, (int) $row['nights']);
-        $base = str_contains(strtolower((string) ($room->roomType?->name ?? '')), 'suite') ? 4500
-            : (str_contains(strtolower((string) ($room->roomType?->name ?? '')), 'family') ? 3200
-                : (str_contains(strtolower((string) ($room->roomType?->name ?? '')), 'deluxe') ? 2800 : 2200));
-        $totalPrice = round($base * $nights * 1.12, 2);
+        $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
+        $totalPrice = round((float) ($ratePlan?->base_price ?? 0) * $nights * (1 + $taxRate / 100), 2);
 
         DB::transaction(function () use (
             $row,

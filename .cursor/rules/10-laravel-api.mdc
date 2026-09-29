@@ -1,0 +1,79 @@
+---
+description: Controller, route, validation, transaction, error-handling and broadcast conventions of passion-api
+globs: app/Http/**/*.php, app/Services/**/*.php, app/Support/**/*.php, app/Events/**/*.php, routes/**/*.php
+alwaysApply: false
+---
+
+# 10 — Laravel API code conventions
+
+## Purpose
+Make new controller/service code look like the existing code next to it.
+
+## When it applies
+Editing controllers, routes, Support/Service classes or broadcast events.
+
+## Existing project convention
+- **Routes**: everything except `POST /login` lives in the single
+  `Route::middleware(['auth:sanctum', 'active'])` group in `routes/api.php`, grouped by comments.
+  Resources use `Route::apiResource`. State changes are `POST /{resource}/{id}/{kebab-verb}`
+  (`/cancel`, `/start-cleaning`); previews are `POST /{resource}/{id}/preview-{verb}`.
+  Custom collection routes are declared **before** `apiResource` (see `bookings/guest-search`,
+  `bookings/chart`, `bookings/summary` before `Route::apiResource('bookings', ...)`).
+- **Controllers**: flat `App\Http\Controllers`, extend the empty `Controller`. Resource methods
+  `index/store/show/update/destroy`; actions are verbs (`cancelReservation`, `storePayment`,
+  `startCleaning`, `markInspected`); previews `preview{Action}`.
+- **Validation**: inline `$request->validate([...])`, pipe-string rules; arrays with `Rule::in()`
+  or `'in:'.implode(',', X::values())` when values come from constants. Some controllers keep rules
+  in private helpers (`GrnController::validatePayload()`, `HousekeepingChecklistController::validatePayload()`).
+  Normalize before validating with `$request->merge()` (`BookingController::update()` GSTIN / bill-to).
+- **Transactions**: `DB::transaction(fn)`, manual `DB::beginTransaction/commit/rollBack` (older HK,
+  inventory, room par), `LedgerBackedTransaction::run()` (state + mandatory journal),
+  `BookingRoomAvailability::withRoomLocks()` (booking create). `lockForUpdate()` on rows being mutated.
+- **Errors**: business failures return `response()->json(['message' => '...'], 422)`. Also in use:
+  `abort(403|404|422)`, `ValidationException::withMessages` (Support classes), `HttpResponseException`
+  thrown inside `LedgerBackedTransaction` / `DB::transaction` closures (`PosController::settle()`,
+  `assertBusinessDateOpenForRestaurant()`), service `RuntimeException`/`InvalidArgumentException` caught → 422.
+- **Responses returned from inside a transaction closure** also exist: the POS kitchen methods
+  (`return DB::transaction(function () { ... return response()->json([...], 422); ... })`) return early
+  responses before any write. A returned response commits the transaction.
+- **Global exception mapping** (`bootstrap/app.php`): `JournalPostingException` → 422 `{message}`;
+  **every** `QueryException` on `api/*` → 422 with a canned message (a few known missing-table/column
+  hints, otherwise `'Database error while saving. Contact support if this continues.'`).
+- **Broadcasts**: events are `ShouldBroadcastNow`, and every dispatch path returns early when
+  `config('broadcasting.default') === 'null'`. Two coexisting timings:
+  - Deferred with `App::terminating()`: housekeeping and booking-folio events
+    (`HousekeepingStateUpdated::dispatchIfEnabled()`, `RoomParStockUpdated::dispatchIfEnabled()`,
+    `LaundryRequestController::broadcastCharges()`, `PosController::broadcastBookingFolioAfterPosRoomCharge()`,
+    `BookingChargesUpdated` in `HousekeepingController`).
+  - Immediate `event(...)`: POS outlet updates (`PosController::broadcastPosOutletUpdate()`,
+    `App\Services\PosOutletBroadcast::forRestaurant()/forLocation()`, `TableController::update()`),
+    sometimes from inside the transaction closure (POS kitchen methods).
+
+## Required behavior
+- Use the error-signaling style already used in the method/class you edit.
+- A guard that runs inside a transaction **after** writes must throw (`HttpResponseException`,
+  `ValidationException`, `abort()`, domain exception) so the transaction rolls back. Returning a
+  response from inside the closure is only safe before any write, as the POS kitchen methods do.
+- Fire broadcasts with the timing the module already uses (deferred helper for HK/folio events,
+  immediate for POS outlet updates). Reuse `dispatchIfEnabled()` where the event has it.
+- Where a method needs a specific response for a DB error, catch the `QueryException` locally
+  (`RoomTypeController::destroy()`); otherwise the global handler returns a generic 422.
+- Follow the where-clause style of the surrounding method (the explicit 4-arg
+  `where('col', '=', $v, 'and')` and short `where('col', $v)` both exist).
+
+## Things Cursor must NOT do
+- Do not add Form Requests, `Validator::make`, or JsonResources.
+- Do not add route groups with new middleware, `/v1` prefixes, or `permission:` route middleware.
+- Do not turn existing 500-with-message catch blocks into something else as a side change.
+- Do not introduce queued jobs or listeners for side effects; the project does side effects inline.
+- Do not convert immediate POS broadcasts to deferred ones (or the reverse), or restructure the POS
+  kitchen methods' in-closure returns, as a side change.
+- Do not change the global `QueryException` mapping without being asked; the frontend shows its messages.
+
+## Important examples from the existing codebase
+- Early-return guards + inline validation: `BookingController::storePayment()`, `voidPayment()`.
+- Exception inside a ledger-backed transaction: `PosController::settle()` (`HttpResponseException` in `mutate`).
+- Service exception → 422: `GrnController` (`catch (\RuntimeException $e)`),
+  `RoomCleaningReleaseController::store()` (`catch (InvalidArgumentException $e)`).
+- Manual transaction style: `HousekeepingController::finish()`.
+- FK-protected delete → 409: `RoomTypeController::destroy()` (`errorInfo[1] == 1451`).

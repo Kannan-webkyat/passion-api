@@ -30,7 +30,9 @@ class InventoryCategoryController extends Controller
             'name' => 'required|string|max:255|unique:inventory_categories,name',
             'description' => 'nullable|string',
             'parent_id' => 'nullable|exists:inventory_categories,id',
+            'is_housekeeping' => 'nullable|boolean',
         ]);
+        $validated['is_housekeeping'] = (bool) ($validated['is_housekeeping'] ?? false);
         $cat = InventoryCategory::create($validated);
 
         return response()->json($cat, 201);
@@ -50,7 +52,11 @@ class InventoryCategoryController extends Controller
             'name' => 'required|string|max:255|unique:inventory_categories,name,'.$category->id,
             'description' => 'nullable|string',
             'parent_id' => 'nullable|exists:inventory_categories,id',
+            'is_housekeeping' => 'nullable|boolean',
         ]);
+        if (array_key_exists('is_housekeeping', $validated)) {
+            $validated['is_housekeeping'] = (bool) $validated['is_housekeeping'];
+        }
         $category->update($validated);
 
         return response()->json($category);

@@ -31,7 +31,7 @@ class BookingSeeder extends Seeder
             $scenarios = [
                 [
                     'label' => 'Checkout today',
-                    'room_number' => '103',
+                    'room_number' => '207',
                     'first_name' => 'Ravi',
                     'last_name' => 'Checkout',
                     'email' => 'checkout.test@example.com',
@@ -48,7 +48,7 @@ class BookingSeeder extends Seeder
                 ],
                 [
                     'label' => 'In-house multi-night',
-                    'room_number' => '101',
+                    'room_number' => '209',
                     'first_name' => 'Anurag',
                     'last_name' => 'Mohan',
                     'email' => 'anurag.test@example.com',
@@ -62,11 +62,11 @@ class BookingSeeder extends Seeder
                     'booking_source' => 'website',
                     'adults_count' => 2,
                     'children_count' => 1,
-                    'notes' => '[Seed] Standard in-house stay.',
+                    'notes' => '[Seed] Deluxe Room in-house stay.',
                 ],
                 [
                     'label' => 'Arrival today (confirmed)',
-                    'room_number' => '104',
+                    'room_number' => '211',
                     'first_name' => 'Rahul',
                     'last_name' => 'Varma',
                     'email' => 'rahul.test@example.com',
@@ -82,7 +82,7 @@ class BookingSeeder extends Seeder
                 ],
                 [
                     'label' => 'Future reservation',
-                    'room_number' => '105',
+                    'room_number' => '212',
                     'first_name' => 'Meera',
                     'last_name' => 'Nair',
                     'email' => 'meera.test@example.com',
@@ -99,7 +99,7 @@ class BookingSeeder extends Seeder
                 ],
                 [
                     'label' => 'Checked out yesterday',
-                    'room_number' => '201',
+                    'room_number' => '204',
                     'first_name' => 'Bob',
                     'last_name' => 'Wilson',
                     'email' => 'bob.test@example.com',
@@ -116,7 +116,7 @@ class BookingSeeder extends Seeder
                 ],
                 [
                     'label' => 'Arrival tomorrow',
-                    'room_number' => '102',
+                    'room_number' => '205',
                     'first_name' => 'Alice',
                     'last_name' => 'Smith',
                     'email' => 'alice.test@example.com',
@@ -166,8 +166,8 @@ class BookingSeeder extends Seeder
                     'notes' => '[Seed] Three adults — ID upload / KYC testing.',
                 ],
                 [
-                    'label' => 'Family suite future',
-                    'room_number' => '301',
+                    'label' => 'Family room future',
+                    'room_number' => '201',
                     'first_name' => 'Sanjay',
                     'last_name' => 'Kapoor',
                     'email' => 'sanjay.test@example.com',
@@ -184,8 +184,8 @@ class BookingSeeder extends Seeder
                     'notes' => '[Seed] Family room — weekend ahead.',
                 ],
                 [
-                    'label' => 'Deluxe corporate future',
-                    'room_number' => '302',
+                    'label' => 'Junior Suite corporate future',
+                    'room_number' => '210',
                     'first_name' => 'Vikram',
                     'last_name' => 'Reddy',
                     'email' => 'vikram.test@example.com',
@@ -215,7 +215,7 @@ class BookingSeeder extends Seeder
      */
     private function createBookingWithSegment(array $row, Carbon $today, ?int $adminId): void
     {
-        $room = Room::query()->with('roomType')->where('room_number', '=', (string) $row['room_number'])->first();
+        $room = Room::query()->with('roomType.tax')->where('room_number', '=', (string) $row['room_number'])->first();
         if (! $room) {
             $this->command?->warn("Room #{$row['room_number']} not found — skipped \"{$row['label']}\".");
 
@@ -226,15 +226,15 @@ class BookingSeeder extends Seeder
         $nights = max(1, (int) $row['nights']);
         $checkOut = $checkIn->copy()->addDays($nights)->startOfDay();
 
-        $ratePlanId = RatePlan::query()
+        $ratePlan = RatePlan::query()
             ->where('room_type_id', '=', (int) $room->room_type_id)
+            ->where('billing_unit', '=', 'day')
             ->orderBy('id')
-            ->value('id');
+            ->first(['id', 'base_price']);
+        $ratePlanId = $ratePlan?->id;
 
-        $base = str_contains(strtolower((string) ($room->roomType?->name ?? '')), 'suite') ? 4500
-            : (str_contains(strtolower((string) ($room->roomType?->name ?? '')), 'family') ? 3200
-                : (str_contains(strtolower((string) ($room->roomType?->name ?? '')), 'deluxe') ? 2800 : 2200));
-        $totalPrice = round($base * $nights * 1.12, 2);
+        $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
+        $totalPrice = round((float) ($ratePlan?->base_price ?? 0) * $nights * (1 + $taxRate / 100), 2);
 
         $bookingStatus = (string) ($row['status'] ?? 'confirmed');
         $segmentStatus = match ($bookingStatus) {

@@ -45,6 +45,7 @@ class RolePermissionSeeder extends Seeder
             'housekeeping-checklist-master',
             'housekeeping-cleaning-availability',
             'housekeeping-assignable',
+            'housekeeping-checkout-inspection-assign',
             // Hospitality / rooms reports
             'report-rooms-performance',
             'report-front-office-flash',

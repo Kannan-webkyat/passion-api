@@ -25,6 +25,7 @@ class InventoryItem extends Model
         'is_direct_sale',
         'is_prepared_item',
         'is_alcohol',
+        'is_minibar',
         'is_cess_applicable',
         'cess_amount',
         'liquor_category',
@@ -41,6 +42,7 @@ class InventoryItem extends Model
         'is_direct_sale' => 'boolean',
         'is_prepared_item' => 'boolean',
         'is_alcohol' => 'boolean',
+        'is_minibar' => 'boolean',
         'is_cess_applicable' => 'boolean',
         'cess_amount' => 'float',
     ];

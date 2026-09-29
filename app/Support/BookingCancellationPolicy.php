@@ -90,11 +90,12 @@ final class BookingCancellationPolicy
             return Carbon::parse($booking->check_in_at);
         }
 
-        if ($booking->check_in_at) {
+        // Day stays store check_in_at at midnight; only an explicit arrival time overrides the standard time.
+        if ($booking->check_in_at && Carbon::parse($booking->check_in_at)->format('H:i:s') !== '00:00:00') {
             return Carbon::parse($booking->check_in_at);
         }
 
-        $day = Carbon::parse((string) $booking->check_in)->startOfDay();
+        $day = Carbon::parse((string) ($booking->check_in ?: $booking->check_in_at))->startOfDay();
         $standard = trim((string) Setting::get('standard_check_in_time', '14:00'));
         if (preg_match('/^\d{1,2}:\d{2}/', $standard)) {
             [$h, $m] = array_pad(explode(':', $standard, 3), 2, '0');

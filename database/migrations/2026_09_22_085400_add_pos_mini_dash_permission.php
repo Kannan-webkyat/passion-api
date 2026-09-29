@@ -27,7 +27,11 @@ return new class extends Migration
         }
 
         // Anyone who already has sales reports can open mini-dash.
-        $rolesWithSales = Role::permission('report-sales')->get();
+        $salesPermissionExists = Permission::query()
+            ->where('name', 'report-sales')
+            ->where('guard_name', $guardName)
+            ->exists();
+        $rolesWithSales = $salesPermissionExists ? Role::permission('report-sales')->get() : collect();
         foreach ($rolesWithSales as $role) {
             if (! $role->hasPermissionTo($permission)) {
                 $role->givePermissionTo($permission);

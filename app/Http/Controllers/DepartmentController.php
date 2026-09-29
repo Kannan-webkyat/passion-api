@@ -32,6 +32,7 @@ class DepartmentController extends Controller
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:50|unique:departments,code',
             'is_active' => 'boolean',
+            'is_housekeeping' => 'boolean',
         ]);
 
         $department = Department::create($validated);
@@ -51,6 +52,7 @@ class DepartmentController extends Controller
             'name' => 'required|string|max:255',
             'code' => 'required|string|max:50|unique:departments,code,'.$department->id,
             'is_active' => 'boolean',
+            'is_housekeeping' => 'boolean',
         ]);
 
         $department->update($validated);

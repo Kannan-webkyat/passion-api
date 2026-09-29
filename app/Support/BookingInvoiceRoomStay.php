@@ -129,31 +129,35 @@ final class BookingInvoiceRoomStay
         return filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
     }
 
+    /**
+     * Pre-tax cost of the meals bundled in the rate plan (breakfast / MAP / AP) for one night.
+     */
+    public static function nightlyPlanMealsPreTax(RoomType $roomType, ?RatePlan $plan, int $adults, int $children): float
+    {
+        $meal = self::mealPlanKind($plan);
+        $add = 0.0;
+
+        if (in_array($meal, ['breakfast', 'half_board', 'full_board'], true)) {
+            $add += (float) ($roomType->breakfast_price ?? 0) * $adults + (float) ($roomType->child_breakfast_price ?? 0) * $children;
+        }
+        if ($meal === 'full_board') {
+            $add += (float) ($roomType->adult_lunch_price ?? 0) * $adults + (float) ($roomType->child_lunch_price ?? 0) * $children;
+        }
+        if (in_array($meal, ['half_board', 'full_board'], true)) {
+            $add += (float) ($roomType->adult_dinner_price ?? 0) * $adults + (float) ($roomType->child_dinner_price ?? 0) * $children;
+        }
+
+        return $add;
+    }
+
     private static function mealPreTaxAddOns(Booking $booking, RoomType $roomType, RatePlan $plan, Carbon $checkInAt, Carbon $checkOutAt): float
     {
         $nights = max(1, (int) $checkInAt->copy()->startOfDay()->diffInDays($checkOutAt->copy()->startOfDay()));
-        $meal = self::mealPlanKind($plan);
-        $hasBkf = in_array($meal, ['breakfast', 'half_board', 'full_board'], true);
-        $hasLnc = $meal === 'full_board';
-        $hasDnr = in_array($meal, ['half_board', 'full_board'], true);
+        $hasBkf = in_array(self::mealPlanKind($plan), ['breakfast', 'half_board', 'full_board'], true);
 
-        $add = 0.0;
         $adults = (int) ($booking->adults_count ?? 1);
         $children = (int) ($booking->children_count ?? 0);
-
-        if ($hasBkf) {
-            $bp = (float) ($roomType->breakfast_price ?? 0);
-            $cbp = (float) ($roomType->child_breakfast_price ?? 0);
-            $add += ($adults * $bp + $children * $cbp) * $nights;
-        }
-        if ($hasLnc) {
-            $add +=
-                ((float) ($roomType->adult_lunch_price ?? 0) * $adults + (float) ($roomType->child_lunch_price ?? 0) * $children) * $nights;
-        }
-        if ($hasDnr) {
-            $add +=
-                ((float) ($roomType->adult_dinner_price ?? 0) * $adults + (float) ($roomType->child_dinner_price ?? 0) * $children) * $nights;
-        }
+        $add = self::nightlyPlanMealsPreTax($roomType, $plan, $adults, $children) * $nights;
 
         if (! $hasBkf) {
             $adB = (int) ($booking->adult_breakfast_count ?? 0);

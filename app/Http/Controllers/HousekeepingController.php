@@ -41,6 +41,7 @@ use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\RoomParInventoryContext;
 use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Auth;
@@ -908,7 +909,7 @@ class HousekeepingController extends Controller
     /**
      * Housekeeping catalog for the sidebar:
      * - amenities: Guest Amenities categories (unless for_daily_cleaning=1: PAR kind=amenity + room qty &gt; 0)
-     * - minibar: direct-sale inventory items that have a linked menu_item_id (so we can room-charge via POS)
+     * - minibar: inventory items flagged is_minibar (menu_item_id attached when linked, for POS room-charge)
      * - checklist/assets templates: static for now
      */
     public function catalog()
@@ -997,9 +998,8 @@ class HousekeepingController extends Controller
                 ->get(['id', 'name', 'sku', 'category_id']);
         }
 
-        // Minibar items: direct-sale inventory items with a linked menu item for POS posting
         $minibar = InventoryItem::query()
-            ->where('is_direct_sale', '=', true, 'and')
+            ->where('is_minibar', '=', true, 'and')
             ->with(['category:id,name'])
             ->orderBy('name')
             ->get(['id', 'name', 'sku', 'category_id']);
@@ -1071,7 +1071,7 @@ class HousekeepingController extends Controller
                     return true;
                 }
                 foreach ($roomContext['on_hand_items'] ?? [] as $oh) {
-                    if ((int) ($oh['inventory_item_id'] ?? 0) === $id && ! empty($oh['is_direct_sale'])) {
+                    if ((int) ($oh['inventory_item_id'] ?? 0) === $id && ! empty($oh['is_minibar'])) {
                         return true;
                     }
                 }
@@ -1379,8 +1379,13 @@ class HousekeepingController extends Controller
      */
     public function assignCleaningStaff(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING, self::HK_CHECKOUT]);
-        $this->assertCanAssignHousekeepingStaff();
+        if ($roomStatusBlock->status === 'pending_inspection') {
+            $this->allowHousekeepingOperate([self::HK_CHECKOUT]);
+            $this->assertCanAssignCheckoutInspection();
+        } else {
+            $this->allowHousekeepingOperate([self::HK_DIRTY, self::HK_CLEANING]);
+            $this->assertCanAssignHousekeepingStaff();
+        }
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -2013,6 +2018,28 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * Pending checkout inspections must be assigned first; only the assignee or a user who can
+     * assign checkout inspections may perform them.
+     */
+    private function checkoutInspectionAssigneeError(RoomStatusBlock $roomStatusBlock): ?JsonResponse
+    {
+        if (! $roomStatusBlock->assigned_to) {
+            return response()->json([
+                'message' => 'Assign a housekeeping staff member before starting the checkout inspection.',
+            ], 422);
+        }
+
+        $user = Auth::user();
+        if ((int) $roomStatusBlock->assigned_to !== (int) Auth::id() && ! $user?->can(self::HK_CHECKOUT_ASSIGN)) {
+            return response()->json([
+                'message' => 'This checkout inspection is assigned to another staff member.',
+            ], 403);
+        }
+
+        return null;
+    }
+
+    /**
      * Checkout inspection: clear room with no extra charges (pending_inspection -> inspected snapshot).
      * Inspected block stays active on the room chart until checkout or supervisor release.
      */
@@ -2025,6 +2052,9 @@ class HousekeepingController extends Controller
         }
         if ($roomStatusBlock->status !== 'pending_inspection') {
             return response()->json(['message' => 'Room is not pending inspection.'], 422);
+        }
+        if ($assigneeError = $this->checkoutInspectionAssigneeError($roomStatusBlock)) {
+            return $assigneeError;
         }
 
         $userId = Auth::id();
@@ -2098,6 +2128,9 @@ class HousekeepingController extends Controller
         }
         if ($roomStatusBlock->status !== 'pending_inspection') {
             return response()->json(['message' => 'Room is not pending inspection.'], 422);
+        }
+        if ($assigneeError = $this->checkoutInspectionAssigneeError($roomStatusBlock)) {
+            return $assigneeError;
         }
 
         $validated = $request->validate([
@@ -2190,6 +2223,9 @@ class HousekeepingController extends Controller
         }
         if ($roomStatusBlock->status !== 'pending_inspection') {
             return response()->json(['message' => 'Room is not pending inspection.'], 422);
+        }
+        if ($assigneeError = $this->checkoutInspectionAssigneeError($roomStatusBlock)) {
+            return $assigneeError;
         }
 
         $validated = $request->validate([

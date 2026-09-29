@@ -81,6 +81,35 @@ class RoomStatusBlockController extends Controller
     }
 
     /**
+     * rooms.status mirrors the active block covering today; future blocks must not overwrite an
+     * occupied/available room, and releasing a block only resets a room still showing that block's status.
+     *
+     * @param  list<string>  $releasedStatuses
+     */
+    private function syncRoomStatusFromBlocks(int $roomId, array $releasedStatuses = []): void
+    {
+        $today = Carbon::today()->toDateString();
+        $current = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+            ->where('is_active', '=', true, 'and')
+            ->where('start_date', '<=', $today, 'and')
+            ->where('end_date', '>', $today, 'and')
+            ->orderByDesc('id')
+            ->first();
+
+        if ($current) {
+            Room::where('id', '=', $roomId, 'and')->update(['status' => $current->status]);
+
+            return;
+        }
+
+        if ($releasedStatuses !== []) {
+            Room::where('id', '=', $roomId, 'and')
+                ->whereIn('status', $releasedStatuses)
+                ->update(['status' => 'available']);
+        }
+    }
+
+    /**
      * Holds and maintenance blocks may only start today or in the future.
      */
     private function assertBlockStartNotInPast(string $startDate, string $status): void
@@ -103,6 +132,14 @@ class RoomStatusBlockController extends Controller
 
     public function store(Request $request)
     {
+        $this->authorizePermissions([
+            'reservation-hold-room',
+            'reservation-maintenance-room',
+            'manage-rooms',
+            'housekeeping-dirty-rooms',
+            'housekeeping-cleaning-tasks',
+        ]);
+
         $validated = $request->validate([
             'room_id' => 'required|exists:rooms,id',
             'status' => 'required|in:maintenance,dirty,cleaning,on_hold',
@@ -154,8 +191,7 @@ class RoomStatusBlockController extends Controller
             'created_by' => $userId,
         ]);
 
-        // Sync Room status column
-        Room::where('id', '=', $block->room_id, 'and')->update(['status' => $block->status]);
+        $this->syncRoomStatusFromBlocks((int) $block->room_id);
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $block->room_id], 'room_status_block_store');
 
@@ -228,14 +264,13 @@ class RoomStatusBlockController extends Controller
             $this->authorizeStatusBlockStore($validated['status']);
         }
 
+        $previousStatus = (string) $roomStatusBlock->status;
         $roomStatusBlock->update($validated);
 
-        // If inactive or status changed, sync room status
-        if ($roomStatusBlock->is_active) {
-            Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => $roomStatusBlock->status]);
-        } else {
-            Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
-        }
+        $this->syncRoomStatusFromBlocks(
+            (int) $roomStatusBlock->room_id,
+            array_values(array_unique([$previousStatus, (string) $roomStatusBlock->status])),
+        );
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'room_status_block_update');
 
@@ -246,10 +281,10 @@ class RoomStatusBlockController extends Controller
     {
         $this->authorizeStatusBlockMutation($roomStatusBlock);
         $roomId = $roomStatusBlock->room_id;
+        $releasedStatus = (string) $roomStatusBlock->status;
         RoomStatusBlock::destroy($roomStatusBlock->id);
 
-        // Restore room to available
-        Room::where('id', '=', $roomId, 'and')->update(['status' => 'available']);
+        $this->syncRoomStatusFromBlocks((int) $roomId, [$releasedStatus]);
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomId], 'room_status_block_destroy');
 

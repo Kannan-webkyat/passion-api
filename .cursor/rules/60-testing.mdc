@@ -1,0 +1,56 @@
+---
+description: How passion-api tests are written and run (PHPUnit 11, SQLite in-memory, hand-built schema, no RefreshDatabase)
+globs: tests/**/*.php, phpunit.xml
+alwaysApply: false
+---
+
+# 60 — Testing
+
+## Purpose
+Write tests that run in this project's harness, which does **not** execute the real (MySQL-specific) migrations.
+
+## When it applies
+Adding or changing tests, or verifying a change to Support/Service/controller code.
+
+## Existing project convention
+- PHPUnit 11 (Pest is not installed). Suites `Unit` (`tests/Unit`, incl. `Unit/Support`,
+  `Unit/Services`) and `Feature`. Base class `Tests\TestCase` (empty skeleton).
+- `phpunit.xml`: SQLite `:memory:`, `CACHE_STORE=array`, `QUEUE_CONNECTION=sync`,
+  `BROADCAST_CONNECTION=null` (so `dispatchIfEnabled()` is a no-op).
+- **No `RefreshDatabase`.** Each test builds the tables it needs:
+  - Support/Service unit tests drop and create minimal tables in `setUp()`
+    (`tests/Unit/Support/BookingPaymentLedgerTest.php`, `BookingRoomAvailabilityTest.php`).
+  - HK tests use `Tests\Concerns\CreatesHousekeepingFixtures` (auto-runs
+    `setUpCreatesHousekeepingFixtures()` → `MigratesHousekeepingTestSchema::migrateHousekeepingTestSchema()`)
+    with helpers `createUserWithPermission()`, `createRoom()`, `createActiveRelease()`, `releaseWindowPayload()`.
+  - Accounting tests `markTestSkipped('Accounting migrations not run.')` when `journal_entries` is missing.
+  - Pure-logic service tests extend `PHPUnit\Framework\TestCase` and stub DB reads with an anonymous
+    subclass (`tests/Unit/DayClosingServiceTest.php` overrides `lastClosedDate()`).
+- Models are created with `Model::query()->create([...])`; only `UserFactory` exists.
+- Feature tests: `Sanctum::actingAs($user)` → `$this->postJson('/api/...')` →
+  `assertCreated()/assertOk()->assertJsonPath(...)` → `assertDatabaseHas(...)`.
+- Method names `test_snake_case_description(): void`.
+- Run: `php vendor/bin/phpunit` (or `--filter`), or `php artisan test`. `composer test` also runs `config:clear`.
+
+## Required behavior
+- Run the suite **before and after** a change and compare. The baseline is not green:
+  `RoomCleaningReleasePriorityTest` and `RoomCleaningAvailabilityServicePriorityTest` error on
+  `AuthorizesHousekeepingPermissions::HK_*` access (`CleaningReleasePriorityTest` passes), and
+  accounting tests skip under SQLite.
+- Test new rules at the Support/Service level where the logic lives; add a Feature test when
+  changing an endpoint's authorization, status code or JSON shape.
+- Create only the columns the code under test reads; extend the shared schema trait with
+  `if (! Schema::hasTable(...))` / `hasColumn` guards like the existing code.
+- In tests, reference permissions by string (`'housekeeping-cleaning-availability'`), as
+  `RoomCleaningReleaseClassificationTest` does. PHP forbids reading constants directly off a trait.
+
+## Things Cursor must NOT do
+- Do not add `RefreshDatabase`/`DatabaseMigrations` expecting real migrations to run on SQLite.
+- Do not switch the harness to MySQL, add Pest, or add factories for every model.
+- Do not mark failing tests skipped, or delete them, to make a change pass.
+
+## Important examples from the existing codebase
+- `tests/Feature/RoomCleaningReleaseClassificationTest.php` — passing endpoint test pattern.
+- `tests/Unit/Support/BookingRoomAvailabilityTest.php` — availability rules.
+- `tests/Unit/Support/BookingPaymentLedgerTest.php` — ledger + `syncScalars()`.
+- `tests/Unit/LedgerBackedTransactionTest.php` — fail-closed journal semantics (self-skips without accounting tables).
