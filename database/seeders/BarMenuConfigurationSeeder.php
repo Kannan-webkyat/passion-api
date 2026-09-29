@@ -3,7 +3,6 @@
 namespace Database\Seeders;
 
 use App\Models\InventoryItem;
-use App\Models\InventoryTax;
 use App\Models\MenuCategory;
 use App\Models\MenuItem;
 use App\Models\MenuItemVariant;
@@ -16,7 +15,7 @@ use Illuminate\Database\Seeder;
 /**
  * Bar POS menu from menu_configuration_v2.html — links to BarInventoryOrganizedSeeder SKUs.
  *
- * Main category: Alcohols · Sub: Brandy…Beer · Tax: Liquor VAT 10% · Direct sale · No KOT
+ * Main category: Alcohols · Sub: Brandy…Beer · is_alcohol on inventory · Direct sale · No KOT
  * Largest SKU per brand (top): 30 / 60 / 90 ml + Full Bottle variants
  * Smaller spirits, wine, beer: whole bottle only · Outlets: all active outlets
  */
@@ -32,13 +31,6 @@ class BarMenuConfigurationSeeder extends Seeder
     public function run(): void
     {
         $rows = require __DIR__.'/data/bar_menu_configuration.php';
-
-        $vat10 = InventoryTax::where('name', 'Liquor VAT 10%')->first();
-        if (! $vat10) {
-            $this->command?->error('Liquor VAT 10% not found. Run InventoryTaxSeeder and BarInventoryOrganizedSeeder first.');
-
-            return;
-        }
 
         $mainCategory = MenuCategory::updateOrCreate(
             ['name' => 'Alcohols'],
@@ -94,7 +86,7 @@ class BarMenuConfigurationSeeder extends Seeder
                     'menu_category_id' => $mainCategory->id,
                     'menu_sub_category_id' => $subCategoryIds[$sub] ?? null,
                     'price' => 0,
-                    'tax_id' => $vat10->id,
+                    'tax_id' => null,
                     'fixed_ept' => 0,
                     'type' => 'non-veg',
                     'is_active' => true,

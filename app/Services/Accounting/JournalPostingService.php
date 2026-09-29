@@ -45,6 +45,7 @@ final class JournalPostingService
             throw new JournalPostingException("No journal lines for {$sourceType}#{$sourceId}");
         }
 
+        $this->absorbRoundingImbalance($normalized);
         $this->assertBalanced($normalized);
 
         return DB::transaction(function () use (
@@ -95,6 +96,170 @@ final class JournalPostingService
 
             return $entry->load('lines.account');
         });
+    }
+
+    /**
+     * Replace line items on an existing posted entry (maintenance / tax model backfill).
+     * When no posted entry exists, delegates to post().
+     *
+     * @param  array<int, array{account_code: string, debit?: float|string, credit?: float|string, tax_tag?: string|null, meta?: array<string, mixed>|null}>  $lines
+     */
+    public function replacePosted(
+        string $sourceType,
+        int $sourceId,
+        string $entryDate,
+        ?string $businessDate,
+        ?string $sourceRef,
+        ?string $memo,
+        array $lines,
+        ?int $postedBy = null
+    ): JournalEntry {
+        $normalized = $this->normalizeLines($lines);
+        if ($normalized === []) {
+            throw new JournalPostingException("No journal lines for {$sourceType}#{$sourceId}");
+        }
+
+        $this->absorbRoundingImbalance($normalized);
+        $this->assertBalanced($normalized);
+
+        return DB::transaction(function () use (
+            $sourceType,
+            $sourceId,
+            $entryDate,
+            $businessDate,
+            $sourceRef,
+            $memo,
+            $normalized,
+            $postedBy
+        ) {
+            $existing = JournalEntry::query()
+                ->where('source_type', $sourceType)
+                ->where('source_id', $sourceId)
+                ->where('status', JournalEntry::STATUS_POSTED)
+                ->lockForUpdate()
+                ->first();
+
+            if (! $existing) {
+                return $this->post(
+                    $sourceType,
+                    $sourceId,
+                    $entryDate,
+                    $businessDate,
+                    $sourceRef,
+                    $memo,
+                    $this->denormalizeForPost($normalized),
+                    $postedBy
+                );
+            }
+
+            $existing->lines()->delete();
+
+            foreach ($normalized as $index => $line) {
+                JournalLine::create([
+                    'journal_entry_id' => $existing->id,
+                    'line_no' => $index + 1,
+                    'account_id' => $this->accountId($line['account_code']),
+                    'debit' => $line['debit'],
+                    'credit' => $line['credit'],
+                    'tax_tag' => $line['tax_tag'] ?? null,
+                    'meta' => $line['meta'] ?? null,
+                ]);
+            }
+
+            $existing->update([
+                'entry_date' => $entryDate,
+                'business_date' => $businessDate,
+                'source_ref' => $sourceRef,
+                'memo' => $memo,
+                'posted_by' => $postedBy ?? $existing->posted_by,
+            ]);
+
+            return $existing->fresh(['lines.account']);
+        });
+    }
+
+    /**
+     * Post the opposite of a posted journal (same-day void of a mistaken settle).
+     * Original stays posted; trial balance nets to zero via this reversal.
+     */
+    public function reversePosted(
+        string $sourceType,
+        int $sourceId,
+        string $reversalSourceType,
+        int $reversalSourceId,
+        string $entryDate,
+        ?string $businessDate,
+        ?string $sourceRef,
+        ?string $memo,
+        ?int $postedBy = null
+    ): ?JournalEntry {
+        $existingReversal = JournalEntry::query()
+            ->where('source_type', $reversalSourceType)
+            ->where('source_id', $reversalSourceId)
+            ->where('status', JournalEntry::STATUS_POSTED)
+            ->first();
+        if ($existingReversal) {
+            return $existingReversal->load('lines.account');
+        }
+
+        $original = JournalEntry::query()
+            ->where('source_type', $sourceType)
+            ->where('source_id', $sourceId)
+            ->where('status', JournalEntry::STATUS_POSTED)
+            ->with('lines.account')
+            ->first();
+        if (! $original) {
+            return null;
+        }
+
+        $lines = [];
+        foreach ($original->lines as $line) {
+            $code = trim((string) ($line->account?->code ?? ''));
+            if ($code === '') {
+                continue;
+            }
+            $debit = round((float) $line->debit, 2);
+            $credit = round((float) $line->credit, 2);
+            $lines[] = [
+                'account_code' => $code,
+                'debit' => $credit,
+                'credit' => $debit,
+                'tax_tag' => $line->tax_tag,
+                'meta' => $line->meta,
+            ];
+        }
+        if ($lines === []) {
+            return null;
+        }
+
+        $reversal = $this->post(
+            sourceType: $reversalSourceType,
+            sourceId: $reversalSourceId,
+            entryDate: $entryDate,
+            businessDate: $businessDate,
+            sourceRef: $sourceRef,
+            memo: $memo,
+            lines: $lines,
+            postedBy: $postedBy
+        );
+        $reversal->update(['reverses_entry_id' => $original->id]);
+
+        return $reversal->fresh(['lines.account']);
+    }
+
+    /**
+     * @param  list<array{account_code: string, debit: float, credit: float, tax_tag: ?string, meta: ?array}>  $normalized
+     * @return list<array{account_code: string, debit?: float, credit?: float, tax_tag?: ?string, meta?: ?array}>
+     */
+    private function denormalizeForPost(array $normalized): array
+    {
+        return array_map(fn (array $line) => array_filter([
+            'account_code' => $line['account_code'],
+            'debit' => ($line['debit'] ?? 0) > 0 ? $line['debit'] : null,
+            'credit' => ($line['credit'] ?? 0) > 0 ? $line['credit'] : null,
+            'tax_tag' => $line['tax_tag'] ?? null,
+            'meta' => $line['meta'] ?? null,
+        ], fn ($v) => $v !== null), $normalized);
     }
 
     public function accountId(string $code): int
@@ -156,15 +321,70 @@ final class JournalPostingService
         return array_values(array_filter($merged, fn (array $l) => $l['debit'] > 0 || $l['credit'] > 0));
     }
 
+    /**
+     * Multi-line posters (esp. GRN: landed 4dp × qty vs GRNI 2dp) can drift a few paise.
+     * Absorb up to 5 paise on the oversized side so the journal stays balanced
+     * (do not inflate the light side / GRNI when debit is short — trim the heavy side).
+     *
+     * @param  list<array{account_code: string, debit: float, credit: float, tax_tag: ?string, meta: ?array}>  $lines
+     */
+    private function absorbRoundingImbalance(array &$lines): void
+    {
+        $diffPaise = $this->debitCreditDiffPaise($lines);
+        if ($diffPaise === 0) {
+            return;
+        }
+
+        // Max 5 paise (₹0.05) — enough for large Bevco GRNs; larger gaps stay hard errors.
+        if (abs($diffPaise) > 5) {
+            return;
+        }
+
+        $side = $diffPaise > 0 ? 'debit' : 'credit';
+        $adjustPaise = abs($diffPaise);
+        $best = null;
+        $bestPaise = -1;
+        foreach ($lines as $i => $line) {
+            $paise = (int) round(((float) $line[$side]) * 100);
+            if ($paise > $bestPaise) {
+                $bestPaise = $paise;
+                $best = $i;
+            }
+        }
+
+        if ($best === null || $bestPaise < $adjustPaise) {
+            return;
+        }
+
+        $lines[$best][$side] = round(($bestPaise - $adjustPaise) / 100, 2);
+        $lines = array_values(array_filter($lines, fn (array $l) => $l['debit'] > 0 || $l['credit'] > 0));
+    }
+
+    /** @param list<array{debit: float, credit: float}> $lines */
+    private function debitCreditDiffPaise(array $lines): int
+    {
+        $debitPaise = 0;
+        $creditPaise = 0;
+        foreach ($lines as $line) {
+            $debitPaise += (int) round(((float) $line['debit']) * 100);
+            $creditPaise += (int) round(((float) $line['credit']) * 100);
+        }
+
+        return $debitPaise - $creditPaise;
+    }
+
     /** @param list<array{debit: float, credit: float}> $lines */
     private function assertBalanced(array $lines): void
     {
+        $diffPaise = $this->debitCreditDiffPaise($lines);
+        if ($diffPaise === 0) {
+            return;
+        }
+
         $debit = round(array_sum(array_column($lines, 'debit')), 2);
         $credit = round(array_sum(array_column($lines, 'credit')), 2);
 
-        if (abs($debit - $credit) > 0.01) {
-            throw new JournalPostingException("Journal not balanced: debit={$debit} credit={$credit}");
-        }
+        throw new JournalPostingException("Journal not balanced: debit={$debit} credit={$credit}");
     }
 
     private function nextEntryNumber(string $entryDate): string

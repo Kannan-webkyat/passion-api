@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\PurchaseOrder;
+use App\Models\PurchaseOrderItem;
 use App\Models\VendorPayment;
 use App\Exceptions\LiquorTaxValidationException;
 use App\Services\Accounting\VendorPaymentPoster;
@@ -114,7 +115,7 @@ class PurchaseOrderController extends Controller
 
         DB::beginTransaction();
         try {
-            $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items']);
+            $lineTotals = PurchaseOrderService::applyLineAmountsToItems($validated['items'], (int) $validated['vendor_id']);
             $financials = PurchaseOrderService::buildHeaderFinancials($lineTotals, $validated);
 
             $purchaseOrder->update([

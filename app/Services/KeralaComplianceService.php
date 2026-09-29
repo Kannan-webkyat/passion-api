@@ -46,9 +46,10 @@ final class KeralaComplianceService
                 'total_gst' => round($cgst + $sgst + $igst, 2),
             ],
             'table_8_non_gst_liquor' => [
-                'description' => 'Alcoholic liquor — Non-GST supply (GSTR-1 Table 8)',
+                'description' => 'Alcoholic liquor — Non-GST supply (GSTR-1 Table 8); bar turnover for KGST TOT',
                 'bill_count' => $liquorBills,
                 'taxable_value' => $liquorTaxable,
+                'tot_liability_at_10_percent' => KgstBarTotPolicy::totLiabilityFromTurnover($liquorTaxable),
                 'vat_amount' => $outputVat,
                 'total_non_gst_supply' => round($liquorTaxable + $outputVat, 2),
             ],
@@ -137,8 +138,9 @@ final class KeralaComplianceService
         return [
             'period' => ['from' => $from, 'to' => $to],
             'output_vat' => [
-                'description' => 'Bar / liquor sales (KVAT output) — from POS',
+                'description' => 'Bar liquor turnover — KGST Section 5(2) TOT basis (not per-sale VAT on bills)',
                 'taxable_value' => $outputVatTaxable,
+                'tot_liability_at_10_percent' => KgstBarTotPolicy::totLiabilityFromTurnover($outputVatTaxable),
                 'vat_amount' => $outputVat,
                 'journal_output_vat_credit' => $journalOutputVat,
             ],
@@ -176,8 +178,9 @@ final class KeralaComplianceService
             ['GST Taxable Supplies', 'SGST', $s['gst_taxable_supplies']['sgst']],
             ['GST Taxable Supplies', 'IGST', $s['gst_taxable_supplies']['igst']],
             ['GSTR-1 Table 8 Non-GST', 'Bill count', $s['table_8_non_gst_liquor']['bill_count']],
-            ['GSTR-1 Table 8 Non-GST', 'Liquor taxable value', $s['table_8_non_gst_liquor']['taxable_value']],
-            ['GSTR-1 Table 8 Non-GST', 'Liquor VAT (info)', $s['table_8_non_gst_liquor']['vat_amount']],
+            ['GSTR-1 Table 8 Non-GST', 'Bar turnover', $s['table_8_non_gst_liquor']['taxable_value']],
+            ['GSTR-1 Table 8 Non-GST', 'KGST TOT @10% (liability)', $s['table_8_non_gst_liquor']['tot_liability_at_10_percent']],
+            ['GSTR-1 Table 8 Non-GST', 'Legacy per-sale VAT (info)', $s['table_8_non_gst_liquor']['vat_amount']],
         ];
     }
 
@@ -188,9 +191,10 @@ final class KeralaComplianceService
 
         return [
             ['section', 'metric', 'value'],
-            ['Output VAT', 'Sales taxable value', $s['output_vat']['taxable_value']],
-            ['Output VAT', 'VAT amount (POS)', $s['output_vat']['vat_amount']],
-            ['Output VAT', 'Journal OUTPUT_VAT credit', $s['output_vat']['journal_output_vat_credit']],
+            ['Output (bar)', 'Bar turnover', $s['output_vat']['taxable_value']],
+            ['Output (bar)', 'KGST TOT @10% (liability)', $s['output_vat']['tot_liability_at_10_percent']],
+            ['Output (bar)', 'Legacy per-sale VAT (POS)', $s['output_vat']['vat_amount']],
+            ['Output (bar)', 'Journal OUTPUT_VAT credit', $s['output_vat']['journal_output_vat_credit']],
             ['Input VAT', 'Purchase taxable', $s['input_vat_purchases']['purchase_taxable_value']],
             ['Input VAT', 'Recoverable (GRN)', $s['input_vat_purchases']['recoverable_vat_grn']],
             ['Input VAT', 'Capitalized (GRN)', $s['input_vat_purchases']['capitalized_vat_grn']],

@@ -12,7 +12,7 @@ class PosDayClosingArchive extends Model
     ];
 
     protected $casts = [
-        'closed_date' => 'date',
+        'closed_date' => 'date:Y-m-d',
         'closed_at' => 'datetime',
         'unlocked_at' => 'datetime',
         'snapshot' => 'array',

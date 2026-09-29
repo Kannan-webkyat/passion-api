@@ -53,7 +53,8 @@
                 <th class="text-right">Paid</th>
                 <th class="text-right">CGST</th>
                 <th class="text-right">SGST</th>
-                <th class="text-right">VAT</th>
+                <th class="text-right">Bar turnover</th>
+                <th class="text-right">KGST TOT</th>
                 <th class="text-right">Cash</th>
                 <th class="text-right">Card</th>
                 <th class="text-right">UPI</th>
@@ -78,7 +79,15 @@
                 <td class="text-right num">₹{{ number_format((float) $c->total_paid, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) ($c->cgst_amount ?? 0), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) ($c->sgst_amount ?? 0), 2) }}</td>
-                <td class="text-right num">₹{{ number_format((float) ($c->vat_tax_amount ?? 0), 2) }}</td>
+                @php
+                    $closedDate = $c->closed_date?->format('Y-m-d') ?? '';
+                    $barTurnover = (float) ($c->vat_net_taxable ?? 0);
+                    $kgstTot = \App\Services\KgstBarTotPolicy::usesBarTurnoverModel($closedDate)
+                        ? \App\Services\KgstBarTotPolicy::totLiabilityFromTurnover($barTurnover)
+                        : (float) ($c->vat_tax_amount ?? 0);
+                @endphp
+                <td class="text-right num">₹{{ number_format($barTurnover, 2) }}</td>
+                <td class="text-right num">₹{{ number_format($kgstTot, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $c->cash_total, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $c->card_total, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $c->upi_total, 2) }}</td>
@@ -88,7 +97,7 @@
             </tr>
             @empty
             <tr>
-                <td colspan="20" style="text-align: center; padding: 20px; color: #888;">No closings in this range.</td>
+                <td colspan="21" style="text-align: center; padding: 20px; color: #888;">No closings in this range.</td>
             </tr>
             @endforelse
             @if($closings->count() > 0)
@@ -106,7 +115,18 @@
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('total_paid'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('cgst_amount'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('sgst_amount'), 2) }}</td>
-                <td class="text-right num">₹{{ number_format((float) $closings->sum('vat_tax_amount'), 2) }}</td>
+                @php
+                    $totalBarTurnover = (float) $closings->sum('vat_net_taxable');
+                    $totalKgstTot = $closings->sum(function ($c) {
+                        $closedDate = $c->closed_date?->format('Y-m-d') ?? '';
+                        $barTurnover = (float) ($c->vat_net_taxable ?? 0);
+                        return \App\Services\KgstBarTotPolicy::usesBarTurnoverModel($closedDate)
+                            ? \App\Services\KgstBarTotPolicy::totLiabilityFromTurnover($barTurnover)
+                            : (float) ($c->vat_tax_amount ?? 0);
+                    });
+                @endphp
+                <td class="text-right num">₹{{ number_format($totalBarTurnover, 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) $totalKgstTot, 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('cash_total'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('card_total'), 2) }}</td>
                 <td class="text-right num">₹{{ number_format((float) $closings->sum('upi_total'), 2) }}</td>

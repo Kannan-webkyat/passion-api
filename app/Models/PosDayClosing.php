@@ -18,7 +18,9 @@ class PosDayClosing extends Model
     ];
 
     protected $casts = [
-        'closed_date' => 'date',
+        // Y-m-d so JSON does not shift IST midnight to the previous UTC calendar day
+        // (frontend toYmd() takes the first 10 chars of ISO strings).
+        'closed_date' => 'date:Y-m-d',
         'closed_at' => 'datetime',
         'opening_balance' => 'decimal:2',
         'closing_balance' => 'decimal:2',

@@ -17,7 +17,8 @@ class Setting extends Model
             return $default;
         }
 
-        // Preserve legitimate "0" / 0 values; only treat null/empty string as unset.
+        // Do not use ?: — stored "0" is a valid value (e.g. boolean toggles).
+        // Only null or an empty string is treated as unset.
         if ($setting->value === null || $setting->value === '') {
             return $default;
         }
@@ -27,7 +28,13 @@ class Setting extends Model
 
     public static function set(string $key, mixed $value): void
     {
-        self::updateOrCreate(['key' => $key], ['value' => $value]);
+        if (is_bool($value)) {
+            $value = $value ? '1' : '0';
+        } elseif ($value !== null && ! is_scalar($value)) {
+            $value = json_encode($value);
+        }
+
+        self::updateOrCreate(['key' => $key], ['value' => (string) $value]);
         Cache::forget("setting.{$key}");
     }
 

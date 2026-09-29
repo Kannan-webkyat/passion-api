@@ -12,6 +12,7 @@ use App\Models\RecipeIngredient;
 use App\Models\RestaurantMaster;
 use App\Services\Accounting\ProductionPoster;
 use App\Services\BomDeductionConfig;
+use App\Services\BomEnforcementConfig;
 use App\Services\BusinessDateService;
 use App\Services\InventoryCostService;
 use App\Services\PosOutletBroadcast;
@@ -59,6 +60,7 @@ class RecipeController extends Controller
     public function productionList()
     {
         $this->checkPermission('kitchen-production');
+        $this->assertKitchenProductionEnabled();
 
         $menuRows = MenuItem::query()
             ->whereHas('recipe', fn ($q) => $q
@@ -251,6 +253,7 @@ class RecipeController extends Controller
     public function produce(Request $request, $recipeId)
     {
         $this->checkPermission('kitchen-production');
+        $this->assertKitchenProductionEnabled();
         $validated = $request->validate([
             'quantity_produced' => 'required|numeric|min:0.001',
             'inventory_location_id' => 'required|exists:inventory_locations,id',
@@ -429,6 +432,7 @@ class RecipeController extends Controller
     public function productionLogDetails(ProductionLog $log)
     {
         $this->checkPermission('kitchen-production');
+        $this->assertKitchenProductionEnabled();
         $ingredients = InventoryTransaction::with(['item.issueUom'])
             ->where('reference_id', $log->reference_id)
             ->where('reference_type', 'production')
@@ -465,6 +469,7 @@ class RecipeController extends Controller
     public function productionLogs()
     {
         $this->checkPermission('kitchen-production');
+        $this->assertKitchenProductionEnabled();
         $logs = ProductionLog::with([
             'recipe.menuItem',
             'recipe.outputInventoryItem',
@@ -534,6 +539,13 @@ class RecipeController extends Controller
         $user = auth()->user();
         if ($user && ! $user->hasRole('Admin') && ! $user->can($permission)) {
             abort(403, 'Unauthorized action.');
+        }
+    }
+
+    private function assertKitchenProductionEnabled(): void
+    {
+        if (! BomEnforcementConfig::isEnabled()) {
+            abort(403, 'Kitchen batch production is disabled while recipe stock enforcement is off.');
         }
     }
 

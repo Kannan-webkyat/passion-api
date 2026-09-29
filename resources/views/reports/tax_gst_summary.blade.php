@@ -42,8 +42,9 @@
         </thead>
         <tbody>
             @php
-                $gstRows = collect($rows)->filter(fn($r) => !str_starts_with($r['tax_label'] ?? '', 'Liquor VAT'));
-                $vatRows = collect($rows)->filter(fn($r) => str_starts_with($r['tax_label'] ?? '', 'Liquor VAT'));
+                $gstRows = collect($rows)->filter(fn($r) => !str_starts_with($r['tax_label'] ?? '', 'Liquor VAT') && !str_starts_with($r['tax_label'] ?? '', 'Bar Turnover Tax'));
+                $barTotRows = collect($rows)->filter(fn($r) => str_starts_with($r['tax_label'] ?? '', 'Bar Turnover Tax'));
+                $legacyVatRows = collect($rows)->filter(fn($r) => str_starts_with($r['tax_label'] ?? '', 'Liquor VAT'));
             @endphp
 
             @if($gstRows->count() > 0)
@@ -68,11 +69,11 @@
             </tr>
             @endif
 
-            @if($vatRows->count() > 0)
+            @if($barTotRows->count() > 0)
             <tr class="section-row">
-                <td colspan="5">State VAT (Liquor)</td>
+                <td colspan="5">Bar Turnover Tax (KGST Section 5(2))</td>
             </tr>
-            @foreach($vatRows as $row)
+            @foreach($barTotRows as $row)
             <tr>
                 <td class="text-right num">{{ number_format((float) ($row['rate'] ?? 0), 2) }}</td>
                 <td>{{ \Illuminate\Support\Str::limit($row['tax_label'] ?? '—', 40) }}</td>
@@ -83,10 +84,32 @@
             @endforeach
             <tr class="total-row">
                 <td></td>
-                <td>VAT SUBTOTAL</td>
-                <td class="text-right num">₹{{ number_format((float) $vatRows->sum('taxable_value'), 2) }}</td>
-                <td class="text-right num">₹{{ number_format((float) $vatRows->sum('tax_amount'), 2) }}</td>
-                <td class="text-right num">{{ (int) $vatRows->sum('line_count') }}</td>
+                <td>KGST TOT SUBTOTAL</td>
+                <td class="text-right num">₹{{ number_format((float) $barTotRows->sum('taxable_value'), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) $barTotRows->sum('tax_amount'), 2) }}</td>
+                <td class="text-right num">{{ (int) $barTotRows->sum('line_count') }}</td>
+            </tr>
+            @endif
+
+            @if($legacyVatRows->count() > 0)
+            <tr class="section-row">
+                <td colspan="5">State VAT (Liquor — legacy)</td>
+            </tr>
+            @foreach($legacyVatRows as $row)
+            <tr>
+                <td class="text-right num">{{ number_format((float) ($row['rate'] ?? 0), 2) }}</td>
+                <td>{{ \Illuminate\Support\Str::limit($row['tax_label'] ?? '—', 40) }}</td>
+                <td class="text-right num">₹{{ number_format((float) ($row['taxable_value'] ?? 0), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) ($row['tax_amount'] ?? 0), 2) }}</td>
+                <td class="text-right num">{{ (int) ($row['line_count'] ?? 0) }}</td>
+            </tr>
+            @endforeach
+            <tr class="total-row">
+                <td></td>
+                <td>LEGACY VAT SUBTOTAL</td>
+                <td class="text-right num">₹{{ number_format((float) $legacyVatRows->sum('taxable_value'), 2) }}</td>
+                <td class="text-right num">₹{{ number_format((float) $legacyVatRows->sum('tax_amount'), 2) }}</td>
+                <td class="text-right num">{{ (int) $legacyVatRows->sum('line_count') }}</td>
             </tr>
             @endif
 

@@ -131,8 +131,12 @@
                 <div class="value">₹{{ number_format($summary['gst_duty'] ?? 0, 2) }}</div>
             </td>
             <td class="summary-box">
-                <div class="label">Liquor VAT</div>
-                <div class="value">₹{{ number_format($summary['vat_tax'] ?? 0, 2) }}</div>
+                <div class="label">Bar turnover</div>
+                <div class="value">₹{{ number_format($summary['vat_net_taxable'] ?? 0, 2) }}</div>
+            </td>
+            <td class="summary-box">
+                <div class="label">KGST TOT @10%</div>
+                <div class="value">₹{{ number_format($summary['kgst_tot'] ?? 0, 2) }}</div>
             </td>
             <td class="summary-box">
                 <div class="label">Total Refunds</div>
@@ -154,9 +158,9 @@
                 <th class="text-right">CGST</th>
                 <th class="text-right">SGST</th>
                 <th class="text-right">IGST</th>
-                <th class="text-right">Liq VAT</th>
+                <th class="text-right">Liq TOT</th>
                 <th class="text-right">GST txbl</th>
-                <th class="text-right">VAT txbl</th>
+                <th class="text-right">Bar turnover</th>
                 <th class="text-right">Amount</th>
                 <th class="text-right">Refund</th>
             </tr>
@@ -190,7 +194,11 @@
                 <td class="text-right amount">₹{{ number_format($o->cgst_amount ?? 0, 2) }}</td>
                 <td class="text-right amount">₹{{ number_format($o->sgst_amount ?? 0, 2) }}</td>
                 <td class="text-right amount">₹{{ number_format($o->igst_amount ?? 0, 2) }}</td>
-                <td class="text-right amount">₹{{ number_format($o->vat_tax_amount ?? 0, 2) }}</td>
+                <td class="text-right amount">₹{{ number_format(
+                    \App\Services\KgstBarTotPolicy::usesBarTurnoverModel($o->business_date?->format('Y-m-d') ?? (string) $o->business_date)
+                        ? \App\Services\KgstBarTotPolicy::totLiabilityFromTurnover((float) ($o->vat_net_taxable ?? 0))
+                        : (float) ($o->vat_tax_amount ?? 0),
+                    2) }}</td>
                 <td class="text-right amount">₹{{ number_format($o->gst_net_taxable ?? 0, 2) }}</td>
                 <td class="text-right amount">₹{{ number_format($o->vat_net_taxable ?? 0, 2) }}</td>
                 <td class="text-right amount {{ $o->status === 'void' ? 'status-void' : '' }}">

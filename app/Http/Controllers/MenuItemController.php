@@ -74,7 +74,7 @@ class MenuItemController extends Controller
             'price' => 'nullable|numeric|min:0',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
             'fixed_ept' => 'nullable|integer|min:0',
-            'type' => 'nullable|string',
+            'type' => 'required|string|max:255',
             'is_active' => 'boolean',
             'is_direct_sale' => 'nullable|boolean',
             'requires_production' => 'nullable|boolean',
@@ -82,6 +82,8 @@ class MenuItemController extends Controller
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string',
             'variants' => 'nullable|string',
+        ], [
+            'type.required' => 'Dietary type is required. Select Veg, Non-Veg, or another type.',
         ]);
 
         $restaurantLinks = $this->parseRestaurantLinks($request->input('restaurant_links'));
@@ -142,7 +144,7 @@ class MenuItemController extends Controller
             'price' => 'nullable|numeric|min:0',
             'tax_id' => 'nullable|exists:inventory_taxes,id',
             'fixed_ept' => 'nullable|integer|min:0',
-            'type' => 'nullable|string',
+            'type' => 'sometimes|required|string|max:255',
             'is_active' => 'boolean',
             'is_direct_sale' => 'nullable|boolean',
             'requires_production' => 'nullable|boolean',
@@ -150,6 +152,8 @@ class MenuItemController extends Controller
             'image' => 'nullable|image|max:2048',
             'restaurant_links' => 'nullable|string',
             'variants' => 'nullable|string',
+        ], [
+            'type.required' => 'Dietary type is required. Select Veg, Non-Veg, or another type.',
         ]);
 
         $restaurantLinks = $this->parseRestaurantLinks($request->input('restaurant_links'));

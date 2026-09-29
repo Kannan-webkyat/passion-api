@@ -242,8 +242,10 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::post('orders/{order}/settle', [PosController::class, 'settle']);
         Route::post('orders/{order}/void', [PosController::class, 'void']);
         Route::post('orders/{order}/refund', [PosController::class, 'refund']);
+        Route::post('orders/{order}/amend-payments', [PosController::class, 'amendPayments']);
         Route::get('reports/sales', [PosController::class, 'salesReport']);
         Route::get('reports/dashboard-summary', [PosController::class, 'salesDashboardSummary']);
+        Route::get('reports/mini-dash', [PosController::class, 'miniDash']);
         Route::get('reports/sales/export', [PosController::class, 'salesReportExport']);
         Route::get('reports/sales/orders', [PosController::class, 'salesReportOrders']);
         Route::get('reports/liquor-sales', [PosController::class, 'liquorSalesReport']);
@@ -256,6 +258,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::get('reports/menu-performance', [PosController::class, 'menuPerformanceReport']);
         Route::get('reports/tax-gst-summary/export', [PosController::class, 'taxGstSummaryExport']);
         Route::get('reports/tax-gst-summary', [PosController::class, 'taxGstSummaryReport']);
+        Route::get('reports/kgst-bar-tot', [PosController::class, 'kgstBarTotReport']);
         Route::get('reports/refunds-adjustments/export', [PosController::class, 'refundsAdjustmentsExport']);
         Route::get('reports/refunds-adjustments', [PosController::class, 'refundsAdjustmentsReport']);
         Route::get('reports/voids-discounts/export', [PosController::class, 'voidsDiscountsExport']);
@@ -280,6 +283,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
         Route::post('orders/{order}/mark-order-item-ready', [PosController::class, 'markOrderItemReady']);
         Route::post('orders/{order}/mark-order-item-served', [PosController::class, 'markOrderItemServed']);
         Route::post('orders/{order}/mark-batch-delivered', [PosController::class, 'markBatchDelivered']);
+        Route::post('orders/{order}/force-clear-kds', [PosController::class, 'forceClearKds']);
     });
 
     // F&B Module (Menu Configuration)

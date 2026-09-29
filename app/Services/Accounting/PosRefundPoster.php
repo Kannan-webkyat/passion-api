@@ -22,27 +22,78 @@ final class PosRefundPoster
             return null;
         }
 
+        $lines = $this->buildLines($refund);
+        if ($lines === []) {
+            return null;
+        }
+
+        $refund->loadMissing('order');
+        $order = $refund->order;
+        $entryDate = ($refund->business_date ?? $refund->refunded_at ?? now())->toDateString();
+
+        return $this->journal->post(
+            sourceType: 'pos_refund',
+            sourceId: (int) $refund->id,
+            entryDate: $entryDate,
+            businessDate: $refund->business_date?->toDateString(),
+            sourceRef: 'POS refund #'.$refund->id,
+            memo: 'POS refund — order #'.($order?->id ?? $refund->order_id),
+            lines: $lines,
+            postedBy: $postedBy ?? $refund->refunded_by,
+        );
+    }
+
+    public function repost(PosOrderRefund $refund, ?int $postedBy = null): ?JournalEntry
+    {
+        if (! Schema::hasTable('journal_entries')) {
+            return null;
+        }
+
+        $lines = $this->buildLines($refund);
+        if ($lines === []) {
+            return null;
+        }
+
+        $refund->loadMissing('order');
+        $order = $refund->order;
+        $entryDate = ($refund->business_date ?? $refund->refunded_at ?? now())->toDateString();
+
+        return $this->journal->replacePosted(
+            sourceType: 'pos_refund',
+            sourceId: (int) $refund->id,
+            entryDate: $entryDate,
+            businessDate: $refund->business_date?->toDateString(),
+            sourceRef: 'POS refund #'.$refund->id,
+            memo: 'POS refund — order #'.($order?->id ?? $refund->order_id),
+            lines: $lines,
+            postedBy: $postedBy ?? $refund->refunded_by,
+        );
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function buildLines(PosOrderRefund $refund): array
+    {
         $refund->loadMissing('order');
         $order = $refund->order;
         if (! $order instanceof PosOrder) {
-            return null;
+            return [];
         }
 
         $amount = round((float) $refund->amount, 2);
         if ($amount <= 0) {
-            return null;
+            return [];
         }
 
         $orderTotal = round((float) $order->total_amount, 2);
         if ($orderTotal <= 0) {
-            return null;
+            return [];
         }
 
         $ratio = min(1.0, $amount / $orderTotal);
         $lines = [];
 
         $this->addDebitScaled($lines, AccountCodes::RESTAURANT_SALES, (float) $order->gst_net_taxable, $ratio, $order->id, $refund->id);
-        $this->addDebitScaled($lines, AccountCodes::BAR_SALES, (float) $order->vat_net_taxable, $ratio, $order->id, $refund->id);
+        $this->addDebitScaled($lines, AccountCodes::BAR_SALES, $this->barSalesBaseAmount($order), $ratio, $order->id, $refund->id);
         $this->addDebitScaled($lines, AccountCodes::OUTPUT_CGST, (float) $order->cgst_amount, $ratio, $order->id, $refund->id, 'output_gst');
         $this->addDebitScaled($lines, AccountCodes::OUTPUT_SGST, (float) $order->sgst_amount, $ratio, $order->id, $refund->id, 'output_gst');
         $this->addDebitScaled($lines, AccountCodes::OUTPUT_IGST, (float) $order->igst_amount, $ratio, $order->id, $refund->id, 'output_gst');
@@ -79,18 +130,25 @@ final class PosRefundPoster
             ],
         ];
 
-        $entryDate = ($refund->business_date ?? $refund->refunded_at ?? now())->toDateString();
+        return $lines;
+    }
 
-        return $this->journal->post(
-            sourceType: 'pos_refund',
-            sourceId: (int) $refund->id,
-            entryDate: $entryDate,
-            businessDate: $refund->business_date?->toDateString(),
-            sourceRef: 'POS refund #'.$refund->id,
-            memo: 'POS refund — order #'.$order->id,
-            lines: $lines,
-            postedBy: $postedBy ?? $refund->refunded_by,
-        );
+    private function barSalesBaseAmount(PosOrder $order): float
+    {
+        $net = round((float) ($order->vat_net_taxable ?? 0), 2);
+        if ($net <= 0) {
+            return 0.0;
+        }
+
+        $discount = round((float) ($order->discount_amount ?? 0), 2);
+        $gstNet = round((float) ($order->gst_net_taxable ?? 0), 2);
+        $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+
+        if ($discount > 0 && $gstNet < 0.01 && $vatTax < 0.01) {
+            return round($net + $discount, 2);
+        }
+
+        return $net;
     }
 
     /** @param list<array<string, mixed>> $lines */

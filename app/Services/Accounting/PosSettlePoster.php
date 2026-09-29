@@ -4,7 +4,7 @@ namespace App\Services\Accounting;
 
 use App\Models\JournalEntry;
 use App\Models\PosOrder;
-use App\Models\PosPayment;
+use Illuminate\Support\Facades\Schema;
 
 final class PosSettlePoster
 {
@@ -44,9 +44,94 @@ final class PosSettlePoster
             return null;
         }
 
+        $lines = $this->buildLines($order);
+        if ($lines === []) {
+            return null;
+        }
+
+        $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
+
+        return $this->journal->post(
+            sourceType: 'pos_settle',
+            sourceId: (int) $order->id,
+            entryDate: $entryDate,
+            businessDate: $order->business_date?->toDateString(),
+            sourceRef: 'POS #'.$order->id,
+            memo: 'POS order settled',
+            lines: $lines,
+            postedBy: $postedBy,
+        );
+    }
+
+    /** Replace an existing pos_settle journal with current order tax splits (KGST backfill). */
+    public function repost(PosOrder $order, ?int $postedBy = null): ?JournalEntry
+    {
+        $order->loadMissing('payments');
+
+        if (! $this->isJournalRequired($order)) {
+            return null;
+        }
+
+        $lines = $this->buildLines($order);
+        if ($lines === []) {
+            return null;
+        }
+
+        $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
+
+        return $this->journal->replacePosted(
+            sourceType: 'pos_settle',
+            sourceId: (int) $order->id,
+            entryDate: $entryDate,
+            businessDate: $order->business_date?->toDateString(),
+            sourceRef: 'POS #'.$order->id,
+            memo: 'POS order settled',
+            lines: $lines,
+            postedBy: $postedBy,
+        );
+    }
+
+    public function hasPostedSettleJournal(PosOrder $order): bool
+    {
+        if (! Schema::hasTable('journal_entries')) {
+            return false;
+        }
+
+        return JournalEntry::query()
+            ->where('source_type', 'pos_settle')
+            ->where('source_id', $order->id)
+            ->where('status', JournalEntry::STATUS_POSTED)
+            ->exists();
+    }
+
+    /** Reverse settle GL when a paid bill is voided (guest never paid). */
+    public function reverse(PosOrder $order, ?int $postedBy = null): ?JournalEntry
+    {
+        if (! $this->hasPostedSettleJournal($order)) {
+            return null;
+        }
+
+        $entryDate = ($order->business_date ?? $order->voided_at ?? $order->closed_at ?? now())->toDateString();
+
+        return $this->journal->reversePosted(
+            sourceType: 'pos_settle',
+            sourceId: (int) $order->id,
+            reversalSourceType: 'pos_settle_reversal',
+            reversalSourceId: (int) $order->id,
+            entryDate: $entryDate,
+            businessDate: $order->business_date?->toDateString(),
+            sourceRef: 'POS void #'.$order->id,
+            memo: 'POS settle reversed — void #'.$order->id,
+            postedBy: $postedBy,
+        );
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function buildLines(PosOrder $order): array
+    {
         $total = round((float) $order->total_amount, 2);
         if ($total <= 0) {
-            return null;
+            return [];
         }
 
         $lines = [];
@@ -78,7 +163,7 @@ final class PosSettlePoster
         }
 
         $this->addCredit($lines, AccountCodes::RESTAURANT_SALES, (float) $order->gst_net_taxable, $order->id);
-        $this->addCredit($lines, AccountCodes::BAR_SALES, (float) $order->vat_net_taxable, $order->id);
+        $this->addCredit($lines, AccountCodes::BAR_SALES, $this->barSalesCreditAmount($order), $order->id);
         $this->addCredit($lines, AccountCodes::OUTPUT_CGST, (float) $order->cgst_amount, $order->id, 'output_gst');
         $this->addCredit($lines, AccountCodes::OUTPUT_SGST, (float) $order->sgst_amount, $order->id, 'output_gst');
         $this->addCredit($lines, AccountCodes::OUTPUT_IGST, (float) $order->igst_amount, $order->id, 'output_gst');
@@ -93,18 +178,97 @@ final class PosSettlePoster
             $this->addCredit($lines, AccountCodes::RESTAURANT_SALES, $rounding, $order->id);
         }
 
-        $entryDate = ($order->business_date ?? $order->closed_at ?? now())->toDateString();
+        $this->creditMissingTaxAndBalance($lines, $order);
 
-        return $this->journal->post(
-            sourceType: 'pos_settle',
-            sourceId: (int) $order->id,
-            entryDate: $entryDate,
-            businessDate: $order->business_date?->toDateString(),
-            sourceRef: 'POS #'.$order->id,
-            memo: 'POS order settled',
-            lines: $lines,
-            postedBy: $postedBy,
+        return $lines;
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function creditMissingTaxAndBalance(array &$lines, PosOrder $order): void
+    {
+        $headerTax = round((float) ($order->tax_amount ?? 0), 2);
+        $splitTax = round(
+            (float) ($order->cgst_amount ?? 0)
+            + (float) ($order->sgst_amount ?? 0)
+            + (float) ($order->igst_amount ?? 0)
+            + (float) ($order->vat_tax_amount ?? 0),
+            2
         );
+        $unsplitTax = round($headerTax - $splitTax, 2);
+        if ($unsplitTax >= 0.01) {
+            $this->creditTaxRemainder($lines, $order, $unsplitTax);
+        }
+
+        $debit = 0.0;
+        $credit = 0.0;
+        foreach ($lines as $line) {
+            $debit += (float) ($line['debit'] ?? 0);
+            $credit += (float) ($line['credit'] ?? 0);
+        }
+        $gap = round($debit - $credit, 2);
+        if ($gap >= 0.01) {
+            $discount = round((float) ($order->discount_amount ?? 0), 2);
+            $gstNet = round((float) ($order->gst_net_taxable ?? 0), 2);
+            $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+            if ($discount >= 0.01 && abs(round($gap - $discount, 2)) <= 0.01 && $gstNet < 0.01 && $vatTax < 0.01) {
+                return;
+            }
+
+            $this->creditTaxRemainder($lines, $order, $gap);
+        }
+    }
+
+    /** GL gross bar credit; vat_net_taxable on the order stays net for KGST turnover reports. */
+    private function barSalesCreditAmount(PosOrder $order): float
+    {
+        $net = round((float) ($order->vat_net_taxable ?? 0), 2);
+        if ($net <= 0) {
+            return 0.0;
+        }
+
+        $discount = round((float) ($order->discount_amount ?? 0), 2);
+        $gstNet = round((float) ($order->gst_net_taxable ?? 0), 2);
+        $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+
+        if ($discount > 0 && $gstNet < 0.01 && $vatTax < 0.01) {
+            return round($net + $discount, 2);
+        }
+
+        return $net;
+    }
+
+    /** @param list<array<string, mixed>> $lines */
+    private function creditTaxRemainder(array &$lines, PosOrder $order, float $amount): void
+    {
+        $amount = round($amount, 2);
+        if ($amount < 0.01) {
+            return;
+        }
+
+        $vatNet = round((float) ($order->vat_net_taxable ?? 0), 2);
+        $vatTax = round((float) ($order->vat_tax_amount ?? 0), 2);
+        if ($vatTax >= 0.01) {
+            $this->addCredit($lines, AccountCodes::OUTPUT_VAT, $amount, $order->id, 'output_vat');
+
+            return;
+        }
+
+        if ($vatNet >= 0.01) {
+            $this->addCredit($lines, AccountCodes::BAR_SALES, $amount, $order->id);
+
+            return;
+        }
+
+        $igst = round((float) ($order->igst_amount ?? 0), 2);
+        if ($igst > 0) {
+            $this->addCredit($lines, AccountCodes::OUTPUT_IGST, $amount, $order->id, 'output_gst');
+
+            return;
+        }
+
+        $half = round($amount / 2, 2);
+        $this->addCredit($lines, AccountCodes::OUTPUT_CGST, $half, $order->id, 'output_gst');
+        $this->addCredit($lines, AccountCodes::OUTPUT_SGST, round($amount - $half, 2), $order->id, 'output_gst');
     }
 
     /** @param list<array<string, mixed>> $lines */

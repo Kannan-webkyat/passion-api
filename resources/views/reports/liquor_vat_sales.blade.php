@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Liquor / VAT sales</title>
+    <title>Bar liquor sales (KGST)</title>
     <style>
         body { font-family: DejaVu Sans, sans-serif; font-size: 7px; color: #222; margin: 0; padding: 10px; }
         .header { text-align: center; margin-bottom: 10px; border-bottom: 1px solid #ccc; padding-bottom: 6px; }
@@ -19,7 +19,7 @@
 </head>
 <body>
     <div class="header">
-        <h1>Liquor / VAT sales</h1>
+        <h1>Bar liquor sales (KGST turnover)</h1>
         <p>{{ $restaurant?->name ?? 'Outlet' }}</p>
         <p>Period: {{ date('d M Y', strtotime($from)) }} to {{ date('d M Y', strtotime($to)) }}</p>
     </div>

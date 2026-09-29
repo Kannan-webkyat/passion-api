@@ -65,44 +65,68 @@ final class GrnApprovePoster
                 continue;
             }
 
+            // landed_unit_cost is 4dp; per-line round to 2dp then sum (matches stock value).
             $inventoryAmount = round((float) $line->landed_unit_cost * $accepted, 2);
             $isAlcohol = (bool) $line->inventoryItem?->is_alcohol;
 
             if ($isAlcohol) {
-                $inventoryLiquor += $inventoryAmount;
+                $inventoryLiquor = round($inventoryLiquor + $inventoryAmount, 2);
             } else {
-                $inventoryFood += $inventoryAmount;
+                $inventoryFood = round($inventoryFood + $inventoryAmount, 2);
             }
 
-            $recoverableTax = (float) ($line->line_recoverable_tax_accepted ?? 0);
+            $recoverableTax = round((float) ($line->line_recoverable_tax_accepted ?? 0), 2);
             if ($recoverableTax <= 0 && $legacyExclusive) {
                 $taxType = strtolower((string) ($line->purchaseOrderItem?->tax_type ?? 'gst'));
                 $lineTax = (float) $line->line_tax_accepted;
                 if ($taxType !== 'vat') {
-                    $recoverableTax = $lineTax;
+                    $recoverableTax = round($lineTax, 2);
                 }
             } elseif ($recoverableTax <= 0 && ! $legacyExclusive) {
                 $eligible = $line->tax_input_credit_eligible;
                 $lineTax = (float) $line->line_tax_accepted;
                 if ($eligible === true || ($eligible === null && strtolower((string) ($line->purchaseOrderItem?->tax_type ?? 'gst')) !== 'vat')) {
-                    $recoverableTax = $lineTax;
+                    $recoverableTax = round($lineTax, 2);
                 }
             }
 
-            $inputGst += $recoverableTax > 0 && ! $this->isRecoverableVatLine($line, $legacyExclusive)
-                ? $recoverableTax
-                : 0.0;
-            $inputVat += $recoverableTax > 0 && $this->isRecoverableVatLine($line, $legacyExclusive)
-                ? $recoverableTax
-                : 0.0;
+            if ($recoverableTax > 0 && ! $this->isRecoverableVatLine($line, $legacyExclusive)) {
+                $inputGst = round($inputGst + $recoverableTax, 2);
+            }
+            if ($recoverableTax > 0 && $this->isRecoverableVatLine($line, $legacyExclusive)) {
+                $inputVat = round($inputVat + $recoverableTax, 2);
+            }
 
-            $grniTotal += round(
-                (float) $line->line_subtotal_accepted
-                + (float) $line->line_tax_accepted
-                + (float) $line->line_cess_accepted
-                + (float) $line->line_freight_allocated,
+            $grniTotal = round(
+                $grniTotal + round(
+                    (float) $line->line_subtotal_accepted
+                    + (float) $line->line_tax_accepted
+                    + (float) $line->line_cess_accepted
+                    + (float) $line->line_freight_allocated,
+                    2
+                ),
                 2
             );
+        }
+
+        $inventoryFood = round($inventoryFood, 2);
+        $inventoryLiquor = round($inventoryLiquor, 2);
+        $inputGst = round($inputGst, 2);
+        $inputVat = round($inputVat, 2);
+        $grniTotal = round($grniTotal, 2);
+
+        // Landed (4dp×qty→2dp) vs GRNI (2dp components) can drift a few paise on large Bevco GRNs.
+        // Prefer trimming GRNI / inventory via JournalPostingService; here nudge inventory to match GRNI.
+        $debitTotal = round($inventoryFood + $inventoryLiquor + $inputGst + $inputVat, 2);
+        $diff = round($debitTotal - $grniTotal, 2);
+        if (abs($diff) > 0 && abs($diff) <= 0.05) {
+            if ($inventoryLiquor >= $inventoryFood && $inventoryLiquor > 0) {
+                $inventoryLiquor = round($inventoryLiquor - $diff, 2);
+            } elseif ($inventoryFood > 0) {
+                $inventoryFood = round($inventoryFood - $diff, 2);
+            } elseif ($diff < 0) {
+                $grniTotal = round($grniTotal + $diff, 2);
+            }
         }
 
         $lines = [];
@@ -110,21 +134,21 @@ final class GrnApprovePoster
         if ($inventoryFood > 0) {
             $lines[] = [
                 'account_code' => AccountCodes::INVENTORY_FOOD,
-                'debit' => round($inventoryFood, 2),
+                'debit' => $inventoryFood,
                 'meta' => ['grn_id' => $grn->id],
             ];
         }
         if ($inventoryLiquor > 0) {
             $lines[] = [
                 'account_code' => AccountCodes::INVENTORY_LIQUOR,
-                'debit' => round($inventoryLiquor, 2),
+                'debit' => $inventoryLiquor,
                 'meta' => ['grn_id' => $grn->id],
             ];
         }
         if ($inputGst > 0) {
             $lines[] = [
                 'account_code' => AccountCodes::INPUT_GST,
-                'debit' => round($inputGst, 2),
+                'debit' => $inputGst,
                 'tax_tag' => 'input_gst',
                 'meta' => ['grn_id' => $grn->id],
             ];
@@ -132,7 +156,7 @@ final class GrnApprovePoster
         if ($inputVat > 0) {
             $lines[] = [
                 'account_code' => AccountCodes::INPUT_VAT,
-                'debit' => round($inputVat, 2),
+                'debit' => $inputVat,
                 'tax_tag' => 'input_vat',
                 'meta' => ['grn_id' => $grn->id],
             ];
@@ -140,7 +164,7 @@ final class GrnApprovePoster
         if ($grniTotal > 0) {
             $lines[] = [
                 'account_code' => AccountCodes::GRNI,
-                'credit' => round($grniTotal, 2),
+                'credit' => $grniTotal,
                 'meta' => [
                     'grn_id' => $grn->id,
                     'purchase_order_id' => $grn->purchase_order_id,

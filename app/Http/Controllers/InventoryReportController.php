@@ -55,15 +55,24 @@ class InventoryReportController extends Controller
     public function stockStatus(Request $request)
     {
         $this->checkPermission('inventory-report-status');
+        $itemType = strtolower((string) ($request->query('item_type') ?? 'all'));
         $categoryId = $request->query('category_id');
         $locationId = $request->query('location_id');
         $search = $request->query('search');
 
         // Note: Joining is needed for sorting by category name.
-        // We use 'category_id' as verified by tinker.
         $query = InventoryItem::with(['category', 'issueUom'])
             ->leftJoin('inventory_categories', 'inventory_items.category_id', '=', 'inventory_categories.id')
             ->select('inventory_items.*');
+
+        if ($itemType === 'liquor') {
+            $query->where('inventory_items.is_alcohol', true);
+        } elseif ($itemType === 'food') {
+            $query->where(function ($q) {
+                $q->where('inventory_items.is_alcohol', false)
+                    ->orWhereNull('inventory_items.is_alcohol');
+            });
+        }
 
         if ($categoryId && $categoryId !== 'all') {
             $query->where('inventory_items.category_id', $categoryId);
@@ -77,7 +86,28 @@ class InventoryReportController extends Controller
         }
 
         $items = $query->orderBy('inventory_categories.name')->orderBy('inventory_items.name')->get();
-        $locations = InventoryLocation::all();
+        $locations = $this->resolveStockStatusLocations($itemType);
+
+        // Categories for the type dropdown: only those with matching liquor/food items.
+        $categoryQuery = InventoryCategory::query()
+            ->whereHas('items', function ($q) use ($itemType) {
+                if ($itemType === 'liquor') {
+                    $q->where('is_alcohol', true);
+                } elseif ($itemType === 'food') {
+                    $q->where(function ($inner) {
+                        $inner->where('is_alcohol', false)->orWhereNull('is_alcohol');
+                    });
+                }
+            })
+            ->orderBy('name');
+
+        $categories = $categoryQuery->get(['id', 'name', 'parent_id']);
+
+        // Ignore a location filter that does not belong to this type (e.g. kitchen while on Liquor).
+        $allowedLocationIds = $locations->pluck('id')->map(fn ($id) => (int) $id)->all();
+        if ($locationId && $locationId !== 'all' && ! in_array((int) $locationId, $allowedLocationIds, true)) {
+            $locationId = null;
+        }
 
         // Cross-tabulate stock from inventory_item_locations
         $stockData = DB::table('inventory_item_locations')
@@ -95,7 +125,7 @@ class InventoryReportController extends Controller
                 $qty = (float) ($itemStocks->where('inventory_location_id', $loc->id)->first()?->quantity ?? 0);
                 $locationBreakdown[$loc->id] = $qty;
 
-                if (!$locationId || $locationId == $loc->id) {
+                if (! $locationId || $locationId === 'all' || (string) $locationId === (string) $loc->id) {
                     $totalQty += $qty;
                 }
             }
@@ -109,6 +139,7 @@ class InventoryReportController extends Controller
                 'name' => $item->name,
                 'sku' => $item->sku,
                 'category' => $item->category?->name ?? 'Uncategorized',
+                'item_type' => $item->is_alcohol ? 'liquor' : 'food',
                 'uom' => $item->issueUom?->short_name ?? 'unit',
                 'unit_cost' => round($unitCost, 4),
                 'total_qty' => round($totalQty, 3),
@@ -121,7 +152,7 @@ class InventoryReportController extends Controller
         });
 
         if ($locationId && $locationId !== 'all') {
-            $report = $report->filter(fn ($r) => $r['location_stock'][$locationId] != 0)->values();
+            $report = $report->filter(fn ($r) => ($r['location_stock'][$locationId] ?? 0) != 0)->values();
         }
 
         return response()->json([
@@ -132,7 +163,7 @@ class InventoryReportController extends Controller
                 'low_stock_count' => $report->where('is_low', true)->count(),
             ],
             'locations' => $locations,
-            'categories' => InventoryCategory::all(),
+            'categories' => $categories,
         ]);
     }
 
@@ -248,9 +279,29 @@ class InventoryReportController extends Controller
                     $theoretical[$itemId] = ($theoretical[$itemId] ?? 0) + $rawQty;
                 }
             } elseif ($menuItem->inventory_item_id) {
-                $deductQty = (float)$qty;
-                if ($orderItem->menu_item_variant_id && ($ml = (float)($orderItem->variant?->ml_quantity ?? 0)) > 0) {
-                    $deductQty = $ml * (float)$qty;
+                $deductQty = (float) $qty;
+                if ($orderItem->menu_item_variant_id && ($ml = (float) ($orderItem->variant?->ml_quantity ?? 0)) > 0) {
+                    $label = strtolower(trim((string) ($orderItem->variant?->size_label ?? '')));
+                    $cf = max(1.0, (float) ($menuItem->inventoryItem?->conversion_factor ?? 1));
+                    if (
+                        $ml <= 1.0001
+                        && $cf > 1.0001
+                        && (
+                            str_contains($label, 'full')
+                            || str_contains($label, 'bottle')
+                            || str_contains($label, 'btl')
+                            || str_contains($label, 'bottile')
+                        )
+                    ) {
+                        $deductQty = $cf * (float) $qty;
+                    } else {
+                        $deductQty = $ml * (float) $qty;
+                    }
+                } elseif (
+                    (bool) ($menuItem->is_direct_sale ?? false)
+                    && ($cf = max(1.0, (float) ($menuItem->inventoryItem?->conversion_factor ?? 1))) > 1.0001
+                ) {
+                    $deductQty = $cf * (float) $qty;
                 }
                 $theoretical[$menuItem->inventory_item_id] = ($theoretical[$menuItem->inventory_item_id] ?? 0) + $deductQty;
             }
@@ -836,6 +887,62 @@ class InventoryReportController extends Controller
     }
 
     /**
+     * Locations for Stock Status filters / totals by item type.
+     * Liquor: Main Store + bar stores (and outlet bar_location_id links).
+     * Food: Main Store + kitchen stores (and outlet kitchen_location_id links).
+     * All: every location.
+     *
+     * @return \Illuminate\Support\Collection<int, InventoryLocation>
+     */
+    private function resolveStockStatusLocations(string $itemType)
+    {
+        if ($itemType === 'liquor') {
+            $ids = collect($this->resolveExciseLocations())->pluck('id')->all();
+
+            return InventoryLocation::query()
+                ->whereIn('id', $ids)
+                ->orderBy('name')
+                ->get(['id', 'name', 'type']);
+        }
+
+        if ($itemType === 'food') {
+            $byId = [];
+
+            foreach (
+                InventoryLocation::query()
+                    ->where(function ($q) {
+                        $q->whereIn('type', ['main_store', 'kitchen_store'])
+                            ->orWhereIn('name', ['Main Store', 'Kitchen Store']);
+                    })
+                    ->orderBy('id')
+                    ->get(['id', 'name', 'type']) as $loc
+            ) {
+                $byId[(int) $loc->id] = $loc;
+            }
+
+            $linkedIds = DB::table('restaurant_masters')
+                ->whereNotNull('kitchen_location_id')
+                ->distinct()
+                ->pluck('kitchen_location_id');
+
+            if ($linkedIds->isNotEmpty()) {
+                foreach (
+                    InventoryLocation::query()
+                        ->whereIn('id', $linkedIds)
+                        ->orderBy('id')
+                        ->get(['id', 'name', 'type']) as $loc
+                ) {
+                    $byId[(int) $loc->id] = $loc;
+                }
+            }
+
+            return collect(array_values($byId))->sortBy('name')->values();
+        }
+
+        return InventoryLocation::query()->orderBy('name')->get(['id', 'name', 'type']);
+    }
+
+    /**
      * Locations for excise liquor register: Main Store + all bar stores /
      * outlet bar locations. Combined so opening, GRN purchases (at main),
      * and bar POS sales appear on one dated register.
@@ -886,21 +993,87 @@ class InventoryReportController extends Controller
     }
 
     /**
+     * Bottle size in ml for excise labels / ML↔BTL normalization.
+     * Prefer size parsed from name/SKU when conversion_factor is 1 (BTL stock).
+     */
+    private function exciseBottleMlFromItem(InventoryItem $item): float
+    {
+        $hay = (string) $item->name.' '.(string) ($item->sku ?? '');
+        if (preg_match('/(1000|750|650|500|375|330)/', $hay, $m)) {
+            return (float) $m[1];
+        }
+
+        $cf = (float) ($item->conversion_factor ?: 0);
+
+        return $cf >= 100 ? $cf : 0.0;
+    }
+
+    /**
+     * When stock is BTL but a movement aggregate is still in ml (legacy POS qty 750/1500…),
+     * convert to bottle units. Real bottle counts (incl. large GRNs) stay as-is.
+     *
+     * Do NOT use "qty >= bottleMl ⇒ divide": a GRN of 900 × 650ml beer became 1.38 Btl.
+     */
+    private function exciseNormalizeToBottles(float $qty, float $bottleMl): float
+    {
+        if ($bottleMl < 100 || abs($qty) < 0.0001) {
+            return $qty;
+        }
+
+        // Full-bottle beer / cider sizes are always BTL counts — never ml-normalize.
+        foreach ([330.0, 500.0, 650.0] as $beerMl) {
+            if (abs($bottleMl - $beerMl) < 0.5) {
+                return $qty;
+            }
+        }
+
+        $abs = abs($qty);
+        if ($abs + 0.0001 < $bottleMl) {
+            return $qty;
+        }
+
+        $asBottles = $abs / $bottleMl;
+        $nearest = (float) round($asBottles);
+        // Non-multiples of bottle ml (e.g. 900 on a 750ml spirit) are bottle counts.
+        if ($nearest < 1 || abs($asBottles - $nearest) > 0.001) {
+            return $qty;
+        }
+
+        // Huge exact multiples are warehouse bottle movements, not a few ml lines.
+        if ($nearest > 24) {
+            return $qty;
+        }
+
+        $sign = $qty < 0 ? -1.0 : 1.0;
+
+        return round($sign * $nearest, 4);
+    }
+
+    /**
      * Excise liquor register (Main Store + Bar)
      *
      * Excel-style output:
      * - Opening: bottles + loose litres (hotel liquor stock at main + bars)
      * - Receipts: GRN purchases into those locations on the selected date
-     * - Sales: bottles + pegs (1 peg = 60ml by default) — POS outs from bars
-     * - Closing: bottles + loose litres
+     * - Sales: bottles + pegs (1 peg = 60ml by default) — net POS outs from bars
+     *   (POS Order − Inventory Reversal for voids / cancel / reduce)
+     * - Closing: bottles + pegs derived so Opening + Receipts − Sales = Closing
+     *   (paper-book view; real closing ml kept in debug)
+     * - Total: Opening + Receipts in the same BTL/PEG units
      *
      * Internal main→bar transfers are not counted as receipts (would double-count).
      *
      * Assumptions:
-     * - Spirits are tracked in ml (issue UOM = ml, conversion_factor = bottle ml)
-     * - Beer is tracked in pcs (issue UOM = Pcs, conversion_factor = 1)
+     * - Spirits on ML: issue UOM = ML, conversion_factor = bottle ml (750/1000) → bottles + pegs
+     * - Full-bottle spirits on BTL: issue UOM = BTL, cf = 1 → bottle counts (bottle size from name)
+     * - Beer: issue UOM = BTL/Pcs → bottle/piece counts (no pegs)
      * - POS generates inventory_transactions out rows with reason 'POS Order'
+     * - Void / cancel / reduce puts stock back as type in, reason 'Inventory Reversal'
+     *   → Sales = POS Order outs − Inventory Reversal ins (net sold that day)
      * - Supplier receipts post as reason 'GRN Receipt' at Main Store
+     * - After ML→BTL conversion, older spirit POS lines may still store qty in ml (750/1500);
+     *   those outbound aggregates are normalized to bottles when stock is BTL.
+     *   Beer (330/500/650) and GRN/inbound bottle counts are never ml-normalized.
      */
     public function exciseBar(Request $request)
     {
@@ -977,9 +1150,9 @@ class InventoryReportController extends Controller
                 $baseName = preg_replace('/\s*[—\-]?\s*\d+(?:\.\d+)?\s*ml\s*$/iu', '', $rawName) ?? $rawName;
                 $baseName = mb_strtolower(trim(preg_replace('/\s{2,}/u', ' ', $baseName) ?? $baseName));
 
-                $bottleMl = (int) round((float) ($i->conversion_factor ?: 0));
+                $bottleMl = $this->exciseBottleMlFromItem($i);
                 // Larger bottle first within the name group
-                $bottleRank = $bottleMl > 0 ? (99999 - $bottleMl) : 99999;
+                $bottleRank = $bottleMl > 0 ? (99999 - (int) round($bottleMl)) : 99999;
 
                 return sprintf(
                     '%05d-%05d-%s-%s-%05d-%s',
@@ -1028,7 +1201,10 @@ class InventoryReportController extends Controller
                 SUM(CASE WHEN type = 'in' THEN quantity ELSE 0 END) as in_qty,
                 SUM(CASE WHEN type = 'out' THEN quantity ELSE 0 END) as out_qty,
                 SUM(CASE WHEN type = 'in' AND reason IN ({$purchaseReasonList}) THEN quantity ELSE 0 END) as purchase_in_qty,
-                SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty
+                SUM(CASE WHEN type = 'out' AND reason = 'POS Order' THEN quantity ELSE 0 END) as pos_out_qty,
+                SUM(CASE WHEN type = 'in' AND reason = 'Inventory Reversal' THEN quantity ELSE 0 END) as pos_reversal_in_qty,
+                SUM(CASE WHEN type = 'in' AND reason = 'Opening Stock' THEN quantity ELSE 0 END) as opening_stock_in_qty,
+                SUM(CASE WHEN type = 'out' AND reason = 'Opening Stock' THEN quantity ELSE 0 END) as opening_stock_out_qty
             ")
             ->groupBy('inventory_item_id')
             ->get()
@@ -1083,31 +1259,7 @@ class InventoryReportController extends Controller
             $splitBottlePeg,
             $pegMl
         ) {
-            $bottleMl = (float) ($item->conversion_factor ?: 0);
-
-            $nowQty = (float) ($qtyNowByItemId[$item->id] ?? 0);
-
-            $day = $txAggDay->get($item->id);
-            $dayIn = (float) ($day?->in_qty ?? 0);
-            $dayOut = (float) ($day?->out_qty ?? 0);
-            $purchaseIn = (float) ($day?->purchase_in_qty ?? 0);
-            $posOut = (float) ($day?->pos_out_qty ?? 0);
-            $netDay = $dayIn - $dayOut;
-
-            $after = $txAggAfter->get($item->id);
-            $afterNet = (float) ($after?->in_qty ?? 0) - (float) ($after?->out_qty ?? 0);
-
-            // current = opening + netDay + afterNet → opening / end-of-day from live stock
-            $openingQty = $nowQty - $netDay - $afterNet;
-            $closingQty = $nowQty - $afterNet; // stock at end of selected date (matches book)
-
-            // Register columns: Receipts = GRN only; Sales = POS only.
-            // Other day movements (adjustments, wastage, transfers net, etc.) explain
-            // Opening + Receipts − Sales ≠ Closing when present.
-            $receiptsQty = $purchaseIn;
-            $salesQty = $posOut;
-            $otherDayNet = ($dayIn - $purchaseIn) - ($dayOut - $posOut); // non-GRN in − non-POS out
-            $totalQty = $openingQty + $receiptsQty;
+            $bottleMl = $this->exciseBottleMlFromItem($item);
 
             $uomRaw = strtolower(trim((string) ($item->issueUom?->short_name ?? '')));
             $uomName = strtolower(trim((string) ($item->issueUom?->name ?? '')));
@@ -1116,14 +1268,92 @@ class InventoryReportController extends Controller
                 || $uomRaw === 'milliliter'
                 || str_contains($uomName, 'millilitre')
                 || str_contains($uomName, 'milliliter');
+            $isBtl = $uomRaw === 'btl'
+                || $uomRaw === 'bottle'
+                || str_contains($uomName, 'bottle');
 
-            // Spirits-like (ml tracked): sealed bottles + open stock as pegs
+            $nowQty = (float) ($qtyNowByItemId[$item->id] ?? 0);
+
+            $day = $txAggDay->get($item->id);
+            $dayIn = (float) ($day?->in_qty ?? 0);
+            $dayOut = (float) ($day?->out_qty ?? 0);
+            $purchaseIn = (float) ($day?->purchase_in_qty ?? 0);
+            $posOut = (float) ($day?->pos_out_qty ?? 0);
+            $posReversalIn = (float) ($day?->pos_reversal_in_qty ?? 0);
+            $openingStockIn = (float) ($day?->opening_stock_in_qty ?? 0);
+            $openingStockOut = (float) ($day?->opening_stock_out_qty ?? 0);
+
+            $after = $txAggAfter->get($item->id);
+            $afterIn = (float) ($after?->in_qty ?? 0);
+            $afterOut = (float) ($after?->out_qty ?? 0);
+
+            // BTL stock: only rewrite legacy ML-sized *outbound* aggregates (POS).
+            // Also normalize void put-backs when those outs were stored in ml.
+            // Never touch GRN / opening / other inbound — e.g. receipt of 900 bottles must stay 900.
+            if ($isBtl && ! $isMl && $bottleMl >= 100) {
+                $dayOut = $this->exciseNormalizeToBottles($dayOut, $bottleMl);
+                $posOut = $this->exciseNormalizeToBottles($posOut, $bottleMl);
+                $posReversalIn = $this->exciseNormalizeToBottles($posReversalIn, $bottleMl);
+                $afterOut = $this->exciseNormalizeToBottles($afterOut, $bottleMl);
+            }
+
+            $netDay = $dayIn - $dayOut;
+            $afterNet = $afterIn - $afterOut;
+
+            // current = opening + netDay + afterNet → true start-of-day before any day txs
+            $openingQty = $nowQty - $netDay - $afterNet;
+            $closingQty = $nowQty - $afterNet; // stock at end of selected date (matches book)
+
+            // Same-day "Opening Stock" is a process mistake mid-period, but for Excise
+            // roll it into Opening so Opening + Receipts − Sales ties to Closing
+            // (instead of Closing jumping while Receipts stay 0).
+            $openingStockNet = $openingStockIn - $openingStockOut;
+            $openingQty += $openingStockNet;
+
+            // Register columns: Receipts = GRN only; Sales = net POS (outs − void reversals).
+            // Other day movements (adjustments, wastage, transfers net, etc.) explain
+            // Opening + Receipts − Sales ≠ Closing when present.
+            // Only reverse up to same-day POS outs so a next-day void put-back stays visible
+            // in other_day_net instead of vanishing or making sales negative.
+            $receiptsQty = $purchaseIn;
+            $reversalAppliedToSales = min($posOut, $posReversalIn);
+            $salesQty = $posOut - $reversalAppliedToSales;
+            $otherDayNet = ($dayIn - $purchaseIn - $openingStockIn - $reversalAppliedToSales)
+                - ($dayOut - $posOut - $openingStockOut);
+            $totalQty = $openingQty + $receiptsQty;
+
+            // Spirits-like (ml tracked): sealed bottles + open stock as pegs.
+            // Paper-book rule: Total = Opening + Receipts, Closing = Total − Sales
+            // in half-peg integer units (1 peg = 60ml → 2 half-pegs of 30ml;
+            // 1 bottle = floor(bottle_ml / 30) half-pegs). That avoids the
+            // 10ml remainder when 1000ml is not divisible by 30, so BTL/PEG
+            // columns always tie. Real closing ml stays in debug.
             if ($isMl && $bottleMl > 0) {
                 $opening = $splitBottlePeg($openingQty, $bottleMl, $pegMl);
                 $receipts = $splitBottlePeg($receiptsQty, $bottleMl, $pegMl);
-                $total = $splitBottlePeg($totalQty, $bottleMl, $pegMl);
                 $sales = $splitBottlePeg($salesQty, $bottleMl, $pegMl);
-                $closing = $splitBottlePeg($closingQty, $bottleMl, $pegMl);
+
+                $halfPegMl = $pegMl / 2.0;
+                $halfPerBottle = max(1, (int) floor($bottleMl / $halfPegMl));
+
+                $toHalf = static function (array $bp) use ($halfPerBottle): int {
+                    return ((int) round((float) $bp['bottles'])) * $halfPerBottle
+                        + (int) round(((float) $bp['pegs']) * 2);
+                };
+                $fromHalf = static function (int $half) use ($halfPerBottle): array {
+                    $half = max(0, $half);
+                    $bottles = intdiv($half, $halfPerBottle);
+                    $remHalf = $half % $halfPerBottle;
+
+                    return [
+                        'bottles' => (float) $bottles,
+                        'pegs' => round($remHalf / 2, 2),
+                    ];
+                };
+
+                $totalHalf = $toHalf($opening) + $toHalf($receipts);
+                $total = $fromHalf($totalHalf);
+                $closing = $fromHalf($totalHalf - $toHalf($sales));
 
                 return [
                     'item_id' => $item->id,
@@ -1145,18 +1375,26 @@ class InventoryReportController extends Controller
                     'closing_pegs' => (float) $closing['pegs'],
                     'debug' => [
                         'opening_qty_ml' => round($openingQty, 3),
+                        'opening_stock_rolled_into_opening_ml' => round($openingStockNet, 3),
                         'receipts_purchase_ml' => round($receiptsQty, 3),
                         'total_qty_ml' => round($totalQty, 3),
-                        'pos_out_ml' => round($salesQty, 3),
+                        'pos_out_ml' => round($posOut, 3),
+                        'pos_reversal_in_ml' => round($posReversalIn, 3),
+                        'sales_net_ml' => round($salesQty, 3),
                         'other_day_net_ml' => round($otherDayNet, 3),
                         'closing_qty_ml' => round($closingQty, 3),
                         'now_qty_ml' => round($nowQty, 3),
                         'peg_ml' => $pegMl,
+                        'half_per_bottle' => $halfPerBottle,
+                        'register_balanced' => true,
                     ],
                 ];
             }
 
-            // Beer / pcs-like — count only (no pegs)
+            // BTL / pcs — count only (no pegs). bottle_ml from name when available (excise label).
+            // Same paper-book rule: Closing = Opening + Receipts − Sales.
+            $closingBottlesBook = round($openingQty + $receiptsQty - $salesQty, 2);
+
             return [
                 'item_id' => $item->id,
                 'item_name' => $item->name,
@@ -1164,25 +1402,31 @@ class InventoryReportController extends Controller
                 'category_id' => $item->category_id,
                 'excise_sort_order' => $item->category?->excise_sort_order,
                 'uom' => $item->issueUom?->short_name ?? '—',
-                'bottle_ml' => null,
+                'bottle_ml' => $bottleMl >= 100 ? (int) round($bottleMl) : null,
                 'opening_bottles' => round($openingQty, 2),
                 'opening_pegs' => null,
                 'receipts_bottles' => round($receiptsQty, 2),
                 'receipts_pegs' => null,
-                'total_bottles' => round($totalQty, 2),
+                'total_bottles' => round($openingQty + $receiptsQty, 2),
                 'total_pegs' => null,
                 'sales_bottles' => round($salesQty, 2),
                 'sales_pegs' => null,
-                'closing_bottles' => round($closingQty, 2),
+                'closing_bottles' => $closingBottlesBook,
                 'closing_pegs' => null,
                 'debug' => [
                     'opening_qty' => round($openingQty, 3),
+                    'opening_stock_rolled_into_opening' => round($openingStockNet, 3),
                     'receipts_purchase' => round($receiptsQty, 3),
                     'total_qty' => round($totalQty, 3),
-                    'pos_out' => round($salesQty, 3),
+                    'pos_out' => round($posOut, 3),
+                    'pos_reversal_in' => round($posReversalIn, 3),
+                    'sales_net' => round($salesQty, 3),
                     'other_day_net' => round($otherDayNet, 3),
                     'closing_qty' => round($closingQty, 3),
+                    'closing_book' => $closingBottlesBook,
                     'now_qty' => round($nowQty, 3),
+                    'stock_uom' => $isBtl ? 'BTL' : ($item->issueUom?->short_name ?? ''),
+                    'register_balanced' => true,
                 ],
             ];
         })->values();
