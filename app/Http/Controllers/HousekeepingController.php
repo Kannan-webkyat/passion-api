@@ -2817,7 +2817,13 @@ class HousekeepingController extends Controller
             ], 422);
         }
 
-        if ($newStatus === 'in_progress') {
+        // Supervisor sends a completed room back for re-cleaning before approving inspection.
+        $reopening = $newStatus === 'in_progress'
+            && $release->status === RoomCleaningRelease::STATUS_INSPECTION_PENDING;
+
+        if ($reopening) {
+            $this->authorizePermissions([self::HK_ASSIGNABLE, self::HK_SUPERVISOR_INSPECTION]);
+        } elseif ($newStatus === 'in_progress') {
             $startError = $this->cleaningAvailability->assertCanStartCleaning($release);
             if ($startError !== null) {
                 return response()->json(['message' => $startError], 422);
@@ -2859,6 +2865,10 @@ class HousekeepingController extends Controller
             $cleaning->status = $newStatus;
 
             if ($newStatus === 'in_progress') {
+                if ($reopening) {
+                    $release->completed_at = null;
+                    $release->completed_by = null;
+                }
                 $this->cleaningAvailability->markCleaningStarted($release);
             }
             if ($newStatus === 'cleaned') {
