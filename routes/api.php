@@ -163,6 +163,8 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
     Route::post('bookings/{booking}/preview-early-checkout', [BookingController::class, 'previewEarlyCheckout']);
     Route::post('bookings/{booking}/early-checkout', [BookingController::class, 'applyEarlyCheckout']);
+    Route::post('bookings/{booking}/preview-change-check-in', [BookingController::class, 'previewChangeCheckIn']);
+    Route::post('bookings/{booking}/change-check-in', [BookingController::class, 'changeCheckIn']);
     Route::post('bookings/{booking}/preview-cancellation', [BookingController::class, 'previewCancellation']);
     Route::post('bookings/{booking}/cancel', [BookingController::class, 'cancelReservation']);
     Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);

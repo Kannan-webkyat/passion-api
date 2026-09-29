@@ -433,6 +433,7 @@ class BookingController extends Controller
     public function chart(Request $request)
     {
         $this->allowReservationChartRead();
+        $this->syncSplitStayRoomOccupancy();
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -518,6 +519,41 @@ class BookingController extends Controller
                     $block->setAttribute('inspection_snapshot', $enriched);
                 }
             }
+        }
+    }
+
+    private function roomIdGuestIsInNow(Booking $booking): int
+    {
+        $now = now();
+        $segments = $booking->segments()->orderBy('check_in_at')->get();
+        $current = $segments->first(fn($s) => Carbon::parse($s->check_in_at ?? $s->check_in)->lte($now)
+            && Carbon::parse($s->check_out_at ?? $s->check_out)->gt($now));
+
+        return (int) (($current ?? $segments->first())?->room_id ?? $booking->room_id);
+    }
+
+    /**
+     * rooms.status for split stays: the check-in only marks the arrival room, so mark each later
+     * room occupied once an in-house guest's segment in it has started.
+     */
+    private function syncSplitStayRoomOccupancy(): void
+    {
+        $now = now();
+        $roomIds = BookingSegment::query()
+            ->where('status', 'checked_in')
+            ->where('check_in_at', '<=', $now)
+            ->where('check_out_at', '>', $now)
+            ->whereHas('booking', fn($q) => $q->where('status', 'checked_in'))
+            ->whereIn('booking_id', BookingSegment::query()
+                ->select('booking_id')
+                ->groupBy('booking_id')
+                ->havingRaw('COUNT(*) > 1'))
+            ->pluck('room_id')
+            ->unique()
+            ->all();
+
+        if ($roomIds !== []) {
+            Room::whereIn('id', $roomIds)->whereIn('status', ['available', 'vacant'])->update(['status' => 'occupied']);
         }
     }
 
@@ -1632,6 +1668,22 @@ class BookingController extends Controller
             ]);
         }
 
+        // Rooms the guest already left through a mid-stay room transfer (segment closed as checked_out);
+        // housekeeping was handled at transfer time and the room may since have been resold.
+        $vacatedRoomIds = [];
+        if (($validated['status'] ?? null) === 'checked_out') {
+            $segmentStates = $booking->segments()->get(['room_id', 'status']);
+            $openRoomIds = $segmentStates->where('status', '!=', 'checked_out')->pluck('room_id')->map(fn($id) => (int) $id);
+            if ($openRoomIds->isNotEmpty()) {
+                $vacatedRoomIds = $segmentStates->where('status', 'checked_out')->pluck('room_id')
+                    ->map(fn($id) => (int) $id)
+                    ->diff($openRoomIds)
+                    ->unique()
+                    ->values()
+                    ->all();
+            }
+        }
+
         // Sync Stay Segments
         if (isset($validated['room_id']) || isset($validated['check_in']) || isset($validated['check_out']) || isset($validated['status'])) {
             $segmentCount = $booking->segments()->count();
@@ -1683,7 +1735,14 @@ class BookingController extends Controller
             };
 
             // Collect every distinct room touched by this booking's segments
-            $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
+            $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique()
+                ->reject(fn($id) => in_array((int) $id, $vacatedRoomIds, true));
+
+            // Split stay: only the room the guest walks into now is occupied; later rooms are
+            // marked when the guest reaches them (syncSplitStayRoomOccupancy on chart load).
+            if ($validated['status'] === 'checked_in' && $booking->segments()->count() > 1) {
+                $allRoomIds = collect([$this->roomIdGuestIsInNow($booking)]);
+            }
 
             Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => $roomStatus]);
 
@@ -1707,6 +1766,9 @@ class BookingController extends Controller
                 $checkoutNotifyRoomIds = [];
                 foreach ($segmentsForHk as $segment) {
                     $rid = (int) $segment->room_id;
+                    if (in_array($rid, $vacatedRoomIds, true)) {
+                        continue;
+                    }
                     $checkoutNotifyRoomIds[] = $rid;
                     $checkoutDate = (string) ($segment->check_out ?? $booking->check_out ?? $today);
                     $checkoutDay = Carbon::parse($checkoutDate)->startOfDay();
@@ -2514,6 +2576,166 @@ class BookingController extends Controller
         ]);
     }
 
+    // ── Change check-in date (reserved, not yet arrived) ───────────────────────
+    public function previewChangeCheckIn(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        $resolved = $this->resolveCheckInChange($request, $booking);
+        if ($resolved instanceof \Illuminate\Http\JsonResponse) {
+            return $resolved;
+        }
+
+        return response()->json($resolved['preview']);
+    }
+
+    public function changeCheckIn(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        $resolved = $this->resolveCheckInChange($request, $booking);
+        if ($resolved instanceof \Illuminate\Http\JsonResponse) {
+            return $resolved;
+        }
+
+        $preview = $resolved['preview'];
+        $newCheckInAt = $resolved['new_check_in_at'];
+        $newCheckOutAt = $resolved['new_check_out_at'];
+
+        $user = Auth::user();
+        $userName = $user ? $user->name : '';
+        $timestamp = now()->format('Y-m-d H:i:s');
+        $checkoutLine = $preview['new_check_out'] !== $preview['original_check_out']
+            ? " | Check-out: {$preview['original_check_out']} → {$preview['new_check_out']}"
+            : '';
+        $auditMsg = "[Check-in date: {$preview['original_check_in']} → {$preview['new_check_in']}{$checkoutLine}"
+            . ($userName ? " by {$userName}" : '')
+            . " on {$timestamp}]";
+        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+        DB::transaction(function () use ($booking, $preview, $newCheckInAt, $newCheckOutAt, $notes) {
+            BookingRoomAvailability::lockAndAssertSellable(
+                [(int) $booking->room_id],
+                $newCheckInAt,
+                $newCheckOutAt,
+                (string) $booking->status,
+                (int) $booking->id,
+            );
+
+            $booking->update([
+                'check_in' => $preview['new_check_in'],
+                'check_in_at' => $newCheckInAt,
+                'check_out' => $preview['new_check_out'],
+                'check_out_at' => $newCheckOutAt,
+                'total_price' => $preview['new_total'],
+                'notes' => $notes,
+            ]);
+
+            $booking->segments()->update([
+                'check_in' => $preview['new_check_in'],
+                'check_in_at' => $newCheckInAt,
+                'check_out' => $preview['new_check_out'],
+                'check_out_at' => $newCheckOutAt,
+                'total_price' => $preview['new_total'],
+            ]);
+        });
+
+        return response()->json([
+            'message' => 'Check-in date changed.',
+            'booking' => $booking->fresh()->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']),
+            'preview' => $preview,
+        ]);
+    }
+
+    /**
+     * Shared guards + pricing for the check-in date change preview/apply pair.
+     * Keeping the number of nights shifts check-out by the same days and keeps the total;
+     * otherwise the booked average nightly rate is applied to the new night count.
+     *
+     * @return array{preview: array<string, mixed>, new_check_in_at: Carbon, new_check_out_at: Carbon}|\Illuminate\Http\JsonResponse
+     */
+    private function resolveCheckInChange(Request $request, Booking $booking)
+    {
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return response()->json(['message' => 'Check-in date cannot be changed for hourly package stays.'], 422);
+        }
+
+        if (! in_array($booking->status, ['pending', 'confirmed'], true)) {
+            return response()->json(['message' => 'Check-in date can only be changed before the guest checks in.'], 422);
+        }
+
+        if ($booking->segments()->count() > 1) {
+            return response()->json(['message' => 'Check-in date cannot be changed for split stays.'], 422);
+        }
+
+        $validated = $request->validate([
+            'new_check_in' => 'required|date',
+            'keep_nights' => 'nullable|boolean',
+        ]);
+
+        $keepNights = (bool) ($validated['keep_nights'] ?? false);
+        $oldCheckIn = Carbon::parse($booking->check_in)->startOfDay();
+        $oldCheckOut = Carbon::parse($booking->check_out)->startOfDay();
+        $newCheckIn = Carbon::parse($validated['new_check_in'])->startOfDay();
+        $oldNights = max(1, (int) $oldCheckIn->diffInDays($oldCheckOut));
+
+        if ($newCheckIn->lt(now()->startOfDay())) {
+            return response()->json(['message' => 'Check-in date cannot be in the past.'], 422);
+        }
+
+        if ($newCheckIn->equalTo($oldCheckIn)) {
+            return response()->json(['message' => 'Choose a different check-in date.'], 422);
+        }
+
+        $newCheckOut = $keepNights ? $newCheckIn->copy()->addDays($oldNights) : $oldCheckOut->copy();
+        if ($newCheckIn->gte($newCheckOut)) {
+            return response()->json(['message' => 'Check-in date must be before the check-out date.'], 422);
+        }
+        $newNights = max(1, (int) $newCheckIn->diffInDays($newCheckOut));
+
+        $oldCheckInAt = $booking->check_in_at ? Carbon::parse($booking->check_in_at) : $oldCheckIn->copy();
+        $oldCheckOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : $oldCheckOut->copy();
+        $newCheckInAt = $newCheckIn->copy()->setTimeFrom($oldCheckInAt);
+        $newCheckOutAt = $keepNights ? $newCheckOut->copy()->setTimeFrom($oldCheckOutAt) : $oldCheckOutAt->copy();
+
+        try {
+            BookingRoomAvailability::assertSellable(
+                (int) $booking->room_id,
+                $newCheckInAt,
+                $newCheckOutAt,
+                (string) $booking->status,
+                (int) $booking->id,
+            );
+        } catch (ValidationException $e) {
+            return response()->json(['message' => collect($e->errors())->flatten()->first() ?? 'Room is not available for the new dates.'], 422);
+        }
+
+        $oldTotal = round((float) $booking->total_price, 2);
+        $nightlyRate = round($oldTotal / $oldNights, 2);
+        $newTotal = $newNights === $oldNights ? $oldTotal : round($nightlyRate * $newNights, 2);
+        $paid = round(max(0.0, (float) ($booking->deposit_amount ?? 0) - (float) ($booking->refund_amount ?? 0)), 2);
+
+        return [
+            'preview' => [
+                'original_check_in' => $oldCheckIn->toDateString(),
+                'original_check_out' => $oldCheckOut->toDateString(),
+                'new_check_in' => $newCheckIn->toDateString(),
+                'new_check_out' => $newCheckOut->toDateString(),
+                'original_nights' => $oldNights,
+                'new_nights' => $newNights,
+                'keep_nights' => $keepNights,
+                'nightly_rate' => $nightlyRate,
+                'original_total' => $oldTotal,
+                'new_total' => $newTotal,
+                'difference' => round($newTotal - $oldTotal, 2),
+                'amount_paid' => $paid,
+                'balance_after' => round($newTotal - $paid, 2),
+            ],
+            'new_check_in_at' => $newCheckInAt,
+            'new_check_out_at' => $newCheckOutAt,
+        ];
+    }
+
     // ── Hourly Reservation Extension (supports +1h, +2h, etc.) ─────────────────
     public function extendHourlyReservation(Request $request, Booking $booking)
     {
@@ -2730,7 +2952,8 @@ class BookingController extends Controller
             $segmentSubtotal = $nightlyRoomCost * $nights;
             $segmentTotal = $segmentSubtotal;
 
-            if ($rt->tax) {
+            $roomRatesIncludeGst = filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
+            if ($rt->tax && ! $roomRatesIncludeGst) {
                 $segmentTotal += $segmentSubtotal * ($rt->tax->rate / 100);
             }
         }
@@ -3799,6 +4022,7 @@ class BookingController extends Controller
             'transfer_reason' => 'required|string|max:64',
             'internal_notes' => 'nullable|string|max:2000',
             'rate_mode' => 'required|in:keep_existing,apply_new_category',
+            'from_room_id' => 'nullable|integer',
         ]);
 
         $result = BookingRoomTransferService::preview($booking, $request->all());
@@ -3817,6 +4041,7 @@ class BookingController extends Controller
             'transfer_reason' => 'required|string|max:64',
             'internal_notes' => 'nullable|string|max:2000',
             'rate_mode' => 'required|in:keep_existing,apply_new_category',
+            'from_room_id' => 'nullable|integer',
         ]);
 
         $result = BookingRoomTransferService::execute($booking, $request->all());

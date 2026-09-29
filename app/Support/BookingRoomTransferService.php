@@ -121,6 +121,7 @@ final class BookingRoomTransferService
 
         return [
             'new_room_id' => (int) ($input['new_room_id'] ?? 0),
+            'from_room_id' => (int) ($input['from_room_id'] ?? 0),
             'transfer_reason' => $reason,
             'internal_notes' => $notes !== '' ? $notes : null,
             'rate_mode' => $rateMode,
@@ -159,7 +160,15 @@ final class BookingRoomTransferService
             ]);
             $booking->load('segments.room.roomType');
         }
-        $activeSegment = self::resolveActiveSegment($booking);
+        if ($parsed['from_room_id'] > 0) {
+            $resolved = self::resolveSegmentInRoom($booking, $parsed['from_room_id']);
+            if (! $resolved['ok']) {
+                return $resolved;
+            }
+            $activeSegment = $resolved['segment'];
+        } else {
+            $activeSegment = self::resolveActiveSegment($booking);
+        }
         if (! $activeSegment) {
             return ['ok' => false, 'message' => 'No active stay segment found for this booking.'];
         }
@@ -174,7 +183,12 @@ final class BookingRoomTransferService
             return ['ok' => false, 'message' => 'Select a different room than the current one.'];
         }
 
-        $transferAt = self::transferTimestamp($booking, $activeSegment);
+        // Not started yet (reserved, or a later split-stay room of an in-house guest): move the segment in place.
+        $preArrivalSwap = $booking->status === 'confirmed'
+            || Carbon::parse($activeSegment->check_in_at ?? $activeSegment->check_in)->gt(now());
+        $transferAt = $preArrivalSwap
+            ? Carbon::parse($activeSegment->check_in_at ?? $activeSegment->check_in)
+            : now();
         $segmentEnd = Carbon::parse($activeSegment->check_out_at ?? $activeSegment->check_out);
         if ($transferAt->gte($segmentEnd)) {
             return ['ok' => false, 'message' => 'Cannot transfer: stay segment has already ended.'];
@@ -202,9 +216,49 @@ final class BookingRoomTransferService
             'transfer_at' => $transferAt,
             'segment_end' => $segmentEnd,
             'is_category_change' => $isCategoryChange,
-            // Not checked in yet: the transfer starts at the segment's own check-in, so move it instead of splitting.
-            'pre_arrival_swap' => $booking->status === 'confirmed',
+            'pre_arrival_swap' => $preArrivalSwap,
+            'moves_current_room' => ! $preArrivalSwap || self::isFirstOpenSegment($booking, $activeSegment),
         ];
+    }
+
+    /**
+     * Segment the front desk picked on the chart (split stays have one per room).
+     *
+     * @return array{ok: bool, message?: string, segment?: BookingSegment}
+     */
+    private static function resolveSegmentInRoom(Booking $booking, int $roomId): array
+    {
+        $inRoom = $booking->segments
+            ->filter(fn($s) => (int) $s->room_id === $roomId)
+            ->sortBy(fn($s) => $s->check_in_at ?? $s->check_in);
+        if ($inRoom->isEmpty()) {
+            return ['ok' => false, 'message' => 'This booking has no stay in the selected room.'];
+        }
+
+        $now = now();
+        $open = $inRoom->filter(function ($s) use ($booking, $now) {
+            if (in_array($s->status, ['checked_out', 'cancelled'], true)) {
+                return false;
+            }
+
+            return $booking->status !== 'checked_in'
+                || Carbon::parse($s->check_out_at ?? $s->check_out)->gt($now);
+        });
+        if ($open->isEmpty()) {
+            return ['ok' => false, 'message' => 'Cannot transfer: stay segment has already ended.'];
+        }
+
+        return ['ok' => true, 'segment' => $open->first()];
+    }
+
+    private static function isFirstOpenSegment(Booking $booking, BookingSegment $segment): bool
+    {
+        $first = $booking->segments
+            ->reject(fn($s) => in_array($s->status, ['checked_out', 'cancelled'], true))
+            ->sortBy(fn($s) => $s->check_in_at ?? $s->check_in)
+            ->first();
+
+        return $first !== null && (int) $first->id === (int) $segment->id;
     }
 
     private static function resolveActiveSegment(Booking $booking): ?BookingSegment
@@ -228,15 +282,6 @@ final class BookingRoomTransferService
         }
 
         return $segments->last();
-    }
-
-    private static function transferTimestamp(Booking $booking, BookingSegment $segment): Carbon
-    {
-        if ($booking->status === 'checked_in') {
-            return now();
-        }
-
-        return Carbon::parse($segment->check_in_at ?? $segment->check_in);
     }
 
     private static function isRoomAvailable(int $roomId, Carbon $checkInAt, Carbon $checkOutAt, int $excludeBookingId): bool
@@ -295,7 +340,8 @@ final class BookingRoomTransferService
                 $segmentEnd,
                 $parsed['rate_mode'],
                 $segment,
-                $warnings
+                $warnings,
+                $parsed['rate_mode'] === 'keep_existing' ? (float) ($segment->total_price ?? 0) : null
             );
             $newBookingTotal = self::sumOtherSegments($segments, (int) $segment->id, 0) + $newSegmentPrice;
 
@@ -545,11 +591,13 @@ final class BookingRoomTransferService
                 'rate_plan_id' => $planId ?: $segment->rate_plan_id,
                 'total_price' => $newSegmentPrice,
             ]);
-            $booking->update([
-                'room_id' => $toRoom->id,
-                'total_price' => $newBookingTotal,
-                'rate_plan_id' => $planId ?: $booking->rate_plan_id,
-            ]);
+            $booking->update($ctx['moves_current_room']
+                ? [
+                    'room_id' => $toRoom->id,
+                    'total_price' => $newBookingTotal,
+                    'rate_plan_id' => $planId ?: $booking->rate_plan_id,
+                ]
+                : ['total_price' => $newBookingTotal]);
 
             return ['new_segment' => $segment->fresh(), 'new_segment_id' => (int) $segment->id];
         }
@@ -671,7 +719,7 @@ final class BookingRoomTransferService
      */
     private static function applyHousekeeping(Booking $booking, array $ctx): void
     {
-        if ($booking->status !== 'checked_in') {
+        if ($booking->status !== 'checked_in' || $ctx['pre_arrival_swap']) {
             return;
         }
 

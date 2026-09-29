@@ -32,6 +32,45 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $this->assertSame('occupied', $room->fresh()->status);
     }
 
+    public function test_check_in_on_split_stay_marks_only_the_arrival_room_occupied(): void
+    {
+        $this->actingWith();
+        $first = $this->makeRoom('101');
+        $extension = $this->makeRoom('102');
+        $booking = $this->makeBooking($first, $this->day(0), $this->day(2));
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", ['new_room_id' => $extension->id, 'new_check_out' => $this->day(4)])
+            ->assertOk();
+
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_in'])->assertOk();
+
+        $this->assertSame(2, $booking->segments()->where('status', 'checked_in')->count());
+        $this->assertSame('occupied', $first->fresh()->status);
+        $this->assertSame('available', $extension->fresh()->status, 'Guest does not reach the extension room until ' . $this->day(2) . '.');
+    }
+
+    public function test_chart_marks_split_stay_room_occupied_only_once_guest_has_moved_in(): void
+    {
+        $this->actingWith();
+        $movedIn = $this->makeRoom('102');
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in']);
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", ['new_room_id' => $movedIn->id, 'new_check_out' => $this->day(2)])
+            ->assertOk();
+
+        $later = $this->makeRoom('202');
+        $other = $this->makeBooking($this->makeRoom('201'), $this->day(-1), $this->day(1), ['status' => 'checked_in']);
+        $this->postJson("/api/bookings/{$other->id}/split-stay", ['new_room_id' => $later->id, 'new_check_out' => $this->day(3)])
+            ->assertOk();
+
+        $this->getJson('/api/bookings/chart')->assertOk();
+
+        $this->assertSame('occupied', $movedIn->fresh()->status);
+        $this->assertSame('available', $later->fresh()->status);
+
+        $movedIn->update(['status' => 'pending_inspection']);
+        $this->getJson('/api/bookings/chart')->assertOk();
+        $this->assertSame('pending_inspection', $movedIn->fresh()->status, 'Chart load must not undo a checkout inspection request.');
+    }
+
     public function test_check_in_requires_edit_permission(): void
     {
         $this->actingWith(['reservation-view']);

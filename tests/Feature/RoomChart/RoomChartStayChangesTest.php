@@ -383,6 +383,22 @@ class RoomChartStayChangesTest extends RoomChartTestCase
         $this->assertSame(4480.0, (float) $booking->fresh()->total_price);
     }
 
+    public function test_split_stay_does_not_add_gst_when_room_rates_include_gst(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $this->setting('room_rates_include_gst', '1');
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(0), $this->day(2));
+        $b = $this->makeRoom('102');
+
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", [
+            'new_room_id' => $b->id,
+            'new_check_out' => $this->day(4),
+        ])->assertOk();
+
+        $this->assertDatabaseHas('booking_segments', ['booking_id' => $booking->id, 'room_id' => $b->id, 'total_price' => 4000]);
+        $this->assertSame(8480.0, (float) $booking->fresh()->total_price);
+    }
+
     public function test_split_stay_rejects_same_room(): void
     {
         $this->actingWith(['reservation-edit']);
@@ -406,5 +422,82 @@ class RoomChartStayChangesTest extends RoomChartTestCase
 
         $this->postJson("/api/bookings/{$booking->id}/split-stay", ['new_room_id' => $b->id, 'new_check_out' => $this->day(4)])
             ->assertStatus(422);
+    }
+
+    // ── Change check-in date ────────────────────────────────────────────────
+
+    public function test_preview_change_check_in_returns_new_dates_without_saving(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(1), $this->day(3));
+
+        $this->postJson("/api/bookings/{$booking->id}/preview-change-check-in", ['new_check_in' => $this->day(4), 'keep_nights' => true])
+            ->assertOk()
+            ->assertJsonPath('new_check_in', $this->day(4))
+            ->assertJsonPath('new_check_out', $this->day(6))
+            ->assertJsonPath('new_nights', 2);
+
+        $this->assertSame($this->day(1), (string) $booking->fresh()->check_in);
+    }
+
+    public function test_change_check_in_keeping_nights_moves_checkout_and_keeps_total(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(1), $this->day(3));
+
+        $this->postJson("/api/bookings/{$booking->id}/change-check-in", ['new_check_in' => $this->day(4), 'keep_nights' => true])
+            ->assertOk()
+            ->assertJsonPath('booking.id', $booking->id);
+
+        $booking->refresh();
+        $this->assertSame($this->day(4), (string) $booking->check_in);
+        $this->assertSame($this->day(6), (string) $booking->check_out);
+        $this->assertSame(4480.0, (float) $booking->total_price);
+        $this->assertStringContainsString('[Check-in date: ' . $this->day(1) . ' → ' . $this->day(4), (string) $booking->notes);
+        $this->assertDatabaseHas('booking_segments', ['booking_id' => $booking->id, 'check_in' => $this->day(4), 'check_out' => $this->day(6)]);
+    }
+
+    public function test_change_check_in_without_keeping_nights_reprices_by_booked_nightly_rate(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(1), $this->day(4));
+
+        $this->postJson("/api/bookings/{$booking->id}/change-check-in", ['new_check_in' => $this->day(2), 'keep_nights' => false])
+            ->assertOk();
+
+        $booking->refresh();
+        $this->assertSame($this->day(2), (string) $booking->check_in);
+        $this->assertSame($this->day(4), (string) $booking->check_out);
+        $this->assertSame(4480.0, (float) $booking->total_price);
+        $this->assertDatabaseHas('booking_segments', ['booking_id' => $booking->id, 'check_in' => $this->day(2), 'total_price' => 4480]);
+    }
+
+    public function test_change_check_in_rejected_when_room_is_taken_on_new_dates(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $room = $this->makeRoom('101');
+        $booking = $this->makeBooking($room, $this->day(3), $this->day(5));
+        $this->makeBooking($room, $this->day(0), $this->day(2));
+
+        $this->postJson("/api/bookings/{$booking->id}/change-check-in", ['new_check_in' => $this->day(1), 'keep_nights' => false])
+            ->assertStatus(422);
+
+        $this->assertSame($this->day(3), (string) $booking->fresh()->check_in);
+    }
+
+    public function test_change_check_in_rejected_for_past_date_checked_in_booking_and_without_permission(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(1), $this->day(3));
+        $inHouse = $this->makeBooking($this->makeRoom('102'), $this->day(0), $this->day(2), ['status' => 'checked_in']);
+
+        $this->postJson("/api/bookings/{$booking->id}/change-check-in", ['new_check_in' => $this->day(-1), 'keep_nights' => true])
+            ->assertStatus(422);
+        $this->postJson("/api/bookings/{$inHouse->id}/change-check-in", ['new_check_in' => $this->day(1), 'keep_nights' => true])
+            ->assertStatus(422);
+
+        $this->actingWith([]);
+        $this->postJson("/api/bookings/{$booking->id}/change-check-in", ['new_check_in' => $this->day(2), 'keep_nights' => true])
+            ->assertForbidden();
     }
 }
