@@ -36,6 +36,7 @@ use App\Services\DailyRoomCleaningClassificationService;
 use App\Services\DayClosingService;
 use App\Services\HousekeepingChecklistService;
 use App\Services\RoomCleaningAvailabilityService;
+use App\Support\BookingSplitStayRoomMove;
 use App\Support\CleaningServiceClassification;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
@@ -224,6 +225,7 @@ class HousekeepingController extends Controller
     public function dirtyRoomsBoard(Request $request)
     {
         $this->allowHousekeepingNav();
+        BookingSplitStayRoomMove::sync();
 
         $validated = $request->validate([
             'floor' => 'nullable|string|max:50',
@@ -419,6 +421,7 @@ class HousekeepingController extends Controller
     public function navCounts()
     {
         $this->allowHousekeepingNav();
+        BookingSplitStayRoomMove::sync();
 
         $dirty = (int) RoomStatusBlock::query()
             ->where('is_active', '=', true, 'and')
@@ -1004,27 +1007,19 @@ class HousekeepingController extends Controller
             ->orderBy('name')
             ->get(['id', 'name', 'sku', 'category_id']);
 
-        $menuCols = ['id', 'inventory_item_id', 'name', 'price'];
-        if (Schema::hasColumn('menu_items', 'tax_rate')) {
-            $menuCols[] = 'tax_rate';
-        }
-        $menuByInventory = MenuItem::query()
-            ->whereNotNull('inventory_item_id', 'and')
-            ->get($menuCols);
+        $menuPricing = $this->minibarMenuPricing($minibar->pluck('id')->all());
 
-        $menuMap = $menuByInventory->keyBy(fn($m) => (int) $m->inventory_item_id);
-
-        $minibarPayload = $minibar->map(function ($i) use ($menuMap) {
-            $m = $menuMap[(int) $i->id] ?? null;
+        $minibarPayload = $minibar->map(function ($i) use ($menuPricing) {
+            $m = $menuPricing[(int) $i->id] ?? null;
 
             return [
                 'inventory_item_id' => (int) $i->id,
                 'sku' => (string) $i->sku,
                 'name' => (string) $i->name,
                 'category' => $i->category?->name,
-                'menu_item_id' => $m ? (int) $m->id : null,
-                'menu_price' => $m ? (float) $m->price : null,
-                'menu_tax_rate' => $m && Schema::hasColumn('menu_items', 'tax_rate') ? (float) ($m->tax_rate ?? 0) : null,
+                'menu_item_id' => $m['menu_item_id'] ?? null,
+                'menu_price' => $m['price'] ?? null,
+                'menu_tax_rate' => $m['tax_rate'] ?? null,
             ];
         })->values();
 
@@ -1218,6 +1213,7 @@ class HousekeepingController extends Controller
     {
         $minibarLines = [];
         $minibarTotal = 0.0;
+        $menuPricing = $this->minibarMenuPricing(array_column($validated['minibar'] ?? [], 'inventory_item_id'));
         foreach (($validated['minibar'] ?? []) as $ln) {
             $itemId = (int) ($ln['inventory_item_id'] ?? 0);
             $qty = (float) ($ln['qty'] ?? 0);
@@ -1229,15 +1225,14 @@ class HousekeepingController extends Controller
             if (! $item) {
                 continue;
             }
-            $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
-            $unitCost = (float) ($item->cost_price ?? 0) / $conv;
-            $lineTotal = round($unitCost * $qty, 2);
+            $unitPrice = $this->minibarGuestUnitPrice($item, $menuPricing);
+            $lineTotal = round($unitPrice * $qty, 2);
             $minibarLines[] = [
                 'inventory_item_id' => $itemId,
                 'name' => (string) ($item->name ?? ''),
                 'sku' => (string) ($item->sku ?? ''),
                 'qty' => $qty,
-                'unit_amount' => round($unitCost, 2),
+                'unit_amount' => round($unitPrice, 2),
                 'line_total' => $lineTotal,
             ];
             $minibarTotal += $lineTotal;
@@ -1845,10 +1840,74 @@ class HousekeepingController extends Controller
         return $stay?->booking instanceof Booking ? $stay->booking : null;
     }
 
+    private function minibarPostingRestaurant(): ?RestaurantMaster
+    {
+        return RestaurantMaster::where('name', '=', 'OTTAAL', 'and')->first()
+            ?: RestaurantMaster::query()->orderBy('id', 'asc')->first();
+    }
+
+    /**
+     * Guest sell price per minibar inventory item from its linked menu item: the Menu Pricing price at
+     * the minibar posting outlet, else at any outlet, else the menu item's base price. GST-inclusive.
+     *
+     * @param  array<int, int|string|null>  $inventoryItemIds
+     * @return array<int, array{menu_item_id: int, price: float|null, tax_rate: float}>
+     */
+    private function minibarMenuPricing(array $inventoryItemIds): array
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $inventoryItemIds))));
+        if ($ids === []) {
+            return [];
+        }
+
+        $postingRestaurantId = (int) ($this->minibarPostingRestaurant()?->id ?? 0);
+        $menuItems = MenuItem::query()
+            ->whereIn('inventory_item_id', $ids)
+            ->with([
+                'tax:id,rate',
+                'restaurantMenuItems' => fn ($q) => $q->where('price', '>', 0)->orderBy('id'),
+            ])
+            ->orderBy('id')
+            ->get(['id', 'inventory_item_id', 'price', 'tax_id']);
+
+        $out = [];
+        foreach ($menuItems as $m) {
+            $outletPrices = $m->restaurantMenuItems;
+            $price = $outletPrices->firstWhere('restaurant_master_id', $postingRestaurantId)?->price
+                ?? $outletPrices->first()?->price
+                ?? ((float) $m->price > 0 ? $m->price : null);
+            $row = [
+                'menu_item_id' => (int) $m->id,
+                'price' => $price !== null ? round((float) $price, 2) : null,
+                'tax_rate' => (float) ($m->tax?->rate ?? 0),
+            ];
+            $invId = (int) $m->inventory_item_id;
+            if (! isset($out[$invId]) || ($out[$invId]['price'] === null && $row['price'] !== null)) {
+                $out[$invId] = $row;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Per-unit guest charge for a minibar item: menu price when priced, else inventory issue-unit cost.
+     *
+     * @param  array<int, array{menu_item_id: int, price: float|null, tax_rate: float}>  $menuPricing
+     */
+    private function minibarGuestUnitPrice(InventoryItem $item, array $menuPricing): float
+    {
+        $menuPrice = $menuPricing[(int) $item->id]['price'] ?? null;
+        if ($menuPrice !== null && $menuPrice > 0) {
+            return (float) $menuPrice;
+        }
+
+        return (float) ($item->cost_price ?? 0) / max(1.0, (float) ($item->conversion_factor ?: 1));
+    }
+
     private function postMinibarRoomCharge(Booking $booking, $minibarLines, ?int $userId): void
     {
-        $restaurant = RestaurantMaster::where('name', '=', 'OTTAAL', 'and')->first()
-            ?: RestaurantMaster::query()->orderBy('id', 'asc')->first();
+        $restaurant = $this->minibarPostingRestaurant();
         if (! $restaurant) {
             return;
         }
@@ -1910,37 +1969,36 @@ class HousekeepingController extends Controller
             $orderData['customer_phone'] = $booking->phone ?? null;
         }
 
+        $menuPricing = $this->minibarMenuPricing(collect($minibarLines)->pluck('inventory_item_id')->all());
+        $pricedLines = [];
+        foreach ($minibarLines as $ln) {
+            $qty = (float) ($ln->qty ?? 0);
+            $pricing = $menuPricing[(int) ($ln->inventory_item_id ?? 0)] ?? null;
+            if ($qty > 0 && $pricing !== null && ($pricing['price'] ?? 0) > 0) {
+                $pricedLines[] = [$qty, $pricing];
+            }
+        }
+        if ($pricedLines === []) {
+            return;
+        }
+
         $order = PosOrder::create($orderData);
 
         $subtotal = 0.0;
         $taxAmount = 0.0;
         $total = 0.0;
 
-        foreach ($minibarLines as $ln) {
-            $qty = (float) ($ln->qty ?? 0);
-            if ($qty <= 0) {
-                continue;
-            }
-
-            $menuItemId = (int) ($ln->menu_item_id ?? 0);
-            if ($menuItemId <= 0) {
-                continue;
-            }
-
-            $menu = MenuItem::find($menuItemId, ['id', 'name', 'price', 'tax_rate']);
-            if (! $menu) {
-                continue;
-            }
-
-            $unit = (float) ($menu->price ?? 0);
-            $rate = (float) ($menu->tax_rate ?? 0);
-            $lineSubtotal = $unit * $qty;
-            $lineTax = $rate > 0 ? ($lineSubtotal * $rate / 100) : 0;
-            $lineTotal = $lineSubtotal + $lineTax;
+        foreach ($pricedLines as [$qty, $pricing]) {
+            // Menu Pricing sell prices include GST (as on the POS terminal): extract tax, never add it.
+            $unit = (float) $pricing['price'];
+            $rate = (float) $pricing['tax_rate'];
+            $lineTotal = $unit * $qty;
+            $lineTax = $rate > 0 ? ($lineTotal * $rate / (100 + $rate)) : 0;
+            $lineSubtotal = $lineTotal - $lineTax;
 
             $oi = [
                 'order_id' => $order->id,
-                'menu_item_id' => $menu->id,
+                'menu_item_id' => $pricing['menu_item_id'],
                 'quantity' => (int) round($qty),
                 'unit_price' => round($unit, 2),
                 'tax_rate' => round($rate, 2),
@@ -1949,7 +2007,7 @@ class HousekeepingController extends Controller
                 'notes' => 'Minibar (HK)',
             ];
             if ($hasPosOrderItems('price_tax_inclusive')) {
-                $oi['price_tax_inclusive'] = false;
+                $oi['price_tax_inclusive'] = true;
             }
             if ($hasPosOrderItems('status')) {
                 $oi['status'] = 'active';
@@ -2293,7 +2351,8 @@ class HousekeepingController extends Controller
         try {
             $chargeTotal = 0.0;
 
-            // Minibar: deduct from room location and charge at inventory unit cost (cost_price / conversion_factor).
+            // Minibar: deduct from room location at inventory unit cost; charge the guest at menu price (cost when unpriced).
+            $menuPricing = $this->minibarMenuPricing(array_column($validated['minibar'] ?? [], 'inventory_item_id'));
             foreach (($validated['minibar'] ?? []) as $ln) {
                 $itemId = (int) $ln['inventory_item_id'];
                 $qty = (float) ($ln['qty'] ?? 0);
@@ -2318,7 +2377,9 @@ class HousekeepingController extends Controller
 
                 $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
                 $unitCost = (float) ($item->cost_price ?? 0) / $conv;
-                $lineTotal = round($unitCost * $qty, 2);
+                $costTotal = round($unitCost * $qty, 2);
+                $unitPrice = $this->minibarGuestUnitPrice($item, $menuPricing);
+                $lineTotal = round($unitPrice * $qty, 2);
 
                 // Deduct stock from room location
                 DB::table('inventory_item_locations')->updateOrInsert(
@@ -2336,7 +2397,7 @@ class HousekeepingController extends Controller
                     'type' => 'out',
                     'quantity' => $qty,
                     'unit_cost' => round($unitCost, 4),
-                    'total_cost' => $lineTotal,
+                    'total_cost' => $costTotal,
                     'reason' => 'Checkout inspection consumption',
                     'notes' => 'Minibar/snacks consumed during checkout inspection',
                     'user_id' => $userId,
@@ -2352,7 +2413,7 @@ class HousekeepingController extends Controller
                     'kind' => 'minibar',
                     'label' => $minibarLabel,
                     'qty' => $qty,
-                    'unit_amount' => round($unitCost, 2),
+                    'unit_amount' => round($unitPrice, 2),
                     'total_amount' => $lineTotal,
                     'meta' => [
                         'inventory_item_id' => $itemId,
@@ -2503,12 +2564,13 @@ class HousekeepingController extends Controller
                 if ($qty <= 0 || $itemId <= 0) {
                     continue;
                 }
-                $item = InventoryItem::find($itemId, ['id', 'name', 'sku']);
+                $item = InventoryItem::find($itemId, ['id', 'name', 'sku', 'cost_price', 'conversion_factor']);
                 $snapshot['minibar'][] = [
                     'inventory_item_id' => $itemId,
                     'qty' => $qty,
                     'name' => $item ? (string) $item->name : '',
                     'sku' => $item ? (string) ($item->sku ?? '') : '',
+                    'unit_amount' => $item ? round($this->minibarGuestUnitPrice($item, $menuPricing), 2) : 0.0,
                 ];
             }
 

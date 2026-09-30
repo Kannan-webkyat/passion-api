@@ -3,10 +3,12 @@
 namespace App\Services;
 
 use App\Models\Booking;
+use App\Models\BookingPayment;
 use App\Models\DailyRoomCleaning;
 use App\Models\HousekeepingJob;
 use App\Models\Room;
 use App\Models\RoomCleaningRelease;
+use App\Support\BookingInvoiceRoomStay;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
 
@@ -165,10 +167,16 @@ class HospitalityReportService
             ->whereDate('check_in', $day)
             ->whereNull('check_in_at')
             ->whereDate('check_in', '<', Carbon::today()->toDateString())
-            ->count();
+            ->count()
+            + Booking::query()
+                ->where('status', 'cancelled')
+                ->where('cancellation_reason', 'no_show')
+                ->whereDate('check_in', $day)
+                ->count();
 
         $cancellations = Booking::query()
             ->where('status', 'cancelled')
+            ->where(fn ($q) => $q->whereNull('cancellation_reason')->orWhere('cancellation_reason', '!=', 'no_show'))
             ->where(function ($q) use ($day) {
                 $q->whereDate('check_in', $day)
                     ->orWhereDate('updated_at', $day);
@@ -638,6 +646,142 @@ class HospitalityReportService
             ],
             'by_source' => $rows,
         ];
+    }
+
+    /**
+     * Checked-out stays whose folio still carries a balance (charges posted or payments voided after departure).
+     * Bill = invoice gross − checkout discount (same figure the checkout guard uses); received = payments − refunds.
+     * Group rooms are skipped while the group's pooled payments still cover the pooled bill.
+     *
+     * @return array<string, mixed>
+     */
+    public function unpaidCheckouts(string $from, string $to): array
+    {
+        $bookings = Booking::query()
+            ->with(['room.roomType.tax', 'room.roomType.ratePlans', 'room.roomType.seasons', 'bookingGroup'])
+            ->where('status', 'checked_out')
+            ->whereDate('check_out', '>=', $from)
+            ->whereDate('check_out', '<=', $to)
+            ->orderBy('check_out')
+            ->orderBy('id')
+            ->get();
+
+        $today = Carbon::today();
+        $groupCovered = [];
+        $rows = [];
+
+        foreach ($bookings as $booking) {
+            $bill = $this->checkoutBill($booking);
+            $received = round((float) ($booking->deposit_amount ?? 0) - (float) ($booking->refund_amount ?? 0), 2);
+            $balance = round($bill - $received, 2);
+            if ($balance <= 0.01) {
+                continue;
+            }
+
+            $groupId = (int) ($booking->booking_group_id ?? 0);
+            if ($groupId > 0) {
+                $groupCovered[$groupId] ??= $this->groupPaymentsCoverBill($groupId);
+                if ($groupCovered[$groupId]) {
+                    continue;
+                }
+            }
+
+            $checkOut = Carbon::parse($booking->check_out)->startOfDay();
+            $rows[] = [
+                'booking_id' => (int) $booking->id,
+                'guest_name' => trim((string) $booking->guest_name) ?: 'Guest',
+                'phone' => $booking->phone,
+                'email' => $booking->email,
+                'room_number' => $booking->room?->room_number,
+                'room_type' => $booking->room?->roomType?->name,
+                'group_name' => $booking->bookingGroup?->name,
+                'booking_source' => $booking->booking_source,
+                'check_in' => Carbon::parse($booking->check_in)->toDateString(),
+                'check_out' => $checkOut->toDateString(),
+                'room_charges' => round((float) ($booking->total_price ?? 0), 2),
+                'extra_charges' => round((float) ($booking->extra_charges ?? 0), 2),
+                'discount' => round((float) ($booking->checkout_discount_amount ?? 0), 2),
+                'bill' => $bill,
+                'received' => $received,
+                'balance' => $balance,
+                'days_outstanding' => max(0, (int) $checkOut->diffInDays($today, false)),
+                'payment_status' => $booking->payment_status,
+                'last_payment_at' => null,
+            ];
+        }
+
+        if ($rows !== [] && Schema::hasTable('booking_payments')) {
+            $lastPaid = BookingPayment::query()
+                ->whereIn('booking_id', array_column($rows, 'booking_id'))
+                ->where('type', BookingPayment::TYPE_PAYMENT)
+                ->whereNull('voided_at')
+                ->groupBy('booking_id')
+                ->selectRaw('booking_id, MAX(paid_at) as last_paid_at')
+                ->pluck('last_paid_at', 'booking_id');
+            foreach ($rows as &$row) {
+                $at = $lastPaid[$row['booking_id']] ?? null;
+                $row['last_payment_at'] = $at ? Carbon::parse($at)->toIso8601String() : null;
+            }
+            unset($row);
+        }
+
+        usort($rows, fn ($a, $b) => $b['balance'] <=> $a['balance']);
+
+        $aging = [
+            ['bucket' => '0-7', 'label' => '0–7 days', 'count' => 0, 'amount' => 0.0],
+            ['bucket' => '8-30', 'label' => '8–30 days', 'count' => 0, 'amount' => 0.0],
+            ['bucket' => '31-60', 'label' => '31–60 days', 'count' => 0, 'amount' => 0.0],
+            ['bucket' => '60+', 'label' => 'Over 60 days', 'count' => 0, 'amount' => 0.0],
+        ];
+        foreach ($rows as $row) {
+            $d = $row['days_outstanding'];
+            $i = $d <= 7 ? 0 : ($d <= 30 ? 1 : ($d <= 60 ? 2 : 3));
+            $aging[$i]['count']++;
+            $aging[$i]['amount'] = round($aging[$i]['amount'] + $row['balance'], 2);
+        }
+
+        $outstanding = round(array_sum(array_column($rows, 'balance')), 2);
+
+        return [
+            'summary' => [
+                'bookings' => count($rows),
+                'outstanding' => $outstanding,
+                'billed' => round(array_sum(array_column($rows, 'bill')), 2),
+                'received' => round(array_sum(array_column($rows, 'received')), 2),
+                'average_balance' => count($rows) > 0 ? round($outstanding / count($rows), 2) : 0.0,
+                'oldest_days' => $rows === [] ? 0 : max(array_column($rows, 'days_outstanding')),
+                'checkouts_in_period' => $bookings->count(),
+            ],
+            'aging' => $aging,
+            'rows' => $rows,
+        ];
+    }
+
+    /** Mirrors BookingController::checkoutPaymentState() for a single room. */
+    private function checkoutBill(Booking $booking): float
+    {
+        $gross = ($booking->booking_unit ?? 'day') === 'hour_package'
+            ? (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0)
+            : (float) BookingInvoiceRoomStay::summarizeForInvoice($booking)['gross_before_checkout_discount'];
+        $discount = max(0.0, (float) ($booking->checkout_discount_amount ?? 0));
+        $grand = max(0.0, $gross - min($discount, $gross));
+
+        return round(max($grand, (float) ($booking->total_price ?? 0)), 2);
+    }
+
+    private function groupPaymentsCoverBill(int $groupId): bool
+    {
+        $group = Booking::query()
+            ->with(['room.roomType.tax', 'room.roomType.ratePlans', 'room.roomType.seasons'])
+            ->where('booking_group_id', $groupId)
+            ->where('status', '!=', 'cancelled')
+            ->get();
+        $bill = (float) $group->sum(fn (Booking $b) => $this->checkoutBill($b));
+        $received = (float) $group->sum(
+            fn (Booking $b) => (float) ($b->deposit_amount ?? 0) - (float) ($b->refund_amount ?? 0)
+        );
+
+        return $received + 0.009 >= $bill;
     }
 
     private function normalizeSource(string $source): string

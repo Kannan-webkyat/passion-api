@@ -242,7 +242,9 @@ final class BookingInspectionChargeLines
                 continue;
             }
             $conv = max(1.0, (float) ($item->conversion_factor ?: 1));
-            $unitCost = round((float) ($item->cost_price ?? 0) / $conv, 2);
+            $unitCost = isset($row['unit_amount']) && is_numeric($row['unit_amount'])
+                ? round((float) $row['unit_amount'], 2)
+                : round((float) ($item->cost_price ?? 0) / $conv, 2);
             $lineTotal = round($unitCost * $qty, 2);
             $out[] = self::enrichLineForDisplay([
                 'id' => $nid--,

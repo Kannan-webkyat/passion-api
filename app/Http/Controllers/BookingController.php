@@ -15,6 +15,7 @@ use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomCleaningRelease;
 use App\Models\RoomStatusBlock;
+use App\Models\RoomType;
 use App\Models\Setting;
 use App\Support\BookingCancellationPolicy;
 use App\Support\BookingInspectionChargeLines;
@@ -22,6 +23,7 @@ use App\Support\BookingInvoiceRoomStay;
 use App\Support\BookingPaymentLedger;
 use App\Support\BookingRoomAvailability;
 use App\Support\BookingRoomTransferService;
+use App\Support\BookingSplitStayRoomMove;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
@@ -386,16 +388,274 @@ class BookingController extends Controller
         return max(0.0, round($gross - min($disc, $gross), 2));
     }
 
+    /**
+     * Paid-in-full rule for checkout. Group bookings pool payments unless scope is "room";
+     * single bookings pass when the deposit covers the bill even if payment_status is stale.
+     *
+     * @return array{is_paid: bool, bill: float, paid: float, pooled: bool}
+     */
+    private function checkoutPaymentState(Booking $booking, string $checkoutScope, ?string $paymentStatus): array
+    {
+        $pooled = ! empty($booking->booking_group_id) && $checkoutScope !== 'room';
+
+        if ($pooled) {
+            $groupBookings = Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')
+                ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
+                ->get();
+            $bill = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
+            $paid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
+        } else {
+            $bill = max($this->effectiveBookingGrand($booking), (float) ($booking->total_price ?? 0));
+            $paid = (float) ($booking->deposit_amount ?? 0);
+        }
+
+        return [
+            'is_paid' => $paymentStatus === 'paid' || $paid + 0.009 >= $bill,
+            'bill' => round($bill, 2),
+            'paid' => round($paid, 2),
+            'pooled' => $pooled,
+        ];
+    }
+
+    /**
+     * Checkout settlement as the checkout guard sees it (room scope), for front-desk actions outside the room chart.
+     */
+    public function previewCheckout(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        if ($booking->status !== 'checked_in') {
+            return response()->json(['message' => 'Only checked-in guests can be checked out.'], 422);
+        }
+
+        $validated = $request->validate([
+            'checkout_scope' => 'nullable|in:room,group',
+        ]);
+        $scope = $validated['checkout_scope'] ?? (empty($booking->booking_group_id) ? 'room' : 'group');
+
+        BookingSplitStayRoomMove::sync((int) $booking->id);
+        $booking->refresh();
+
+        $state = $this->checkoutPaymentState($booking, $scope, $booking->payment_status);
+        $refunded = round((float) ($booking->refund_amount ?? 0), 2);
+        $netReceived = $state['pooled'] ? $state['paid'] : round($state['paid'] - $refunded, 2);
+        $checkoutDay = $this->bookingCheckoutCalendarDay($booking);
+        $today = Carbon::today()->toDateString();
+        $refundDue = $state['pooled'] ? 0.0 : max(0.0, round($netReceived - $state['bill'], 2));
+
+        return response()->json([
+            'booking_id' => $booking->id,
+            'checkout_scope' => $scope,
+            'pooled' => $state['pooled'],
+            'bill' => $state['bill'],
+            'received' => $netReceived,
+            'balance_due' => max(0.0, round($state['bill'] - $state['paid'], 2)),
+            'refund_due' => $refundDue,
+            'refund_amount_after' => round($refunded + $refundDue, 2),
+            'can_checkout' => $state['is_paid'],
+            'checkout_day' => $checkoutDay,
+            'is_early_checkout' => $checkoutDay > $today,
+            'checkout_discount_amount' => round((float) ($booking->checkout_discount_amount ?? 0), 2),
+            'extra_charges' => round((float) ($booking->extra_charges ?? 0), 2),
+        ]);
+    }
+
     public function index(Request $request)
     {
         $this->allowReservationRead();
 
-        return Booking::with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup'])
-            ->when($request->booking_group_id, function ($q) use ($request) {
-                $q->where('booking_group_id', $request->booking_group_id);
-            })
-            ->orderBy('check_in')
-            ->get();
+        // Legacy callers (dashboard, room chart group lookups) expect a plain array.
+        if (! $request->has('page')) {
+            return Booking::with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup'])
+                ->when($request->booking_group_id, function ($q) use ($request) {
+                    $q->where('booking_group_id', $request->booking_group_id);
+                })
+                ->orderBy('check_in')
+                ->get();
+        }
+
+        $validated = $request->validate([
+            'page' => 'integer|min:1',
+            'per_page' => 'nullable|integer|min:5|max:100',
+            'view' => 'nullable|in:current,past,all',
+            'quick' => 'nullable|in:all,in_house,arrivals,departures,balance_due,attention',
+            'search' => 'nullable|string|max:120',
+            'status' => 'nullable|in:all,pending,confirmed,checked_in,checked_out,cancelled,no_show',
+            'source' => 'nullable|string|max:100',
+            'room_type_id' => 'nullable|integer',
+            'rate_plan_id' => 'nullable|integer',
+            'date_from' => 'nullable|date',
+            'date_to' => 'nullable|date',
+            'sort' => 'nullable|in:check_in,check_out,guest,room,bill,balance,status,created_at,id',
+            'dir' => 'nullable|in:asc,desc',
+        ]);
+
+        $today = Carbon::today()->toDateString();
+        $view = $validated['view'] ?? 'current';
+        $quick = $validated['quick'] ?? 'all';
+
+        $query = Booking::query()->with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup']);
+        if ($quick !== 'all') {
+            $this->applyBookingListQuick($query, $quick, $today);
+        } else {
+            $this->applyBookingListView($query, $view, $today);
+        }
+
+        $status = $validated['status'] ?? 'all';
+        if ($status === 'no_show') {
+            $query->where('status', 'cancelled')->where('cancellation_reason', 'no_show');
+        } elseif ($status !== 'all') {
+            $query->where('status', $status);
+        }
+        if (! empty($validated['source']) && $validated['source'] !== 'all') {
+            $query->whereRaw('LOWER(booking_source) = ?', [strtolower($validated['source'])]);
+        }
+        if (! empty($validated['room_type_id'])) {
+            $roomTypeId = (int) $validated['room_type_id'];
+            $query->whereHas('room', fn ($q) => $q->where('room_type_id', $roomTypeId));
+        }
+        if (! empty($validated['rate_plan_id'])) {
+            $query->where('rate_plan_id', (int) $validated['rate_plan_id']);
+        }
+        if (! empty($validated['date_from'])) {
+            $query->whereDate('check_out', '>=', $validated['date_from']);
+        }
+        if (! empty($validated['date_to'])) {
+            $query->whereDate('check_in', '<=', $validated['date_to']);
+        }
+
+        $terms = array_slice(preg_split('/\s+/', trim((string) ($validated['search'] ?? ''))) ?: [], 0, 5);
+        foreach (array_filter($terms, fn ($t) => $t !== '') as $term) {
+            $like = '%'.str_replace(['%', '_'], ['\\%', '\\_'], $term).'%';
+            $query->where(function ($q) use ($like, $term) {
+                $q->where('first_name', 'like', $like)
+                    ->orWhere('last_name', 'like', $like)
+                    ->orWhere('email', 'like', $like)
+                    ->orWhere('phone', 'like', $like)
+                    ->orWhere('source_reference', 'like', $like)
+                    ->orWhere('booking_source', 'like', $like)
+                    ->orWhereHas('room', fn ($r) => $r->where('room_number', 'like', $like))
+                    ->orWhereHas('room.roomType', fn ($r) => $r->where('name', 'like', $like))
+                    ->orWhereHas('ratePlan', fn ($r) => $r->where('name', 'like', $like));
+                if (ctype_digit(ltrim($term, '#'))) {
+                    $q->orWhere('bookings.id', (int) ltrim($term, '#'));
+                }
+            });
+        }
+
+        $sort = $validated['sort'] ?? 'check_in';
+        $dir = $validated['dir'] ?? ($quick === 'all' && $view === 'past' ? 'desc' : 'asc');
+        switch ($sort) {
+            case 'guest':
+                $query->orderBy('first_name', $dir)->orderBy('last_name', $dir);
+                break;
+            case 'room':
+                $query->orderBy(Room::query()->selectRaw('LENGTH(room_number)')->whereColumn('rooms.id', 'bookings.room_id'), $dir)
+                    ->orderBy(Room::query()->select('room_number')->whereColumn('rooms.id', 'bookings.room_id'), $dir);
+                break;
+            case 'bill':
+                $query->orderByRaw(self::BOOKING_LIST_BILL_SQL.' '.$dir);
+                break;
+            case 'balance':
+                $query->orderByRaw(self::BOOKING_LIST_BALANCE_SQL.' '.$dir);
+                break;
+            case 'status':
+                $query->orderByRaw(
+                    "CASE status WHEN 'checked_in' THEN 1 WHEN 'confirmed' THEN 2 WHEN 'pending' THEN 3 WHEN 'checked_out' THEN 4 ELSE 5 END {$dir}"
+                );
+                break;
+            default:
+                $query->orderBy($sort, $dir);
+        }
+        $query->orderBy('bookings.id', $dir);
+
+        $paginator = $query->paginate((int) ($validated['per_page'] ?? 15));
+
+        return response()->json(array_merge($paginator->toArray(), [
+            'stats' => $this->bookingListStats($today),
+            'filter_options' => [
+                'sources' => Booking::query()
+                    ->whereNotNull('booking_source')
+                    ->where('booking_source', '!=', '')
+                    ->distinct()
+                    ->orderBy('booking_source')
+                    ->pluck('booking_source')
+                    ->values(),
+                'room_types' => RoomType::query()->orderBy('name')->get(['id', 'name']),
+                'rate_plans' => RatePlan::query()->orderBy('name')->get(['id', 'name']),
+            ],
+        ]));
+    }
+
+    /** Room total + folio − checkout discount (tax-exclusive estimate, same as the Bookings page). */
+    private const BOOKING_LIST_BILL_SQL = '(COALESCE(bookings.total_price, 0) + COALESCE(bookings.extra_charges, 0) - COALESCE(bookings.checkout_discount_amount, 0))';
+
+    /** Bill minus net received (payments − refunds). */
+    private const BOOKING_LIST_BALANCE_SQL = '((COALESCE(bookings.total_price, 0) + COALESCE(bookings.extra_charges, 0) - COALESCE(bookings.checkout_discount_amount, 0)) - (COALESCE(bookings.deposit_amount, 0) - COALESCE(bookings.refund_amount, 0)))';
+
+    /** @param  \Illuminate\Database\Eloquent\Builder<Booking>  $query */
+    private function applyBookingListView($query, string $view, string $today): void
+    {
+        if ($view === 'past') {
+            $query->where(function ($q) use ($today) {
+                $q->whereIn('status', ['checked_out', 'cancelled'])
+                    ->orWhere(function ($q2) use ($today) {
+                        $q2->where('status', '!=', 'checked_in')->whereDate('check_out', '<', $today);
+                    });
+            });
+        } elseif ($view === 'current') {
+            $query->whereNotIn('status', ['checked_out', 'cancelled'])
+                ->where(function ($q) use ($today) {
+                    $q->where('status', 'checked_in')->orWhereDate('check_out', '>=', $today);
+                });
+        }
+    }
+
+    /** @param  \Illuminate\Database\Eloquent\Builder<Booking>  $query */
+    private function applyBookingListQuick($query, string $quick, string $today): void
+    {
+        match ($quick) {
+            'in_house' => $query->where('status', 'checked_in'),
+            'arrivals' => $query->whereDate('check_in', $today)->where('status', '!=', 'cancelled'),
+            'departures' => $query->whereDate('check_out', $today)->whereIn('status', ['checked_in', 'checked_out']),
+            'balance_due' => $query->whereIn('status', ['checked_in', 'checked_out'])
+                ->whereRaw(self::BOOKING_LIST_BALANCE_SQL.' > 0.01'),
+            'attention' => $query->where(function ($q) use ($today) {
+                $q->where(fn ($a) => $a->where('status', 'checked_in')->whereDate('check_out', '<', $today))
+                    ->orWhere(fn ($a) => $a->whereIn('status', ['confirmed', 'pending'])->whereDate('check_in', '<', $today))
+                    ->orWhere(fn ($a) => $a->where('status', 'checked_in')->whereDate('check_in', '>', $today))
+                    ->orWhere(fn ($a) => $a->where('status', 'checked_out')->whereRaw(self::BOOKING_LIST_BALANCE_SQL.' > 0.01'));
+            }),
+            default => null,
+        };
+    }
+
+    /** @return array<string, int|float> */
+    private function bookingListStats(string $today): array
+    {
+        $count = function (callable $scope): int {
+            $q = Booking::query();
+            $scope($q);
+
+            return (int) $q->count();
+        };
+
+        $balanceQ = Booking::query();
+        $this->applyBookingListQuick($balanceQ, 'balance_due', $today);
+
+        return [
+            'in_house' => $count(fn ($q) => $this->applyBookingListQuick($q, 'in_house', $today)),
+            'arrivals_expected' => $count(fn ($q) => $q->whereDate('check_in', $today)->whereIn('status', ['confirmed', 'pending'])),
+            'arrivals_done' => $count(fn ($q) => $q->whereDate('check_in', $today)->whereIn('status', ['checked_in', 'checked_out'])),
+            'departures_pending' => $count(fn ($q) => $q->whereDate('check_out', $today)->where('status', 'checked_in')),
+            'departures_done' => $count(fn ($q) => $q->whereDate('check_out', $today)->where('status', 'checked_out')),
+            'balance_due_count' => (int) (clone $balanceQ)->count(),
+            'balance_due_amount' => round((float) (clone $balanceQ)->sum(DB::raw(self::BOOKING_LIST_BALANCE_SQL)), 2),
+            'attention' => $count(fn ($q) => $this->applyBookingListQuick($q, 'attention', $today)),
+            'current' => $count(fn ($q) => $this->applyBookingListView($q, 'current', $today)),
+            'past' => $count(fn ($q) => $this->applyBookingListView($q, 'past', $today)),
+            'all' => $count(fn ($q) => $q),
+        ];
     }
 
     public function guestSearch(Request $request)
@@ -433,7 +693,7 @@ class BookingController extends Controller
     public function chart(Request $request)
     {
         $this->allowReservationChartRead();
-        $this->syncSplitStayRoomOccupancy();
+        BookingSplitStayRoomMove::sync();
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -530,31 +790,6 @@ class BookingController extends Controller
             && Carbon::parse($s->check_out_at ?? $s->check_out)->gt($now));
 
         return (int) (($current ?? $segments->first())?->room_id ?? $booking->room_id);
-    }
-
-    /**
-     * rooms.status for split stays: the check-in only marks the arrival room, so mark each later
-     * room occupied once an in-house guest's segment in it has started.
-     */
-    private function syncSplitStayRoomOccupancy(): void
-    {
-        $now = now();
-        $roomIds = BookingSegment::query()
-            ->where('status', 'checked_in')
-            ->where('check_in_at', '<=', $now)
-            ->where('check_out_at', '>', $now)
-            ->whereHas('booking', fn($q) => $q->where('status', 'checked_in'))
-            ->whereIn('booking_id', BookingSegment::query()
-                ->select('booking_id')
-                ->groupBy('booking_id')
-                ->havingRaw('COUNT(*) > 1'))
-            ->pluck('room_id')
-            ->unique()
-            ->all();
-
-        if ($roomIds !== []) {
-            Room::whereIn('id', $roomIds)->whereIn('status', ['available', 'vacant'])->update(['status' => 'occupied']);
-        }
     }
 
     public function summary(Request $request)
@@ -850,7 +1085,7 @@ class BookingController extends Controller
             $checkInDay = $bookingUnit === 'hour_package'
                 ? $checkInAt->toDateString()
                 : Carbon::parse($validated['check_in'])->startOfDay()->toDateString();
-            if ($checkInDay !== Carbon::today()->toDateString()) {
+            if (! $this->checkInAllowedOn($checkInDay)) {
                 return response()->json([
                     'message' => 'Check-in is only allowed on the guest\'s scheduled arrival date (today).',
                 ], 422);
@@ -1166,6 +1401,20 @@ class BookingController extends Controller
     }
 
     /**
+     * Check-in is allowed on the arrival day only; config booking.allow_early_check_in (testing,
+     * never in production) also allows arrivals later than today.
+     */
+    private function checkInAllowedOn(string $arrivalDay): bool
+    {
+        $today = Carbon::today()->toDateString();
+        if ($arrivalDay === $today) {
+            return true;
+        }
+
+        return $arrivalDay > $today && config('booking.allow_early_check_in') && ! app()->isProduction();
+    }
+
+    /**
      * When creating a day booking, if estimated arrival is before property standard check-in time,
      * persist early_checkin_time (same rule as POST .../early-checkin) so reception sees early
      * check-in as already applied. Does not add extra_charges here — total_price from the client
@@ -1361,7 +1610,7 @@ class BookingController extends Controller
         // Check-in only on the guest's scheduled arrival date (today).
         if (isset($validated['status']) && $validated['status'] === 'checked_in' && $booking->status !== 'checked_in') {
             $checkInDay = $this->bookingArrivalCalendarDay($booking);
-            if ($checkInDay !== Carbon::today()->toDateString()) {
+            if (! $this->checkInAllowedOn($checkInDay)) {
                 return response()->json([
                     'message' => 'Check-in is only allowed on the guest\'s scheduled arrival date (today).',
                 ], 422);
@@ -1387,40 +1636,17 @@ class BookingController extends Controller
 
         // Checkout validation: must be paid
         if (isset($validated['status']) && $validated['status'] === 'checked_out' && $booking->status !== 'checked_out') {
+            BookingSplitStayRoomMove::sync((int) $booking->id);
+
             if ((float) ($validated['refund_amount'] ?? 0) > 0.0001 && empty($validated['refund_method'])) {
                 return response()->json(['message' => 'Select how the refund will be issued (cash, card, UPI, or bank transfer).'], 422);
             }
 
-            $currentPaymentStatus = $validated['payment_status'] ?? $booking->payment_status;
-            $isPaid = ($currentPaymentStatus === 'paid');
-
-            // Group checkout: pooled payment (group scope) or per-room settlement (room scope).
-            if (! $isPaid && ! empty($booking->booking_group_id)) {
-                if ($checkoutScope === 'room') {
-                    $paid = (float) ($booking->deposit_amount ?? 0);
-                    $grand = $this->effectiveBookingGrand($booking);
-                    $storedTotal = (float) ($booking->total_price ?? 0);
-                    $bill = max($grand, $storedTotal);
-                    $isPaid = $paid + 0.009 >= $bill;
-                } else {
-                    $groupBookings = Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')
-                        ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
-                        ->get();
-                    $groupGrand = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
-                    $groupPaid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
-                    $isPaid = $groupPaid + 0.009 >= $groupGrand;
-                }
-            }
-
-            // Single booking: allow checkout when advance/deposit covers the bill, even if
-            // payment_status was never flipped to "paid" (common after deposits or when totals were adjusted).
-            if (! $isPaid && empty($booking->booking_group_id)) {
-                $paid = (float) ($booking->deposit_amount ?? 0);
-                $grand = $this->effectiveBookingGrand($booking);
-                $storedTotal = (float) ($booking->total_price ?? 0);
-                $bill = max($grand, $storedTotal);
-                $isPaid = $paid + 0.009 >= $bill;
-            }
+            $isPaid = $this->checkoutPaymentState(
+                $booking,
+                $checkoutScope,
+                $validated['payment_status'] ?? $booking->payment_status,
+            )['is_paid'];
 
             if (! $isPaid) {
                 return response()->json(['message' => 'Checkout not allowed until payment is fully paid'], 422);
@@ -1668,8 +1894,8 @@ class BookingController extends Controller
             ]);
         }
 
-        // Rooms the guest already left through a mid-stay room transfer (segment closed as checked_out);
-        // housekeeping was handled at transfer time and the room may since have been resold.
+        // Rooms the guest already left through a mid-stay room transfer or split stay move (segment closed
+        // as checked_out); housekeeping was handled at move time and the room may since have been resold.
         $vacatedRoomIds = [];
         if (($validated['status'] ?? null) === 'checked_out') {
             $segmentStates = $booking->segments()->get(['room_id', 'status']);
@@ -1906,21 +2132,41 @@ class BookingController extends Controller
             'time' => 'required|date_format:H:i',
         ]);
 
+        if ($rejected = $this->rejectArrivalDepartureTimeChange($booking, 'early check-in')) {
+            return $rejected;
+        }
+
         $time = $request->input('time');
-        $roomId = $booking->room_id;
+        $roomId = (int) ($booking->segments()->orderBy('check_in', 'asc')->value('room_id') ?: $booking->room_id);
         $checkInDay = Carbon::parse($booking->check_in)->toDateString();
 
         // Conflict: a prior booking for this room is still checked_in on the same day
         // AND its late_checkout_time would overlap with the requested early check-in time.
         // (A booking that is already checked_out is NOT a conflict.)
-        $conflict = Booking::where('room_id', '=', $roomId, 'and')
-            ->where('id', '!=', $booking->id)
+        $conflict = Booking::where('id', '!=', $booking->id)
             ->where('status', 'checked_in')           // Only block if guest is still in the room
-            ->whereDate('check_out', '=', $checkInDay, 'and')
+            ->where(function ($q) use ($roomId, $checkInDay) {
+                $q->whereHas('segments', function ($s) use ($roomId, $checkInDay) {
+                    $s->where('room_id', $roomId)
+                        ->whereDate('check_out', '=', $checkInDay, 'and')
+                        ->whereNotIn('status', ['cancelled', 'checked_out']);
+                })->orWhere(function ($legacy) use ($roomId, $checkInDay) {
+                    $legacy->whereDoesntHave('segments')
+                        ->where('room_id', $roomId)
+                        ->whereDate('check_out', '=', $checkInDay, 'and');
+                });
+            })
             ->where(function ($q) use ($time) {
-                // Blocked if: no explicit late_checkout (assume standard noon) OR late_checkout >= requested early CI
-                $q->whereNull('late_checkout_time')
-                    ->orWhereTime('late_checkout_time', '>=', $time);
+                // Blocked if the previous guest leaves at/after the requested time: their late checkout,
+                // else the standard check-out time. Hourly stays without a late checkout always block.
+                $standardCheckOut = $this->standardClockSetting('standard_check_out_time', '11:00');
+                $q->whereTime('late_checkout_time', '>=', $time)
+                    ->orWhere(function ($noLate) use ($time, $standardCheckOut) {
+                        $noLate->whereNull('late_checkout_time');
+                        if ($standardCheckOut < $time) {
+                            $noLate->where('booking_unit', 'hour_package');
+                        }
+                    });
             })
             ->exists();
 
@@ -1979,7 +2225,7 @@ class BookingController extends Controller
         $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
 
         $booking->update([
-            'early_checkin_time' => $time,
+            'early_checkin_time' => $time < $standardTime ? $time : null,
             'extra_charges' => max(0.0, (float) ($booking->extra_charges ?? 0) + $fee - $prevFee),
             'notes' => $notes,
         ]);
@@ -1995,19 +2241,40 @@ class BookingController extends Controller
             'time' => 'required|date_format:H:i',
         ]);
 
+        if ($rejected = $this->rejectArrivalDepartureTimeChange($booking, 'late checkout')) {
+            return $rejected;
+        }
+
         $time = $request->input('time');
-        $roomId = $booking->room_id;
+        $roomId = (int) ($booking->segments()->orderBy('check_out', 'desc')->value('room_id') ?: $booking->room_id);
         $checkOutDay = Carbon::parse($booking->check_out)->toDateString();
 
         // Conflict: another booking starts on this room the same checkout day
         // and its early_checkin_time (or standard noon) is <= the requested late time
-        $conflict = Booking::where('room_id', '=', $roomId, 'and')
-            ->where('id', '!=', $booking->id)
-            ->where('status', '!=', 'cancelled')
-            ->whereDate('check_in', '=', $checkOutDay, 'and')
+        $conflict = Booking::where('id', '!=', $booking->id)
+            ->whereNotIn('status', ['cancelled', 'checked_out'])
+            ->where(function ($q) use ($roomId, $checkOutDay) {
+                $q->whereHas('segments', function ($s) use ($roomId, $checkOutDay) {
+                    $s->where('room_id', $roomId)
+                        ->whereDate('check_in', '=', $checkOutDay, 'and')
+                        ->whereNotIn('status', ['cancelled', 'checked_out']);
+                })->orWhere(function ($legacy) use ($roomId, $checkOutDay) {
+                    $legacy->whereDoesntHave('segments')
+                        ->where('room_id', $roomId)
+                        ->whereDate('check_in', '=', $checkOutDay, 'and');
+                });
+            })
             ->where(function ($q) use ($time) {
-                $q->whereNull('early_checkin_time')
-                    ->orWhereTime('early_checkin_time', '<=', $time);
+                // Blocked if the next guest arrives at/before the requested time: their early check-in,
+                // else the standard check-in time. Hourly stays without an early check-in always block.
+                $standardCheckIn = $this->standardClockSetting('standard_check_in_time', '14:00');
+                $q->whereTime('early_checkin_time', '<=', $time)
+                    ->orWhere(function ($noEarly) use ($time, $standardCheckIn) {
+                        $noEarly->whereNull('early_checkin_time');
+                        if ($standardCheckIn > $time) {
+                            $noEarly->where('booking_unit', 'hour_package');
+                        }
+                    });
             })
             ->exists();
 
@@ -2114,6 +2381,35 @@ class BookingController extends Controller
         ]);
 
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup']));
+    }
+
+    private function standardClockSetting(string $key, string $fallback): string
+    {
+        $raw = trim((string) Setting::get($key, $fallback));
+        if ($raw === '') {
+            return $fallback;
+        }
+        try {
+            return Carbon::parse($raw)->format('H:i');
+        } catch (\Throwable) {
+            return $fallback;
+        }
+    }
+
+    private function rejectArrivalDepartureTimeChange(Booking $booking, string $action): ?\Illuminate\Http\JsonResponse
+    {
+        if (in_array($booking->status, ['cancelled', 'checked_out'], true)) {
+            return response()->json([
+                'message' => 'Cannot set ' . $action . ' on a ' . str_replace('_', ' ', $booking->status) . ' reservation.',
+            ], 422);
+        }
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return response()->json([
+                'message' => ucfirst($action) . ' does not apply to hourly bookings. Use Extend hours instead.',
+            ], 422);
+        }
+
+        return null;
     }
 
     // ── Reservation Extension ─────────────────────────────────────────────────
@@ -3714,6 +4010,12 @@ class BookingController extends Controller
             return response()->json(['message' => 'Please add a short note when reason is Other.'], 422);
         }
 
+        if ($validated['reason'] === 'no_show' && $this->bookingArrivalCalendarDay($booking) > Carbon::today()->toDateString()) {
+            return response()->json([
+                'message' => 'A reservation can only be marked as a no-show on or after its arrival date.',
+            ], 422);
+        }
+
         $feeOverride = array_key_exists('fee_override', $validated) && $validated['fee_override'] !== null
             ? (float) $validated['fee_override']
             : null;
@@ -3749,7 +4051,7 @@ class BookingController extends Controller
         }
 
         $reasonLabel = BookingCancellationPolicy::REASONS[$validated['reason']] ?? $validated['reason'];
-        if ($validated['reason'] === 'other' && ! empty($validated['reason_notes'])) {
+        if (in_array($validated['reason'], ['other', 'no_show'], true) && ! empty($validated['reason_notes'])) {
             $reasonLabel .= ' — '.trim((string) $validated['reason_notes']);
         }
 

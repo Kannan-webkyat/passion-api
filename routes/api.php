@@ -107,6 +107,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('reports/housekeeping-productivity', [HospitalityReportController::class, 'housekeepingProductivity']);
     Route::get('reports/cleaning-schedule-adherence', [HospitalityReportController::class, 'cleaningScheduleAdherence']);
     Route::get('reports/channel-source-mix', [HospitalityReportController::class, 'channelSourceMix']);
+    Route::get('reports/unpaid-checkouts', [HospitalityReportController::class, 'unpaidCheckouts']);
 
     Route::get('housekeeping/rooms/{room}/cleaning-history', [HousekeepingController::class, 'roomCleaningHistory']);
     Route::get('housekeeping/rooms/{room}/cleaning-history/detail', [HousekeepingController::class, 'roomCleaningHistoryDetail']);
@@ -165,6 +166,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('bookings/{booking}/early-checkout', [BookingController::class, 'applyEarlyCheckout']);
     Route::post('bookings/{booking}/preview-change-check-in', [BookingController::class, 'previewChangeCheckIn']);
     Route::post('bookings/{booking}/change-check-in', [BookingController::class, 'changeCheckIn']);
+    Route::post('bookings/{booking}/preview-checkout', [BookingController::class, 'previewCheckout']);
     Route::post('bookings/{booking}/preview-cancellation', [BookingController::class, 'previewCancellation']);
     Route::post('bookings/{booking}/cancel', [BookingController::class, 'cancelReservation']);
     Route::post('bookings/{booking}/extend-hours', [BookingController::class, 'extendHourlyReservation']);

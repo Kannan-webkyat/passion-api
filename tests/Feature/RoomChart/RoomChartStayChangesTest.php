@@ -348,6 +348,17 @@ class RoomChartStayChangesTest extends RoomChartTestCase
             ->assertJsonPath('message', 'Late checkout conflicts with the next guest\'s check-in on the same day.');
     }
 
+    public function test_late_checkout_ignores_a_same_day_arrival_that_already_checked_out(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $room = $this->makeRoom('101');
+        $booking = $this->makeBooking($room, $this->day(-1), $this->day(0), ['status' => 'checked_in']);
+        $this->makeBooking($room, $this->day(0), $this->day(2), ['status' => 'checked_out']);
+        $this->makeBooking($room, $this->day(0), $this->day(2), ['status' => 'cancelled']);
+
+        $this->postJson("/api/bookings/{$booking->id}/late-checkout", ['time' => '15:00'])->assertOk();
+    }
+
     // ── Split stay ──────────────────────────────────────────────────────────
 
     public function test_split_stay_adds_segment_on_new_room(): void

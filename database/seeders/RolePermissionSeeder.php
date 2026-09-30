@@ -52,6 +52,7 @@ class RolePermissionSeeder extends Seeder
             'report-housekeeping-productivity',
             'report-cleaning-adherence',
             'report-channel-source-mix',
+            'report-unpaid-checkouts',
             'inventory-view',
             'manage-inventory',
             'manage-grn',

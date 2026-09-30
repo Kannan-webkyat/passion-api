@@ -13,4 +13,15 @@ return [
     */
     'allow_early_checkout_inspection' => (bool) env('ALLOW_EARLY_CHECKOUT_INSPECTION', false),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Early check-in (testing only)
+    |--------------------------------------------------------------------------
+    | When true, reception may check in a reservation before its arrival date
+    | instead of only on the arrival date (past arrivals stay blocked). Ignored
+    | when APP_ENV=production. Mirror with NEXT_PUBLIC_ALLOW_EARLY_CHECK_IN in
+    | the frontend so the room chart Check-in button is enabled too.
+    */
+    'allow_early_check_in' => (bool) env('ALLOW_EARLY_CHECK_IN', false),
+
 ];

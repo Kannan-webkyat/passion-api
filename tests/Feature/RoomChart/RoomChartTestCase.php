@@ -51,6 +51,7 @@ abstract class RoomChartTestCase extends TestCase
         config([
             'app.timezone' => 'Asia/Kolkata',
             'booking.allow_early_checkout_inspection' => false,
+            'booking.allow_early_check_in' => false,
         ]);
         date_default_timezone_set('Asia/Kolkata');
         Carbon::setTestNow(Carbon::parse(self::TODAY . ' 10:00:00', 'Asia/Kolkata'));

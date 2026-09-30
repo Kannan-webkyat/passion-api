@@ -71,6 +71,52 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $this->assertSame('pending_inspection', $movedIn->fresh()->status, 'Chart load must not undo a checkout inspection request.');
     }
 
+    public function test_split_stay_move_hands_first_room_to_housekeeping_on_move_day(): void
+    {
+        $this->actingWith();
+        $first = $this->makeRoom('101');
+        $extension = $this->makeRoom('102');
+        $booking = $this->makeBooking($first, $this->day(-2), $this->day(0), ['status' => 'checked_in']);
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", ['new_room_id' => $extension->id, 'new_check_out' => $this->day(2)])
+            ->assertOk();
+
+        $this->getJson('/api/bookings/chart')->assertOk();
+
+        $this->assertDatabaseHas('booking_segments', ['booking_id' => $booking->id, 'room_id' => $first->id, 'status' => 'checked_out']);
+        $this->assertDatabaseHas('booking_segments', ['booking_id' => $booking->id, 'room_id' => $extension->id, 'status' => 'checked_in']);
+        $this->assertSame('dirty', $first->fresh()->status);
+        $this->assertSame('occupied', $extension->fresh()->status);
+
+        $block = RoomStatusBlock::query()->where('room_id', $first->id)->where('is_active', true)->sole();
+        $this->assertSame('dirty', $block->status);
+        $this->assertSame($this->day(0), $block->start_date->toDateString());
+        $this->assertSame('Auto: split stay room move', $block->note);
+        $this->assertSame(0, RoomStatusBlock::query()->where('room_id', $extension->id)->count());
+    }
+
+    public function test_split_stay_checkout_dirties_only_the_last_room_when_first_room_was_resold(): void
+    {
+        $this->actingWith();
+        $first = $this->makeRoom('101');
+        $extension = $this->makeRoom('102');
+        $booking = $this->makeBooking($first, $this->day(-4), $this->day(-2), ['status' => 'checked_in']);
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", ['new_room_id' => $extension->id, 'new_check_out' => $this->day(0)])
+            ->assertOk();
+        $this->makeBooking($first, $this->day(-2), $this->day(1), ['status' => 'checked_in']);
+        $first->update(['status' => 'occupied']);
+        $booking->refresh();
+        $this->pay($booking, (float) $booking->total_price);
+
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertOk();
+
+        $this->assertSame('occupied', $first->fresh()->status, 'The next guest is in room 101 now.');
+        $this->assertSame(0, RoomStatusBlock::query()->where('room_id', $first->id)->where('is_active', true)->count());
+        $this->assertSame('dirty', $extension->fresh()->status);
+        $block = RoomStatusBlock::query()->where('room_id', $extension->id)->where('is_active', true)->sole();
+        $this->assertSame($this->day(0), $block->start_date->toDateString());
+        $this->assertSame('Auto: checkout', $block->note);
+    }
+
     public function test_check_in_requires_edit_permission(): void
     {
         $this->actingWith(['reservation-view']);
@@ -85,6 +131,21 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $booking = $this->makeBooking($this->makeRoom('101'), $this->day(1), $this->day(3));
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_in'])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Check-in is only allowed on the guest\'s scheduled arrival date (today).');
+    }
+
+    public function test_early_check_in_flag_allows_future_arrival_but_not_past_arrival(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        config(['booking.allow_early_check_in' => true]);
+        $future = $this->makeBooking($this->makeRoom('101'), $this->day(2), $this->day(4));
+        $past = $this->makeBooking($this->makeRoom('102'), $this->day(-1), $this->day(2));
+
+        $this->patchJson("/api/bookings/{$future->id}", ['status' => 'checked_in'])
+            ->assertOk()
+            ->assertJsonPath('status', 'checked_in');
+        $this->patchJson("/api/bookings/{$past->id}", ['status' => 'checked_in'])
             ->assertStatus(422)
             ->assertJsonPath('message', 'Check-in is only allowed on the guest\'s scheduled arrival date (today).');
     }

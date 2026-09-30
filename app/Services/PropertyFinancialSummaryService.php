@@ -813,10 +813,17 @@ class PropertyFinancialSummaryService
             ->whereDate('check_in', '<=', $to)
             ->whereDate('check_in', '<', $today)
             ->whereNull('check_in_at')
-            ->count();
+            ->count()
+            + (int) Booking::query()
+                ->where('status', '=', 'cancelled')
+                ->where('cancellation_reason', '=', 'no_show')
+                ->whereDate('check_in', '>=', $from)
+                ->whereDate('check_in', '<=', $to)
+                ->count();
 
         $cancellations = (int) Booking::query()
             ->where('status', '=', 'cancelled')
+            ->where(fn ($q) => $q->whereNull('cancellation_reason')->orWhere('cancellation_reason', '!=', 'no_show'))
             ->where(function ($q) use ($from, $to) {
                 $q->where(function ($q2) use ($from, $to) {
                     $q2->whereDate('check_in', '>=', $from)->whereDate('check_in', '<=', $to);

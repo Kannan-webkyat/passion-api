@@ -62,6 +62,14 @@ class HospitalityReportController extends Controller
         return response()->json($this->reports->channelSourceMix($from, $to));
     }
 
+    public function unpaidCheckouts(Request $request)
+    {
+        $this->authorizePermissions(['report-unpaid-checkouts', 'reservation-view']);
+        [$from, $to] = $this->validatedRange($request);
+
+        return response()->json($this->reports->unpaidCheckouts($from, $to));
+    }
+
     /**
      * @return array{0: string, 1: string}
      */

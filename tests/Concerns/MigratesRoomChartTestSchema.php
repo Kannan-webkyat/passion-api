@@ -393,6 +393,55 @@ trait MigratesRoomChartTestSchema
             });
         }
 
+        if (! Schema::hasTable('inventory_items')) {
+            Schema::create('inventory_items', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('category_id')->nullable();
+                $table->string('sku')->nullable();
+                $table->string('name');
+                $table->decimal('cost_price', 12, 2)->default(0);
+                $table->decimal('conversion_factor', 12, 4)->default(1);
+                $table->decimal('current_stock', 14, 4)->default(0);
+                $table->boolean('is_minibar')->default(false);
+                $table->unsignedBigInteger('tax_id')->nullable();
+                $table->timestamps();
+            });
+            Schema::create('inventory_locations', function (Blueprint $table) {
+                $table->id();
+                $table->string('name');
+                $table->string('type')->nullable();
+                $table->unsignedBigInteger('room_id')->nullable();
+                $table->boolean('is_active')->default(true);
+                $table->timestamps();
+            });
+            Schema::create('inventory_item_locations', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('inventory_item_id');
+                $table->unsignedBigInteger('inventory_location_id');
+                $table->decimal('quantity', 14, 4)->default(0);
+                $table->timestamps();
+            });
+            Schema::create('menu_items', function (Blueprint $table) {
+                $table->id();
+                $table->string('name');
+                $table->decimal('price', 10, 2)->default(0);
+                $table->unsignedBigInteger('tax_id')->nullable();
+                $table->string('type')->default('veg');
+                $table->boolean('is_active')->default(true);
+                $table->unsignedBigInteger('inventory_item_id')->nullable();
+                $table->timestamps();
+            });
+            Schema::create('restaurant_menu_items', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('menu_item_id');
+                $table->unsignedBigInteger('restaurant_master_id');
+                $table->decimal('price', 10, 2)->default(0);
+                $table->boolean('is_active')->default(true);
+                $table->boolean('price_tax_inclusive')->default(true);
+                $table->timestamps();
+            });
+        }
+
         $this->truncateDateColumnsLikeMysql('room_status_blocks', ['start_date', 'end_date']);
         $this->truncateDateColumnsLikeMysql('room_type_seasons', ['start_date', 'end_date']);
     }

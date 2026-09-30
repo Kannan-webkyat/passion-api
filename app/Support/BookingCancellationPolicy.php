@@ -32,6 +32,7 @@ final class BookingCancellationPolicy
         'travel_disruption' => 'Travel disruption',
         'duplicate_booking' => 'Duplicate booking',
         'hotel_initiated' => 'Hotel initiated',
+        'no_show' => 'No-show',
         'other' => 'Other',
     ];
 
