@@ -9,6 +9,7 @@ use App\Models\HousekeepingJob;
 use App\Models\Room;
 use App\Models\RoomCleaningRelease;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingNumber;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
 
@@ -689,6 +690,7 @@ class HospitalityReportService
             $checkOut = Carbon::parse($booking->check_out)->startOfDay();
             $rows[] = [
                 'booking_id' => (int) $booking->id,
+                'booking_number' => BookingNumber::for($booking),
                 'guest_name' => trim((string) $booking->guest_name) ?: 'Guest',
                 'phone' => $booking->phone,
                 'email' => $booking->email,

@@ -19,11 +19,14 @@ use App\Models\RoomType;
 use App\Models\Setting;
 use App\Support\BookingCancellationPolicy;
 use App\Support\BookingInspectionChargeLines;
+use App\Support\BookingInvoiceNumber;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingNumber;
 use App\Support\BookingPaymentLedger;
 use App\Support\BookingRoomAvailability;
 use App\Support\BookingRoomTransferService;
 use App\Support\BookingSplitStayRoomMove;
+use App\Support\HousekeepingTurnoverCarryForward;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
@@ -389,12 +392,13 @@ class BookingController extends Controller
     }
 
     /**
-     * Paid-in-full rule for checkout. Group bookings pool payments unless scope is "room";
-     * single bookings pass when the deposit covers the bill even if payment_status is stale.
+     * Paid-in-full rule for checkout. Group bookings pool payments unless scope is "room".
+     * Money held (payments minus refunds) must cover the current bill; payment_status is not trusted because folio
+     * charges posted after payment (inspection, POS room charge, fees) leave it stale at "paid".
      *
      * @return array{is_paid: bool, bill: float, paid: float, pooled: bool}
      */
-    private function checkoutPaymentState(Booking $booking, string $checkoutScope, ?string $paymentStatus): array
+    private function checkoutPaymentState(Booking $booking, string $checkoutScope): array
     {
         $pooled = ! empty($booking->booking_group_id) && $checkoutScope !== 'room';
 
@@ -403,17 +407,74 @@ class BookingController extends Controller
                 ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
                 ->get();
             $bill = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
-            $paid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0));
+            $paid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0) - (float) ($b->refund_amount ?? 0));
         } else {
-            $bill = max($this->effectiveBookingGrand($booking), (float) ($booking->total_price ?? 0));
-            $paid = (float) ($booking->deposit_amount ?? 0);
+            $bill = $this->effectiveBookingGrand($booking);
+            $paid = (float) ($booking->deposit_amount ?? 0) - (float) ($booking->refund_amount ?? 0);
         }
 
         return [
-            'is_paid' => $paymentStatus === 'paid' || $paid + 0.009 >= $bill,
+            'is_paid' => $paid + 0.009 >= $bill,
             'bill' => round($bill, 2),
             'paid' => round($paid, 2),
             'pooled' => $pooled,
+        ];
+    }
+
+    /**
+     * Checkout inspection progress for every room the guest still occupies (vacated split-stay /
+     * transfer rooms are skipped). "done" = each room has an active inspected handoff for this booking.
+     *
+     * @return array{status: 'done'|'pending'|'none', rooms: list<string>}
+     */
+    private function checkoutInspectionState(Booking $booking): array
+    {
+        $roomIds = $booking->segments()
+            ->whereNotIn('status', ['cancelled', 'checked_out'])
+            ->pluck('room_id')
+            ->map(fn($id) => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
+        if ($roomIds->isEmpty() && (int) $booking->room_id > 0) {
+            $roomIds = collect([(int) $booking->room_id]);
+        }
+
+        $forBooking = function (RoomStatusBlock $block) use ($booking): bool {
+            $snapBookingId = $block->inspection_snapshot['booking_id'] ?? null;
+
+            return $snapBookingId === null || (int) $snapBookingId === (int) $booking->id;
+        };
+        $handoffs = RoomStatusBlock::query()
+            ->whereIn('room_id', $roomIds->all(), 'and', false)
+            ->where('is_active', '=', true, 'and')
+            ->whereIn('status', ['inspected', 'pending_inspection'], 'and', false)
+            ->get(['room_id', 'status', 'inspection_snapshot'])
+            ->filter($forBooking);
+
+        $inspectedRoomIds = $handoffs
+            ->filter(fn(RoomStatusBlock $b) => $b->status === 'inspected' && $b->inspection_snapshot !== null)
+            ->pluck('room_id')
+            ->map(fn($id) => (int) $id);
+        $missing = $roomIds->diff($inspectedRoomIds)->values();
+        if ($missing->isEmpty()) {
+            return ['status' => 'done', 'rooms' => []];
+        }
+
+        $pending = $handoffs
+            ->where('status', 'pending_inspection')
+            ->pluck('room_id')
+            ->map(fn($id) => (int) $id)
+            ->intersect($missing)
+            ->isNotEmpty();
+
+        return [
+            'status' => $pending ? 'pending' : 'none',
+            'rooms' => Room::whereIn('id', $missing->all(), 'and', false)
+                ->orderBy('room_number')
+                ->pluck('room_number')
+                ->map(fn($n) => (string) $n)
+                ->all(),
         ];
     }
 
@@ -436,9 +497,11 @@ class BookingController extends Controller
         BookingSplitStayRoomMove::sync((int) $booking->id);
         $booking->refresh();
 
-        $state = $this->checkoutPaymentState($booking, $scope, $booking->payment_status);
+        $state = $this->checkoutPaymentState($booking, $scope);
+        $inspection = $this->checkoutInspectionState($booking);
+        $summary = $this->bookingBillingSummary($booking);
         $refunded = round((float) ($booking->refund_amount ?? 0), 2);
-        $netReceived = $state['pooled'] ? $state['paid'] : round($state['paid'] - $refunded, 2);
+        $netReceived = $state['paid'];
         $checkoutDay = $this->bookingCheckoutCalendarDay($booking);
         $today = Carbon::today()->toDateString();
         $refundDue = $state['pooled'] ? 0.0 : max(0.0, round($netReceived - $state['bill'], 2));
@@ -452,11 +515,15 @@ class BookingController extends Controller
             'balance_due' => max(0.0, round($state['bill'] - $state['paid'], 2)),
             'refund_due' => $refundDue,
             'refund_amount_after' => round($refunded + $refundDue, 2),
-            'can_checkout' => $state['is_paid'],
+            'can_checkout' => $state['is_paid'] && $inspection['status'] === 'done',
+            'inspection_status' => $inspection['status'],
+            'inspection_rooms' => $inspection['rooms'],
             'checkout_day' => $checkoutDay,
             'is_early_checkout' => $checkoutDay > $today,
             'checkout_discount_amount' => round((float) ($booking->checkout_discount_amount ?? 0), 2),
             'extra_charges' => round((float) ($booking->extra_charges ?? 0), 2),
+            'room_total' => $summary['room'],
+            'folio_extras' => $summary['extras'],
         ]);
     }
 
@@ -539,6 +606,8 @@ class BookingController extends Controller
                     ->orWhereHas('ratePlan', fn ($r) => $r->where('name', 'like', $like));
                 if (ctype_digit(ltrim($term, '#'))) {
                     $q->orWhere('bookings.id', (int) ltrim($term, '#'));
+                } else {
+                    $q->orWhere('booking_number', 'like', $like);
                 }
             });
         }
@@ -694,6 +763,7 @@ class BookingController extends Controller
     {
         $this->allowReservationChartRead();
         BookingSplitStayRoomMove::sync();
+        HousekeepingTurnoverCarryForward::sync();
         $start = Carbon::parse($request->query('start', Carbon::today()));
         // Show 14 days by default for better visibility
         $end = Carbon::parse($request->query('end', Carbon::today()->addDays(13)));
@@ -795,6 +865,7 @@ class BookingController extends Controller
     public function summary(Request $request)
     {
         $this->allowReservationChartRead();
+        HousekeepingTurnoverCarryForward::sync();
         $date = Carbon::parse($request->query('date', Carbon::today()));
         $today = Carbon::today();
         $dayStartAt = $date->copy()->startOfDay();
@@ -900,6 +971,7 @@ class BookingController extends Controller
             ], 422);
         }
 
+        BookingSplitStayRoomMove::sync((int) $booking->id);
         $booking->load(['segments']);
 
         $segments = $booking->segments
@@ -1320,6 +1392,7 @@ class BookingController extends Controller
                     BookingRoomAvailability::assertSellable((int) $roomId, $finalCheckInAt, $end, $status);
 
                     $booking = Booking::create($bookingData);
+                    BookingNumber::assign($booking);
 
                     BookingSegment::create([
                         'booking_id' => $booking->id,
@@ -1477,7 +1550,60 @@ class BookingController extends Controller
     {
         $this->allowReservationDetail();
 
-        return $booking->load(['room.roomType.tax', 'ratePlan', 'creator', 'bookingGroup']);
+        $booking->load(['room.roomType.tax', 'ratePlan', 'creator', 'bookingGroup', 'segments.room.roomType']);
+
+        return response()->json($booking->toArray() + ['billing' => $this->bookingBillingSummary($booking)]);
+    }
+
+    /**
+     * Folio totals as checkout computes them (invoice room recompute incl. GST), for the Bookings detail view.
+     *
+     * @return array<string, mixed>
+     */
+    private function bookingBillingSummary(Booking $booking): array
+    {
+        $isHourly = ($booking->booking_unit ?? 'day') === 'hour_package';
+        $invoice = $isHourly
+            ? [
+                'room_inclusive_grand' => (float) ($booking->total_price ?? 0),
+                'additive_extra_charges' => (float) ($booking->extra_charges ?? 0),
+            ]
+            : BookingInvoiceRoomStay::summarizeForInvoice($booking);
+        $state = $this->checkoutPaymentState($booking, 'room');
+        $paid = round((float) ($booking->deposit_amount ?? 0), 2);
+        $refunded = round((float) ($booking->refund_amount ?? 0), 2);
+        $received = round($paid - $refunded, 2);
+
+        $group = null;
+        if (! empty($booking->booking_group_id)) {
+            $pooled = $this->checkoutPaymentState($booking, 'group');
+            $group = [
+                'bookings' => Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')->count(),
+                'bill' => $pooled['bill'],
+                'paid' => $pooled['paid'],
+                'balance_due' => round(max(0.0, $pooled['bill'] - $pooled['paid']), 2),
+            ];
+        }
+
+        $cancellationFee = round((float) ($booking->cancellation_fee_amount ?? 0), 2);
+        if ($booking->status === 'cancelled') {
+            $state['bill'] = $cancellationFee;
+        }
+
+        return [
+            'room' => round((float) $invoice['room_inclusive_grand'], 2),
+            'stored_room_total' => round((float) ($booking->total_price ?? 0), 2),
+            'extras' => round((float) $invoice['additive_extra_charges'], 2),
+            'discount' => round(max(0.0, (float) ($booking->checkout_discount_amount ?? 0)), 2),
+            'bill' => $state['bill'],
+            'paid' => $paid,
+            'refunded' => $refunded,
+            'received' => $received,
+            'balance_due' => $booking->status === 'cancelled' ? 0.0 : round(max(0.0, $state['bill'] - $received), 2),
+            'credit' => round(max(0.0, $received - $state['bill']), 2),
+            'cancellation_fee' => $cancellationFee,
+            'group' => $group,
+        ];
     }
 
     public function update(Request $request, Booking $booking)
@@ -1617,6 +1743,7 @@ class BookingController extends Controller
             }
 
             $roomId = (int) $booking->room_id;
+            HousekeepingTurnoverCarryForward::sync($roomId);
             $today = Carbon::today()->toDateString();
             $tomorrow = Carbon::today()->addDay()->toDateString();
             $blocking = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
@@ -1642,11 +1769,19 @@ class BookingController extends Controller
                 return response()->json(['message' => 'Select how the refund will be issued (cash, card, UPI, or bank transfer).'], 422);
             }
 
-            $isPaid = $this->checkoutPaymentState(
-                $booking,
-                $checkoutScope,
-                $validated['payment_status'] ?? $booking->payment_status,
-            )['is_paid'];
+            $inspection = $this->checkoutInspectionState($booking);
+            if ($inspection['status'] !== 'done') {
+                $rooms = implode(', #', $inspection['rooms']);
+
+                return response()->json([
+                    'message' => $inspection['status'] === 'pending'
+                        ? "Checkout inspection for room #{$rooms} is still with housekeeping. Check out once it is completed."
+                        : "Request the checkout inspection for room #{$rooms} before check-out.",
+                    'inspection_status' => $inspection['status'],
+                ], 422);
+            }
+
+            $isPaid = $this->checkoutPaymentState($booking, $checkoutScope)['is_paid'];
 
             if (! $isPaid) {
                 return response()->json(['message' => 'Checkout not allowed until payment is fully paid'], 422);
@@ -1872,6 +2007,7 @@ class BookingController extends Controller
                     $booking->fresh(['room.roomType.tax']),
                     auth()->id(),
                 );
+                BookingInvoiceNumber::issue($booking);
             }
         });
 
@@ -3405,7 +3541,7 @@ class BookingController extends Controller
             'hotelName' => $hotelName,
             'hotelAddress' => $hotelAddress,
             'hotelGstin' => $hotelGstin,
-            'resNo' => (string) $booking->id,
+            'resNo' => BookingNumber::for($booking),
             'bookedOn' => $createdAt->format('d/m/Y'),
             'guestName' => $guestName,
             'contact' => $contact,
@@ -3439,9 +3575,19 @@ class BookingController extends Controller
 
         $data = ReservationInvoiceViewData::build($booking);
         $pdf = Pdf::loadView('bookings.reservation_invoice', $data)->setPaper('a4', 'portrait');
-        $safeName = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) $data['invoiceNo']);
+        $pdf->render();
+        $dompdf = $pdf->getDomPDF();
+        $canvas = $dompdf->getCanvas();
+        $canvas->page_text(
+            $canvas->get_width() - 80,
+            $canvas->get_height() - 18,
+            'Page {PAGE_NUM} of {PAGE_COUNT}',
+            $dompdf->getFontMetrics()->getFont('DejaVu Sans'),
+            6.5
+        );
+        $safeName = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) ($data['isIssued'] ? $data['invoiceNo'] : $data['resNo']));
 
-        return $pdf->download('Invoice_' . $safeName . '.pdf');
+        return $pdf->download(($data['isIssued'] ? 'Invoice_' : 'Proforma_') . $safeName . '.pdf');
     }
 
     /**

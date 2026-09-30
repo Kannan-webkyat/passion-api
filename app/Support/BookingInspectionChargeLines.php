@@ -154,6 +154,9 @@ final class BookingInspectionChargeLines
                 if (! is_array($snap) || ! empty($snap['cleared'])) {
                     continue;
                 }
+                if (isset($snap['booking_id']) && (int) $snap['booking_id'] !== (int) $booking->id) {
+                    continue;
+                }
                 if (! in_array((int) $candidate->room_id, $roomIds, true)) {
                     continue;
                 }

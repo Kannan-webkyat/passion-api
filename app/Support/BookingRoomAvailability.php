@@ -122,6 +122,9 @@ final class BookingRoomAvailability
             ]);
         }
 
+        if ($status === 'checked_in') {
+            HousekeepingTurnoverCarryForward::sync($roomId);
+        }
         $blocks = self::overlappingActiveBlocks($roomId, $checkInAt, $checkOutAt);
         $hard = self::hardBlockMessage($room, $blocks);
         if ($hard !== null) {

@@ -36,7 +36,9 @@ use App\Services\DailyRoomCleaningClassificationService;
 use App\Services\DayClosingService;
 use App\Services\HousekeepingChecklistService;
 use App\Services\RoomCleaningAvailabilityService;
+use App\Support\BookingNumber;
 use App\Support\BookingSplitStayRoomMove;
+use App\Support\HousekeepingTurnoverCarryForward;
 use App\Support\CleaningServiceClassification;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
@@ -198,6 +200,7 @@ class HousekeepingController extends Controller
         }
 
         $statuses = $hkStatus === 'all' ? ['dirty', 'cleaning', 'inspected', 'pending_inspection'] : [$hkStatus];
+        HousekeepingTurnoverCarryForward::sync();
 
         // List all active HK blocks — checkout may be scheduled on a future calendar day while the room
         // is already dirty today; strict date overlap would hide those from housekeeping.
@@ -208,10 +211,12 @@ class HousekeepingController extends Controller
 
         $this->applyHousekeepingListFilters($query, $validated, $d, $dNext, $overlapOnly);
 
-        $blocks = $query
-            ->orderBy('room_id')
-            ->orderBy('id')
-            ->get();
+        $blocks = $this->withCheckoutInspectionInspectorNames(
+            $query
+                ->orderBy('room_id')
+                ->orderBy('id')
+                ->get()
+        );
 
         return response()->json([
             'date' => $d,
@@ -226,6 +231,7 @@ class HousekeepingController extends Controller
     {
         $this->allowHousekeepingNav();
         BookingSplitStayRoomMove::sync();
+        HousekeepingTurnoverCarryForward::sync();
 
         $validated = $request->validate([
             'floor' => 'nullable|string|max:50',
@@ -242,7 +248,10 @@ class HousekeepingController extends Controller
 
         $this->applyHousekeepingListFilters($query, $validated, $d, $dNext, false);
 
-        $blocks = $query->orderBy('room_id')->orderBy('id')->get();
+        // Pre-checkout inspection handoffs stay on the Checkout Inspection board until the guest leaves.
+        $blocks = $query->orderBy('room_id')->orderBy('id')->get()
+            ->reject(fn (RoomStatusBlock $b) => $b->status === 'inspected' && $this->activeBookingForRoom((int) $b->room_id))
+            ->values();
         $roomIds = $blocks->pluck('room_id')->map(fn($id) => (int) $id)->unique()->filter()->values()->all();
 
         $jobsByRoom = $roomIds === []
@@ -422,6 +431,7 @@ class HousekeepingController extends Controller
     {
         $this->allowHousekeepingNav();
         BookingSplitStayRoomMove::sync();
+        HousekeepingTurnoverCarryForward::sync();
 
         $dirty = (int) RoomStatusBlock::query()
             ->where('is_active', '=', true, 'and')
@@ -1308,6 +1318,7 @@ class HousekeepingController extends Controller
             'room_number' => (string) $room->room_number,
             'booking' => $booking ? [
                 'id' => (int) $booking->id,
+                'booking_number' => BookingNumber::for($booking),
                 'guest_name' => (string) ($booking->guest_name ?? trim(($booking->first_name ?? '') . ' ' . ($booking->last_name ?? ''))),
                 'check_in' => $booking->check_in,
                 'check_out' => $booking->check_out,
@@ -1750,6 +1761,13 @@ class HousekeepingController extends Controller
         if ($roomStatusBlock->status !== 'inspected') {
             return response()->json(['message' => 'Room is not awaiting inspection.'], 422);
         }
+        if ($this->activeBookingForRoom((int) $roomStatusBlock->room_id)) {
+            $room = Room::find($roomStatusBlock->room_id, ['room_number']);
+
+            return response()->json([
+                'message' => "Room #{$room?->room_number} still has a checked-in guest. It is handed to housekeeping at checkout.",
+            ], 422);
+        }
 
         $roomStatusBlock->update(['is_active' => false]);
         Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
@@ -2143,6 +2161,7 @@ class HousekeepingController extends Controller
                 'inspector_user_id' => $userId,
                 'inspector_name' => $inspectorName,
                 'booking_id' => $bookingId,
+                'booking_number' => $booking ? BookingNumber::for($booking) : null,
                 'room_id' => $roomId,
             ];
 
@@ -2549,6 +2568,7 @@ class HousekeepingController extends Controller
                 'cleared' => false,
                 'submitted_at' => now()->toIso8601String(),
                 'booking_id' => (int) $booking->id,
+                'booking_number' => BookingNumber::for($booking),
                 'room_id' => $roomId,
                 'inspector_user_id' => $userId,
                 'inspector_name' => $inspectorName,

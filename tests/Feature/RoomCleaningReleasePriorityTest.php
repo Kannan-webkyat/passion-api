@@ -2,7 +2,6 @@
 
 namespace Tests\Feature;
 
-use App\Http\Controllers\Concerns\AuthorizesHousekeepingPermissions;
 use App\Models\RoomCleaningRelease;
 use App\Support\CleaningReleasePriority;
 use Laravel\Sanctum\Sanctum;
@@ -15,7 +14,7 @@ class RoomCleaningReleasePriorityTest extends TestCase
 
     public function test_store_persists_priority_and_returns_it_in_response(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Sanctum::actingAs($user);
 
         $room = $this->createRoom();
@@ -37,7 +36,7 @@ class RoomCleaningReleasePriorityTest extends TestCase
 
     public function test_reschedule_updates_priority(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Sanctum::actingAs($user);
 
         $room = $this->createRoom();
@@ -61,7 +60,7 @@ class RoomCleaningReleasePriorityTest extends TestCase
 
     public function test_room_context_returns_active_release_priority(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Sanctum::actingAs($user);
 
         $room = $this->createRoom();
@@ -77,7 +76,7 @@ class RoomCleaningReleasePriorityTest extends TestCase
 
     public function test_store_rejects_invalid_priority_with_validation_error(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Sanctum::actingAs($user);
 
         $room = $this->createRoom();
@@ -96,7 +95,7 @@ class RoomCleaningReleasePriorityTest extends TestCase
 
     public function test_reschedule_rejects_invalid_priority_without_mutating_record(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Sanctum::actingAs($user);
 
         $room = $this->createRoom();
@@ -120,7 +119,7 @@ class RoomCleaningReleasePriorityTest extends TestCase
 
     public function test_parallel_reschedule_requests_last_successful_priority_wins(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Sanctum::actingAs($user);
 
         $room = $this->createRoom();

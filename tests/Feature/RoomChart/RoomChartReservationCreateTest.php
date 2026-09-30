@@ -56,6 +56,38 @@ class RoomChartReservationCreateTest extends RoomChartTestCase
         $this->assertSame('available', $room->fresh()->status);
     }
 
+    public function test_new_booking_gets_a_booking_number_from_its_id(): void
+    {
+        $this->actingWith(['reservation-create']);
+        $room = $this->makeRoom('101');
+
+        $response = $this->postJson('/api/bookings', $this->payload($room))->assertCreated();
+
+        $id = (int) $response->json('id');
+        $expected = 'RES-' . str_pad((string) $id, 6, '0', STR_PAD_LEFT);
+        $response->assertJsonPath('booking_number', $expected);
+        $this->assertSame($expected, Booking::query()->findOrFail($id)->booking_number);
+    }
+
+    public function test_each_room_in_a_group_booking_gets_its_own_booking_number(): void
+    {
+        $this->actingWith(['reservation-create-group']);
+        $a = $this->makeRoom('101');
+        $b = $this->makeRoom('102');
+
+        $payload = $this->payload($a, ['room_ids' => [$a->id, $b->id], 'group_name' => 'Rao Wedding']);
+        unset($payload['room_id']);
+
+        $rows = $this->postJson('/api/bookings', $payload)->assertCreated()->json();
+
+        $numbers = array_column($rows, 'booking_number');
+        $this->assertSame(
+            array_map(fn ($r) => 'RES-' . str_pad((string) $r['id'], 6, '0', STR_PAD_LEFT), $rows),
+            $numbers,
+        );
+        $this->assertCount(2, array_unique($numbers));
+    }
+
     public function test_requires_reservation_create_permission(): void
     {
         $this->actingWith(['reservation-view', 'reservation-edit']);

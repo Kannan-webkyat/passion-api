@@ -106,6 +106,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $first->update(['status' => 'occupied']);
         $booking->refresh();
         $this->pay($booking, (float) $booking->total_price);
+        $this->completeCheckoutInspection($booking);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertOk();
 
@@ -115,6 +116,24 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $block = RoomStatusBlock::query()->where('room_id', $extension->id)->where('is_active', true)->sole();
         $this->assertSame($this->day(0), $block->start_date->toDateString());
         $this->assertSame('Auto: checkout', $block->note);
+    }
+
+    public function test_split_stay_inspection_skips_the_room_the_guest_already_left(): void
+    {
+        $this->actingWith();
+        $first = $this->makeRoom('101');
+        $extension = $this->makeRoom('102');
+        $booking = $this->makeBooking($first, $this->day(-4), $this->day(-2), ['status' => 'checked_in']);
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", ['new_room_id' => $extension->id, 'new_check_out' => $this->day(0)])
+            ->assertOk();
+        $this->makeBooking($first, $this->day(-2), $this->day(1), ['status' => 'checked_in']);
+        $first->update(['status' => 'occupied']);
+
+        $this->postJson("/api/bookings/{$booking->id}/request-inspection")->assertOk();
+
+        $this->assertSame([$extension->id], RoomStatusBlock::query()->where('status', 'pending_inspection')->where('is_active', true)->pluck('room_id')->all());
+        $this->assertSame('occupied', $first->fresh()->status);
+        $this->assertSame('pending_inspection', $extension->fresh()->status);
     }
 
     public function test_check_in_requires_edit_permission(): void
@@ -162,12 +181,24 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
             ->assertJsonPath('message', 'Room #101 is currently marked Dirty. Complete housekeeping service or assign another clean room before check-in.');
     }
 
-    public function test_check_in_allowed_when_dirty_block_ended_yesterday(): void
+    public function test_check_in_rejected_while_yesterdays_turnover_is_unfinished(): void
     {
         $this->actingWith(['reservation-edit']);
         $room = $this->makeRoom('101');
         $booking = $this->makeBooking($room, $this->day(0), $this->day(2));
         $this->makeBlock($room, 'dirty', $this->day(-1), $this->day(0));
+
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_in'])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Room #101 is currently marked Dirty. Complete housekeeping service or assign another clean room before check-in.');
+    }
+
+    public function test_check_in_allowed_when_yesterdays_turnover_was_finished(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $room = $this->makeRoom('101');
+        $booking = $this->makeBooking($room, $this->day(0), $this->day(2));
+        $this->makeBlock($room, 'inspected', $this->day(-1), $this->day(0), ['is_active' => false]);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_in'])->assertOk();
     }
@@ -220,6 +251,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $this->actingWith(['reservation-edit']);
         $booking = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in']);
         $this->pay($booking, 4000);
+        $this->completeCheckoutInspection($booking);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])
             ->assertStatus(422)
@@ -232,6 +264,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $room = $this->makeRoom('101');
         $booking = $this->makeBooking($room, $this->day(-2), $this->day(0), ['status' => 'checked_in']);
         $this->pay($booking, 4480);
+        $this->completeCheckoutInspection($booking);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])
             ->assertOk()
@@ -239,6 +272,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
 
         $this->assertDatabaseHas('booking_segments', ['booking_id' => $booking->id, 'status' => 'checked_out']);
         $this->assertSame('dirty', $room->fresh()->status);
+        $this->assertSame(0, RoomStatusBlock::query()->where('status', 'inspected')->where('is_active', true)->count());
 
         $block = RoomStatusBlock::query()->where('room_id', $room->id)->where('is_active', true)->sole();
         $this->assertSame('dirty', $block->status);
@@ -247,7 +281,19 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $this->assertSame('Auto: checkout', $block->note);
     }
 
-    public function test_checkout_closes_pending_inspection_handoff(): void
+    public function test_checkout_rejected_until_inspection_is_requested(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in']);
+        $this->pay($booking, 4480);
+
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])
+            ->assertStatus(422)
+            ->assertJsonPath('inspection_status', 'none')
+            ->assertJsonPath('message', 'Request the checkout inspection for room #101 before check-out.');
+    }
+
+    public function test_checkout_rejected_while_inspection_is_pending(): void
     {
         $this->actingWith(['reservation-edit']);
         $room = $this->makeRoom('101');
@@ -257,9 +303,27 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
             'inspection_snapshot' => ['booking_id' => $booking->id],
         ]);
 
-        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertOk();
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])
+            ->assertStatus(422)
+            ->assertJsonPath('inspection_status', 'pending');
 
-        $this->assertSame(0, RoomStatusBlock::query()->where('status', 'pending_inspection')->where('is_active', true)->count());
+        $this->assertSame('checked_in', $booking->fresh()->status);
+        $this->assertSame(1, RoomStatusBlock::query()->where('status', 'pending_inspection')->where('is_active', true)->count());
+    }
+
+    public function test_another_guests_inspection_does_not_count(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $room = $this->makeRoom('101');
+        $booking = $this->makeBooking($room, $this->day(-2), $this->day(0), ['status' => 'checked_in']);
+        $this->pay($booking, 4480);
+        $this->makeBlock($room, 'inspected', $this->day(-2), $this->day(0), [
+            'inspection_snapshot' => ['cleared' => true, 'booking_id' => $booking->id + 100],
+        ]);
+
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])
+            ->assertStatus(422)
+            ->assertJsonPath('inspection_status', 'none');
     }
 
     public function test_checkout_refund_requires_refund_method(): void
@@ -267,6 +331,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $this->actingWith(['reservation-edit']);
         $booking = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in']);
         $this->pay($booking, 5000);
+        $this->completeCheckoutInspection($booking);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out', 'refund_amount' => 520])
             ->assertStatus(422)
@@ -290,6 +355,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $room = $this->makeRoom('101');
         $booking = $this->makeBooking($room, $this->day(-1), $this->day(2), ['status' => 'checked_in']);
         $this->pay($booking, 6720);
+        $this->completeCheckoutInspection($booking);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertOk();
 
@@ -307,6 +373,7 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $a = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
         $b = $this->makeBooking($this->makeRoom('102'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
         BookingPaymentLedger::recordPayment($b, ['amount' => 8960, 'method' => 'card', 'source' => 'deposit', 'bill_total' => 8960]);
+        $this->completeCheckoutInspection($a);
 
         $this->patchJson("/api/bookings/{$a->id}", ['status' => 'checked_out', 'checkout_scope' => 'room'])
             ->assertStatus(422);
@@ -383,8 +450,9 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
             'checkout_discount_reason' => 'Loyal guest',
         ]);
         $this->pay($booking, 4000);
+        $this->completeCheckoutInspection($booking);
 
-        // Stored total_price (4480) is still compared via max(grand, total_price) — discount alone is not enough.
-        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertStatus(422);
+        // 4480 room − 480 discount = 4000 paid in full.
+        $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertOk();
     }
 }

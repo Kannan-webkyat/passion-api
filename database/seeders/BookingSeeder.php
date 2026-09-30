@@ -7,6 +7,7 @@ use App\Models\BookingSegment;
 use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\User;
+use App\Support\BookingNumber;
 use Carbon\Carbon;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
@@ -270,6 +271,7 @@ class BookingSeeder extends Seeder
             'adult_breakfast_count' => 0,
             'child_breakfast_count' => 0,
         ]);
+        BookingNumber::assign($booking);
 
         BookingSegment::create([
             'booking_id' => $booking->id,

@@ -275,6 +275,7 @@ class RoomChartSplitStayTransferTest extends RoomChartTestCase
         BookingPaymentLedger::recordPayment($booking, [
             'amount' => 6720, 'method' => 'cash', 'source' => 'deposit', 'bill_total' => 6720,
         ]);
+        $this->completeCheckoutInspection($booking);
 
         $this->patchJson("/api/bookings/{$booking->id}", ['status' => 'checked_out'])->assertOk();
 

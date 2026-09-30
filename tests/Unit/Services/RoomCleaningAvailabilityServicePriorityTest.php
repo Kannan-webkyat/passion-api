@@ -2,7 +2,6 @@
 
 namespace Tests\Unit\Services;
 
-use App\Http\Controllers\Concerns\AuthorizesHousekeepingPermissions;
 use App\Models\RoomCleaningRelease;
 use App\Services\RoomCleaningAvailabilityService;
 use App\Support\CleaningReleasePriority;
@@ -27,7 +26,7 @@ class RoomCleaningAvailabilityServicePriorityTest extends TestCase
 
     public function test_release_for_cleaning_persists_priority(): void
     {
-        $user = $this->createUserWithPermission(AuthorizesHousekeepingPermissions::HK_CLEANING_AVAILABILITY);
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
         Auth::login($user);
 
         $room = $this->createRoom();

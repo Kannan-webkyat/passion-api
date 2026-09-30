@@ -122,12 +122,24 @@ class RoomChartGridTest extends RoomChartTestCase
     {
         $this->actingWith(['reservation-view']);
         $room = $this->makeRoom('101');
-        $this->makeBlock($room, 'dirty', $this->day(-1), $this->day(0));
+        $this->makeBlock($room, 'maintenance', $this->day(-1), $this->day(0));
 
         $this->getJson('/api/bookings/summary')
             ->assertOk()
-            ->assertJsonPath('dirty', 0)
+            ->assertJsonPath('maintenance', 0)
             ->assertJsonPath('available', 1);
+    }
+
+    public function test_summary_keeps_an_uncleaned_room_dirty_after_its_departure_day(): void
+    {
+        $this->actingWith(['reservation-view']);
+        $room = $this->makeRoom('101');
+        $this->makeBlock($room, 'dirty', $this->day(-2), $this->day(-1));
+
+        $this->getJson('/api/bookings/summary')
+            ->assertOk()
+            ->assertJsonPath('dirty', 1)
+            ->assertJsonPath('available', 0);
     }
 
     /**

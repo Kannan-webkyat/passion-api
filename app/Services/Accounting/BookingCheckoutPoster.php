@@ -5,6 +5,7 @@ namespace App\Services\Accounting;
 use App\Models\Booking;
 use App\Models\JournalEntry;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingNumber;
 use App\Support\BookingPaymentLedger;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Schema;
@@ -135,7 +136,7 @@ final class BookingCheckoutPoster
             sourceId: (int) $booking->id,
             entryDate: $entryDate,
             businessDate: $entryDate,
-            sourceRef: 'Booking #'.$booking->id,
+            sourceRef: 'Booking '.BookingNumber::for($booking),
             memo: 'Room checkout — revenue & folio settlement',
             lines: $lines,
             postedBy: $postedBy,

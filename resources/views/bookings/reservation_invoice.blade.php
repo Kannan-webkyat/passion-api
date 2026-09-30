@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>Invoice #{{ $invoiceNo }}</title>
+    <title>{{ $documentTitle ?? 'Invoice' }} #{{ $invoiceNo }}</title>
     <style>
         @page { size: A4 portrait; margin: 8mm; }
         * { box-sizing: border-box; }
@@ -171,7 +171,7 @@
         <p style="text-align:center;font-size:7px;margin:0 0 6px 0;">GSTIN: {{ $hotelGstin }}</p>
     @endif
 
-    <p class="subhead">Invoice</p>
+    <p class="subhead">{{ $documentTitle ?? 'Invoice' }}</p>
 
     <table class="meta">
         <tr>
@@ -352,7 +352,6 @@
                 <div>Reception (C/I): {{ $receptionName }}</div>
                 <div>Cashier (C/O): {{ $cashierName }}</div>
                 <div>Date: {{ $footerDate }}</div>
-                <div>Page: Page 1 of 1</div>
             </td>
             <td style="width:50%; border:1px solid #000; padding:6px;">
                 <div style="font-weight:700;margin-bottom:4px;">{{ $bankCompanyName }}</div>

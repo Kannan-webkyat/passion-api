@@ -182,6 +182,10 @@ trait MigratesRoomChartTestSchema
         if (! Schema::hasTable('bookings')) {
             Schema::create('bookings', function (Blueprint $table) {
                 $table->id();
+                $table->string('booking_number', 32)->nullable()->unique();
+                $table->unsignedInteger('invoice_seq')->nullable()->unique();
+                $table->string('invoice_number', 32)->nullable();
+                $table->timestamp('invoice_issued_at')->nullable();
                 $table->unsignedBigInteger('room_id')->nullable();
                 $table->unsignedBigInteger('rate_plan_id')->nullable();
                 $table->string('first_name')->nullable();

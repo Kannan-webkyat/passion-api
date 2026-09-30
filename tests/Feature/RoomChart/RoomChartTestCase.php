@@ -11,6 +11,7 @@ use App\Models\RoomStatusBlock;
 use App\Models\RoomType;
 use App\Models\Setting;
 use App\Models\User;
+use App\Support\BookingSplitStayRoomMove;
 use Carbon\Carbon;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Permission;
@@ -224,6 +225,29 @@ abstract class RoomChartTestCase extends TestCase
             'note' => ucfirst($status) . ' block',
             'is_active' => true,
         ], $overrides));
+    }
+
+    /** Cleared checkout inspection on every room the guest still occupies, as housekeeping leaves it. */
+    protected function completeCheckoutInspection(Booking $booking): void
+    {
+        BookingSplitStayRoomMove::sync((int) $booking->id);
+        $roomIds = $booking->segments()
+            ->whereNotIn('status', ['cancelled', 'checked_out'])
+            ->pluck('room_id')
+            ->whenEmpty(fn ($ids) => $ids->push($booking->room_id))
+            ->unique();
+
+        foreach ($roomIds as $roomId) {
+            RoomStatusBlock::query()->create([
+                'room_id' => $roomId,
+                'status' => 'inspected',
+                'start_date' => Carbon::parse($booking->check_in)->toDateString(),
+                'end_date' => Carbon::parse($booking->check_out)->toDateString(),
+                'note' => 'Checkout inspection cleared (no extra charges)',
+                'inspection_snapshot' => ['cleared' => true, 'booking_id' => $booking->id, 'room_id' => (int) $roomId],
+                'is_active' => true,
+            ]);
+        }
     }
 
     protected function setting(string $key, mixed $value): void

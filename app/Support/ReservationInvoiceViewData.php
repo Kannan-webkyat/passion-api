@@ -3,6 +3,8 @@
 namespace App\Support;
 
 use App\Models\Booking;
+use App\Models\BookingExtraCharge;
+use App\Models\BookingPayment;
 use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Setting;
@@ -73,7 +75,7 @@ final class ReservationInvoiceViewData
         $grossBill = $staySummary['gross_before_checkout_discount'];
         $checkoutDisc = max(0.0, min((float) ($booking->checkout_discount_amount ?? 0), $grossBill));
         $grand = max(0.0, $grossBill - $checkoutDisc);
-        $paid = (float) ($booking->deposit_amount ?? 0);
+        $paid = round(max(0.0, (float) ($booking->deposit_amount ?? 0) - (float) ($booking->refund_amount ?? 0)), 2);
 
         /** Nearest whole rupee for settlement lines (round off shown in summary when needed). */
         $grandRounded = (float) round($grand);
@@ -172,105 +174,101 @@ final class ReservationInvoiceViewData
             $damageSac = '—';
         }
 
-        $minibarTotal = round((float) ($inspectionTotals['minibar'] ?? 0), 2);
-        if ($minibarTotal > 0.004) {
-            $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
-            $divF = 1 + ($fbRate / 100);
-            $taxableF = $divF > 0 ? ($minibarTotal / $divF) : $minibarTotal;
-            $gstF = $minibarTotal - $taxableF;
-            $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
+        $qtyFmt = static fn(float $q): string => rtrim(rtrim(number_format($q, 2, '.', ''), '0'), '.');
+        $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
+        $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
+        $fbSac = $fbSac !== '' ? $fbSac : '—';
+        /** Inclusive amount with GST backed out at the F&B default rate (minibar, laundry, other posted extras). */
+        $fbLine = function (string $particular, float $qty, float $unit, float $total) use (&$sr, $fmt, $qtyFmt, $fbRate, $fbSac): array {
+            $taxable = $total / (1 + $fbRate / 100);
+            $gst = $total - $taxable;
 
-            $lines[] = self::lineRow(
+            return self::lineRow(
                 $sr++,
-                'Minibar consumption',
-                $fbSac !== '' ? $fbSac : '—',
-                '1',
-                $fmt($minibarTotal),
-                $fmt($minibarTotal),
+                $particular,
+                $fbSac,
+                $qtyFmt($qty),
+                $fmt($unit),
+                $fmt($total),
                 $fmt(0),
-                $fmt($taxableF),
-                $gstF > 0.004 ? ($fbRate / 2) : 0.0,
-                $gstF / 2,
-                $gstF > 0.004 ? ($fbRate / 2) : 0.0,
-                $gstF / 2,
+                $fmt($taxable),
+                $gst > 0.004 ? ($fbRate / 2) : 0.0,
+                $gst / 2,
+                $gst > 0.004 ? ($fbRate / 2) : 0.0,
+                $gst / 2,
                 0.0,
                 0.0,
                 $fmt(0)
             );
-        }
-
-        $damageTotal = round((float) ($inspectionTotals['asset_penalty'] ?? 0), 2);
-        if ($damageTotal > 0.004) {
-            $lines[] = self::lineRow(
-                $sr++,
-                'Damaged / missing items',
-                $damageSac,
-                '1',
-                $fmt($damageTotal),
-                $fmt($damageTotal),
-                $fmt(0),
-                $fmt($damageTotal),
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                $fmt(0)
-            );
-        }
+        };
 
         $nonPosExtra = max(0.0, round($extraCharges - $posPostedTotal, 2));
+        if ($inspectionTotals['total'] > $nonPosExtra + 0.01) {
+            // Snapshot charges not yet posted to the folio are not part of the payable.
+            $inspectionLines = [];
+            $inspectionTotals = BookingInspectionChargeLines::totalsByKind([]);
+        }
+
+        foreach ($inspectionLines as $line) {
+            $total = round((float) ($line['resolved_total_amount'] ?? $line['total_amount'] ?? 0), 2);
+            if ($total <= 0.004) {
+                continue;
+            }
+            $qty = max(0.01, (float) ($line['qty'] ?? 1));
+            $unit = round((float) ($line['resolved_unit_amount'] ?? $line['unit_amount'] ?? $total / $qty), 2);
+            $label = trim((string) ($line['label'] ?? ''));
+            $kind = strtolower((string) ($line['kind'] ?? ''));
+            if ($kind === 'minibar') {
+                $lines[] = $fbLine('Minibar — ' . ($label !== '' ? $label : 'item'), $qty, $unit, $total);
+            } elseif ($kind === 'asset_penalty') {
+                $lines[] = self::lineRow(
+                    $sr++,
+                    'Damaged / missing — ' . ($label !== '' ? $label : 'item'),
+                    $damageSac,
+                    $qtyFmt($qty),
+                    $fmt($unit),
+                    $fmt($total),
+                    $fmt(0),
+                    $fmt($total),
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    $fmt(0)
+                );
+            }
+        }
+
         $orphanNonInspection = max(
             0.0,
             round($nonPosExtra - $inspectionTotals['total'], 2),
         );
 
-        if ($folioOrders->isEmpty() && $orphanNonInspection > 0.004) {
-            $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
-            $divF = 1 + ($fbRate / 100);
-            $taxableF = $divF > 0 ? ($orphanNonInspection / $divF) : $orphanNonInspection;
-            $gstF = $orphanNonInspection - $taxableF;
-            $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
-            $lines[] = self::lineRow(
-                $sr++,
-                'Posted to room (F&B / extras)',
-                $fbSac !== '' ? $fbSac : '—',
-                '1',
-                $fmt($orphanNonInspection),
-                $fmt($orphanNonInspection),
-                $fmt(0),
-                $fmt($taxableF),
-                $fbRate / 2,
-                $gstF / 2,
-                $fbRate / 2,
-                $gstF / 2,
-                0,
-                0,
-                $fmt(0)
-            );
-        } elseif ($folioOrders->isNotEmpty() && $orphanNonInspection > 0.004) {
-            $fbRate = (float) Setting::get('invoice_default_food_gst_rate', (string) max(5, $taxRate));
-            $divF = 1 + ($fbRate / 100);
-            $taxableF = $divF > 0 ? ($orphanNonInspection / $divF) : $orphanNonInspection;
-            $gstF = $orphanNonInspection - $taxableF;
-            $fbSac = trim((string) (Setting::get('invoice_fnb_sac') ?? ''));
-            $lines[] = self::lineRow(
-                $sr++,
-                'Posted to room (extras)',
-                $fbSac !== '' ? $fbSac : '—',
-                '1',
-                $fmt($orphanNonInspection),
-                $fmt($orphanNonInspection),
-                $fmt(0),
-                $fmt($taxableF),
-                $fbRate / 2,
-                $gstF / 2,
-                $fbRate / 2,
-                $gstF / 2,
-                0,
-                0,
-                $fmt(0)
+        $laundryRows = BookingExtraCharge::query()
+            ->where('booking_id', $booking->id)
+            ->where('source', 'laundry')
+            ->orderBy('id')
+            ->get(['label', 'qty', 'unit_amount', 'total_amount']);
+        if ($orphanNonInspection + 0.01 >= (float) $laundryRows->sum('total_amount')) {
+            foreach ($laundryRows as $row) {
+                $total = round((float) $row->total_amount, 2);
+                if ($total <= 0.004) {
+                    continue;
+                }
+                $label = trim((string) $row->label);
+                $lines[] = $fbLine($label !== '' ? $label : 'Guest laundry', max(0.01, (float) $row->qty), round((float) $row->unit_amount, 2), $total);
+                $orphanNonInspection = max(0.0, round($orphanNonInspection - $total, 2));
+            }
+        }
+
+        if ($orphanNonInspection > 0.004) {
+            $lines[] = $fbLine(
+                $folioOrders->isEmpty() ? 'Posted to room (F&B / extras)' : 'Posted to room (extras)',
+                1,
+                $orphanNonInspection,
+                $orphanNonInspection
             );
         }
 
@@ -323,32 +321,70 @@ final class ReservationInvoiceViewData
             'cess' => $fmt($scess),
         ];
 
-        $sumLineTaxable = $sx;
-        $taxDetailRows = [];
-        if ($scgst > 0.004) {
-            $p = $sumLineTaxable > 0 ? round(($scgst / $sumLineTaxable) * 100, 2) : 0;
-            $taxDetailRows[] = ['label' => 'CGST @ ' . $p . '%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($scgst)];
+        $taxGroups = [];
+        foreach ($lines as $row) {
+            foreach (['CGST' => 'cgst', 'SGST' => 'sgst', 'IGST' => 'igst'] as $label => $key) {
+                $amt = (float) $row[$key . '_amt'];
+                if ($amt <= 0.004) {
+                    continue;
+                }
+                $pct = round((float) ($row[$key . '_pct'] ?? 0), 2);
+                $groupKey = $label . '|' . $pct;
+                $taxGroups[$groupKey] ??= ['order' => $label, 'pct' => $pct, 'label' => $label . ' @ ' . $pct . '%', 'taxable' => 0.0, 'tax' => 0.0];
+                $taxGroups[$groupKey]['taxable'] += (float) $row['taxable'];
+                $taxGroups[$groupKey]['tax'] += $amt;
+            }
         }
-        if ($ssgst > 0.004) {
-            $p = $sumLineTaxable > 0 ? round(($ssgst / $sumLineTaxable) * 100, 2) : 0;
-            $taxDetailRows[] = ['label' => 'SGST @ ' . $p . '%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($ssgst)];
-        }
-        if ($sigst > 0.004) {
-            $p = $sumLineTaxable > 0 ? round(($sigst / $sumLineTaxable) * 100, 2) : 0;
-            $taxDetailRows[] = ['label' => 'IGST @ ' . $p . '%', 'taxable' => $fmt($sumLineTaxable), 'tax' => $fmt($sigst)];
-        }
+        $typeOrder = ['CGST' => 0, 'SGST' => 1, 'IGST' => 2];
+        usort($taxGroups, fn(array $a, array $b) => [$typeOrder[$a['order']], $a['pct']] <=> [$typeOrder[$b['order']], $b['pct']]);
+        $taxDetailRows = array_map(
+            fn(array $g) => ['label' => $g['label'], 'taxable' => $fmt($g['taxable']), 'tax' => $fmt($g['tax'])],
+            $taxGroups
+        );
 
         $paymentRows = [];
-        if ($paid > 0.004) {
+        $ledger = BookingPaymentLedger::totals($booking);
+        if ($ledger['count'] > 0 && abs($ledger['net'] - $paid) < 0.01) {
+            $ledgerRows = BookingPayment::query()
+                ->where('booking_id', $booking->id)
+                ->active()
+                ->orderBy('paid_at')
+                ->orderBy('id')
+                ->get();
+            foreach ($ledgerRows as $p) {
+                $signed = match ($p->type) {
+                    BookingPayment::TYPE_REFUND => -(float) $p->amount,
+                    BookingPayment::TYPE_ADJUSTMENT => (float) ($p->meta['signed_amount'] ?? $p->amount),
+                    default => (float) $p->amount,
+                };
+                $ref = trim((string) ($p->reference_no ?? ''));
+                $paymentRows[] = [
+                    'date' => $p->paid_at ? Carbon::parse($p->paid_at)->format('d/m/Y') : '—',
+                    'description' => strtoupper((string) ($p->method ?: '—')) . ' — ' . ucfirst((string) $p->type)
+                        . ($ref !== '' ? ' · Ref ' . $ref : ''),
+                    'amount' => $fmt($signed),
+                ];
+            }
+        } else {
+            $deposit = (float) ($booking->deposit_amount ?? 0);
+            $refunded = (float) ($booking->refund_amount ?? 0);
             $payDate = $booking->updated_at
                 ? Carbon::parse($booking->updated_at)->format('d/m/Y')
                 : Carbon::now()->format('d/m/Y');
-            $method = strtoupper((string) ($booking->payment_method ?? 'PAYMENT'));
-            $paymentRows[] = [
-                'date' => $payDate,
-                'description' => $method . ' — Advance / settlement · Ref #' . $booking->id,
-                'amount' => $fmt($paid),
-            ];
+            if ($deposit > 0.004) {
+                $paymentRows[] = [
+                    'date' => $payDate,
+                    'description' => strtoupper((string) ($booking->payment_method ?? 'PAYMENT')) . ' — Advance / settlement · Ref #' . $booking->id,
+                    'amount' => $fmt($deposit),
+                ];
+            }
+            if ($refunded > 0.004) {
+                $paymentRows[] = [
+                    'date' => $payDate,
+                    'description' => strtoupper((string) ($booking->refund_method ?? 'REFUND')) . ' — Refund',
+                    'amount' => $fmt(-$refunded),
+                ];
+            }
         }
         $paymentTotalFmt = $fmt($paid);
 
@@ -371,11 +407,14 @@ final class ReservationInvoiceViewData
             $remark = '—';
         }
 
-        $invoiceNo = Setting::get('invoice_prefix', 'INV') . '-' . str_pad((string) $booking->id, 6, '0', STR_PAD_LEFT);
+        // Tax invoice number and date are issued at check-out; before that the document is a proforma.
+        $isIssued = trim((string) ($booking->invoice_number ?? '')) !== '';
+        $invoiceNo = $isIssued ? (string) $booking->invoice_number : 'Proforma';
         $folioNo = (string) $booking->id;
-        $resNo = (string) $booking->id;
+        $resNo = BookingNumber::for($booking);
 
-        $invoiceDate = Carbon::now()->format('d/m/Y h:i:s A');
+        $invoiceDate = ($isIssued && $booking->invoice_issued_at ? Carbon::parse($booking->invoice_issued_at) : Carbon::now())
+            ->format('d/m/Y h:i:s A');
         $arrivalStr = self::formatInvoiceStayInstant($checkInDisplay, $hourPackage);
         $departureStr = self::formatInvoiceStayInstant($checkOutDisplay, $hourPackage);
 
@@ -423,6 +462,8 @@ final class ReservationInvoiceViewData
             'hotelName' => $hotelName,
             'hotelAddress' => $hotelAddress,
             'hotelGstin' => $hotelGstin,
+            'documentTitle' => ! $isIssued ? 'Proforma Invoice' : (trim((string) $hotelGstin) !== '' ? 'Tax Invoice' : 'Invoice'),
+            'isIssued' => $isIssued,
             'invoiceNo' => $invoiceNo,
             'folioNo' => $folioNo,
             'resNo' => $resNo,
@@ -646,6 +687,9 @@ final class ReservationInvoiceViewData
             'sgst_amt' => $fmtN($sgstAmt),
             'cgst_amt' => $fmtN($cgstAmt),
             'igst_amt' => $fmtN($igstAmt),
+            'sgst_pct' => $sgstPct,
+            'cgst_pct' => $cgstPct,
+            'igst_pct' => $igstPct,
         ];
     }
 }

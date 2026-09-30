@@ -114,5 +114,6 @@ class Booking extends Model
         'cancellation_fee_amount' => 'decimal:2',
         'cancelled_at' => 'datetime',
         'checkout_discount_amount' => 'decimal:2',
+        'invoice_issued_at' => 'datetime',
     ];
 }

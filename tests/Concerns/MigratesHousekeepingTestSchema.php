@@ -240,5 +240,26 @@ trait MigratesHousekeepingTestSchema
                 $table->timestamp('created_at')->useCurrent();
             });
         }
+
+        if (! Schema::hasColumn('users', 'is_active')) {
+            Schema::table('users', fn (Blueprint $table) => $table->boolean('is_active')->default(true));
+        }
+
+        if (! Schema::hasTable('departments')) {
+            Schema::create('departments', function (Blueprint $table) {
+                $table->id();
+                $table->string('name');
+                $table->string('code')->unique();
+                $table->boolean('is_active')->default(true);
+                $table->boolean('is_housekeeping')->default(false);
+                $table->timestamps();
+            });
+            Schema::create('department_user', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('department_id');
+                $table->unsignedBigInteger('user_id');
+                $table->timestamps();
+            });
+        }
     }
 }

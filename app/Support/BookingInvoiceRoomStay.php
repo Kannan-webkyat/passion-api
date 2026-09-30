@@ -42,10 +42,10 @@ final class BookingInvoiceRoomStay
             ];
         }
 
+        // Higher of the live re-price and the stored total: the stored total carries split-stay, transfer,
+        // extension and rate-plan pricing that a re-price from the (checkout-shortened) header dates loses.
         $recomputedInclusive = self::recomputedDayStayInclusiveGrand($booking, $roomType, $plan);
-        $roomInclusiveGrand = abs($recomputedInclusive - $storedRoomInclusive) >= 0.5
-            ? $recomputedInclusive
-            : $storedRoomInclusive;
+        $roomInclusiveGrand = max($recomputedInclusive, $storedRoomInclusive);
 
         $taxRate = (float) ($roomType->tax?->rate ?? 0);
         $earlyLatePreTax = self::earlyCheckInFeePreTax($booking, $roomType) + self::lateCheckoutFeePreTax($booking, $roomType);
@@ -65,7 +65,16 @@ final class BookingInvoiceRoomStay
         } elseif ($earlyLatePreTax > 0.004 && abs($orphanExtra - $earlyLateInclusiveGuess) < 1.0) {
             $additiveExtra = $posPostedTotal;
         } else {
-            $additiveExtra = $storedExtraCharges;
+            // POST late-checkout / early-checkin add their pre-tax fee to extra_charges, while the
+            // recomputed room charge above already prices that fee (with GST).
+            $feesOnExtras = round(
+                self::lateCheckoutFeePreTax($booking, $roomType)
+                + min(self::earlyCheckInFeePreTax($booking, $roomType), self::earlyCheckInFeeFromAuditNotes($booking)),
+                2
+            );
+            $additiveExtra = $feesOnExtras > 0.004 && $orphanExtra + 0.01 >= $feesOnExtras
+                ? round($storedExtraCharges - $feesOnExtras, 2)
+                : $storedExtraCharges;
         }
 
         return [
@@ -73,6 +82,18 @@ final class BookingInvoiceRoomStay
             'additive_extra_charges' => round($additiveExtra, 2),
             'gross_before_checkout_discount' => round($roomInclusiveGrand + $additiveExtra, 2),
         ];
+    }
+
+    /** Fee the latest "[Early CI: …] Fee: ₹X" audit line added to extra_charges (0 when cleared or free). */
+    private static function earlyCheckInFeeFromAuditNotes(Booking $booking): float
+    {
+        foreach (array_reverse(preg_split('/\R/', (string) $booking->notes) ?: []) as $line) {
+            if (str_starts_with($line, '[Early CI:')) {
+                return preg_match('/Fee: ₹([0-9]+(?:\.[0-9]+)?)/u', $line, $m) ? (float) $m[1] : 0.0;
+            }
+        }
+
+        return 0.0;
     }
 
     public static function sumPosRoomChargePayments(Booking $booking): float
