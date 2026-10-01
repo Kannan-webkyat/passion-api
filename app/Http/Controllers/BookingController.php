@@ -3573,7 +3573,12 @@ class BookingController extends Controller
     {
         $this->allowReservationBillingExport();
 
-        $data = ReservationInvoiceViewData::build($booking);
+        $groupScope = $request->query('scope') === 'group';
+        if ($groupScope && ! $booking->booking_group_id) {
+            return response()->json(['message' => 'This booking is not part of a group.'], 422);
+        }
+
+        $data = $groupScope ? ReservationInvoiceViewData::buildGroup($booking) : ReservationInvoiceViewData::build($booking);
         $pdf = Pdf::loadView('bookings.reservation_invoice', $data)->setPaper('a4', 'portrait');
         $pdf->render();
         $dompdf = $pdf->getDomPDF();
@@ -3585,6 +3590,11 @@ class BookingController extends Controller
             $dompdf->getFontMetrics()->getFont('DejaVu Sans'),
             6.5
         );
+        if ($groupScope) {
+            $safeName = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) ($booking->bookingGroup?->name ?: $booking->booking_group_id));
+
+            return $pdf->download(($data['isIssued'] ? 'Group_Invoice_' : 'Group_Proforma_') . $safeName . '.pdf');
+        }
         $safeName = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) ($data['isIssued'] ? $data['invoiceNo'] : $data['resNo']));
 
         return $pdf->download(($data['isIssued'] ? 'Invoice_' : 'Proforma_') . $safeName . '.pdf');

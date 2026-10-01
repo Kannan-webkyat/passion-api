@@ -251,8 +251,8 @@ final class BookingInvoiceRoomStay
     }
 
     /**
-     * Mirrors {@see RoomChartDrawer} early block + {@see roomChart/page.tsx} `computeEarlyLateFee`
-     * (eligibility uses **standard check-out** policy — same quirk as the UI).
+     * Mirrors {@see RoomChartDrawer} early block + {@see roomChart/page.tsx} `computeEarlyLateFee`;
+     * eligibility matches POST /bookings/{id}/early-checkin (arrival before standard check-in).
      */
     private static function earlyCheckInFeePreTax(Booking $booking, RoomType $roomType): float
     {
@@ -266,8 +266,8 @@ final class BookingInvoiceRoomStay
             return 0.0;
         }
 
-        $policyCheckOutMin = self::policyClockMinutes('standard_check_out_time', '11:00');
-        if ($etaMin >= $policyCheckOutMin) {
+        $policyCheckInMin = self::policyClockMinutes('standard_check_in_time', '14:00');
+        if ($etaMin >= $policyCheckInMin) {
             return 0.0;
         }
 
@@ -284,12 +284,6 @@ final class BookingInvoiceRoomStay
             default => $typeRaw,
         };
 
-        // Flat fee: room chart returns the full fee whenever the outer guard passes — no buffer / check-in delta.
-        if ($type === 'flat_fee') {
-            return round($fee, 2);
-        }
-
-        $policyCheckInMin = self::policyClockMinutes('standard_check_in_time', '14:00');
         $deltaMinutes = $policyCheckInMin - $etaMin;
         $bufferMins = (int) ($roomType->early_check_in_buffer_minutes ?? 0);
         $billableMins = max(0, $deltaMinutes - $bufferMins);
@@ -341,10 +335,6 @@ final class BookingInvoiceRoomStay
             in_array($typeRaw, ['flat', 'flat_fee'], true) => 'flat_fee',
             default => $typeRaw,
         };
-
-        if ($type === 'flat_fee') {
-            return round($fee, 2);
-        }
 
         $deltaMinutes = $lcoMin - $policyCheckOutMin;
         $bufferMins = (int) ($roomType->late_check_out_buffer_minutes ?? 0);

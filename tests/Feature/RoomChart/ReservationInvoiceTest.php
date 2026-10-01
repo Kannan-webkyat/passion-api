@@ -234,6 +234,56 @@ class ReservationInvoiceTest extends RoomChartTestCase
         $this->assertSame('5676.00', $this->summary($this->invoice($booking))['Total Payable(Rs)']);
     }
 
+    public function test_arrival_between_standard_check_out_and_check_in_is_billed_as_early_check_in(): void
+    {
+        $this->roomType->update(['early_check_in_fee' => 800, 'early_check_in_type' => 'flat_fee']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(0), $this->day(2));
+        $this->postJson("/api/bookings/{$booking->id}/early-checkin", ['time' => '12:00'])->assertOk();
+        $this->assertSame(800.0, (float) $booking->fresh()->extra_charges, '12:00 is before the 14:00 check-in.');
+
+        $invoice = $this->invoice($booking);
+
+        $this->assertSame(['Room Charges'], array_column($invoice['lines'], 'particular'));
+        $this->assertSame('5376.00', $invoice['lines'][0]['total'], 'Room (4000 + 800 early fee) + 12% GST.');
+        $this->assertSame('5376.00', $this->summary($invoice)['Total Payable(Rs)']);
+    }
+
+    public function test_flat_late_checkout_fee_is_not_charged_inside_the_grace_period(): void
+    {
+        $this->roomType->update(['late_check_out_fee' => 500, 'late_check_out_type' => 'flat_fee', 'late_check_out_buffer_minutes' => 30]);
+        $booking = $this->departingToday();
+        $this->postJson("/api/bookings/{$booking->id}/late-checkout", ['time' => '11:20'])->assertOk();
+        $this->assertSame(0.0, (float) $booking->fresh()->extra_charges);
+
+        $this->assertSame('4480.00', $this->summary($this->invoice($booking))['Total Payable(Rs)']);
+
+        $booking->update(['deposit_amount' => 4480]);
+        $this->completeCheckoutInspection($booking);
+        $this->postJson("/api/bookings/{$booking->id}/preview-checkout")
+            ->assertOk()
+            ->assertJson(['bill' => 4480, 'balance_due' => 0, 'can_checkout' => true]);
+    }
+
+    public function test_flat_late_checkout_fee_is_charged_in_full_after_the_grace_period(): void
+    {
+        $this->roomType->update(['late_check_out_fee' => 500, 'late_check_out_type' => 'flat_fee', 'late_check_out_buffer_minutes' => 30]);
+        $booking = $this->departingToday();
+        $this->postJson("/api/bookings/{$booking->id}/late-checkout", ['time' => '11:45'])->assertOk();
+        $this->assertSame(500.0, (float) $booking->fresh()->extra_charges);
+
+        $this->assertSame('5040.00', $this->summary($this->invoice($booking))['Total Payable(Rs)']);
+    }
+
+    public function test_flat_early_check_in_fee_is_not_charged_inside_the_grace_period(): void
+    {
+        $this->roomType->update(['early_check_in_fee' => 800, 'early_check_in_type' => 'flat_fee', 'early_check_in_buffer_minutes' => 30]);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(0), $this->day(2));
+        $this->postJson("/api/bookings/{$booking->id}/early-checkin", ['time' => '13:45'])->assertOk();
+        $this->assertSame(0.0, (float) $booking->fresh()->extra_charges);
+
+        $this->assertSame('4480.00', $this->summary($this->invoice($booking))['Total Payable(Rs)']);
+    }
+
     // ── Checkout inspection lines ───────────────────────────────────────────
 
     public function test_inspection_charges_are_itemised_and_tax_details_are_grouped_by_rate(): void
@@ -365,5 +415,155 @@ class ReservationInvoiceTest extends RoomChartTestCase
         $this->postJson("/api/bookings/{$booking->id}/preview-checkout")
             ->assertOk()
             ->assertJson(['room_total' => 5040, 'folio_extras' => 300, 'bill' => 5340]);
+    }
+
+    // ── Remark and cashier ──────────────────────────────────────────────────
+
+    public function test_staff_notes_never_print_in_the_remark_box(): void
+    {
+        $booking = $this->departingToday(['notes' => "Guest rude at desk, watch minibar\n[Room Transfer: AC problem by Admin User]"]);
+
+        $this->assertSame('—', $this->invoice($booking)['remark']);
+    }
+
+    public function test_cashier_is_whoever_took_the_payment_not_whoever_prints(): void
+    {
+        $booking = $this->departingToday();
+        $this->actingAs($this->userWith(['reservation-view', 'reservation-edit'], 'Ravi Cashier'));
+        BookingPaymentLedger::recordPayment($booking, ['amount' => 4480, 'method' => 'cash', 'paid_at' => $this->day(0) . ' 09:00:00']);
+
+        $this->actingAs($this->userWith(['reservation-view', 'reservation-edit'], 'Meena Manager'));
+
+        $this->assertSame('Ravi Cashier', $this->invoice($booking)['cashierName']);
+    }
+
+    public function test_issued_invoice_without_payments_has_no_cashier(): void
+    {
+        $booking = $this->departingToday();
+        $booking->forceFill(['invoice_seq' => 1, 'invoice_number' => 'INV-000001', 'invoice_issued_at' => now()])->save();
+
+        $this->assertSame('—', $this->invoice($booking)['cashierName']);
+    }
+
+    // ── Split stays ─────────────────────────────────────────────────────────
+
+    public function test_split_stay_names_every_room_and_counts_nights_from_the_segments(): void
+    {
+        $first = $this->makeRoom('207');
+        $booking = $this->makeBooking($this->makeRoom('211'), $this->day(-1), $this->day(0), ['status' => 'checked_in']);
+        $booking->segments()->create([
+            'room_id' => $first->id,
+            'check_in' => $this->day(-2),
+            'check_out' => $this->day(-1),
+            'check_in_at' => $this->day(-2) . ' 00:00:00',
+            'check_out_at' => $this->day(-1) . ' 00:00:00',
+            'rate_plan_id' => $booking->rate_plan_id,
+            'adults_count' => 2,
+            'children_count' => 0,
+            'extra_beds_count' => 0,
+            'total_price' => 2240,
+            'status' => 'checked_out',
+        ]);
+        // Header dates only cover the last room, as after a transfer.
+        $booking->update(['total_price' => 4480]);
+
+        $invoice = $this->invoice($booking);
+
+        $this->assertSame($this->roomType->name . ' / 207 → 211', $invoice['roomLabel']);
+        $this->assertSame('2', $invoice['nights']);
+        $this->assertStringStartsWith('08/10/2026', $invoice['arrivalStr']);
+        $this->assertStringStartsWith('10/10/2026', $invoice['departureStr']);
+        $this->assertSame('Room Charges (207: 08/10–09/10, 211: 09/10–10/10)', $invoice['lines'][0]['particular']);
+    }
+
+    public function test_nights_come_from_the_billed_segments_when_check_out_shortened_the_header(): void
+    {
+        $booking = $this->departingToday();
+        $booking->update(['check_out' => $this->day(-1), 'check_out_at' => $this->day(-1) . ' 00:00:00']);
+
+        $invoice = $this->invoice($booking);
+
+        $this->assertSame('2', $invoice['nights']);
+        $this->assertSame('Room Charges', $invoice['lines'][0]['particular']);
+    }
+
+    // ── Groups ──────────────────────────────────────────────────────────────
+
+    /** @return array{0: Booking, 1: Booking} two ₹4,480 rooms in "Sharma Wedding" */
+    private function groupOfTwo(): array
+    {
+        $groupId = \Illuminate\Support\Facades\DB::table('booking_groups')->insertGetId([
+            'name' => 'Sharma Wedding',
+            'contact_person' => 'Vikram Sharma',
+            'status' => 'confirmed',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $a = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $groupId]);
+        $b = $this->makeBooking($this->makeRoom('102'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $groupId, 'first_name' => 'Neha']);
+
+        return [$a, $b];
+    }
+
+    public function test_pooled_group_payment_shows_each_rooms_share(): void
+    {
+        [$a, $b] = $this->groupOfTwo();
+        BookingPaymentLedger::recordPayment($a, ['amount' => 8960, 'method' => 'upi', 'paid_at' => $this->day(0) . ' 09:00:00']);
+
+        $payer = $this->invoice($a);
+        $other = $this->invoice($b);
+
+        $this->assertSame(
+            ['description' => 'Group payment — paid via ' . \App\Support\BookingNumber::for($a->fresh()) . ' (Room 101)', 'amount' => '4480.00'],
+            array_intersect_key($other['paymentRows'][0], ['description' => 1, 'amount' => 1])
+        );
+        $this->assertSame('0.00', $this->summary($other)['Balance(Rs)']);
+        $this->assertSame(['8960.00', '-4480.00'], array_column($payer['paymentRows'], 'amount'));
+        $this->assertStringContainsString('applied to ' . \App\Support\BookingNumber::for($b->fresh()) . ' (Room 102)', $payer['paymentRows'][1]['description']);
+        $this->assertSame('0.00', $this->summary($payer)['Balance(Rs)']);
+        $this->assertSame('Group booking: Sharma Wedding (2 rooms)', $other['remark']);
+    }
+
+    public function test_rooms_paying_their_own_bills_get_no_group_share(): void
+    {
+        [$a, $b] = $this->groupOfTwo();
+        BookingPaymentLedger::recordPayment($a, ['amount' => 4480, 'method' => 'cash']);
+        BookingPaymentLedger::recordPayment($b, ['amount' => 2000, 'method' => 'cash']);
+
+        $this->assertCount(1, $this->invoice($a)['paymentRows']);
+        $this->assertCount(1, $this->invoice($b)['paymentRows']);
+        $this->assertSame('2480.00', $this->summary($this->invoice($b))['Balance(Rs)']);
+    }
+
+    public function test_group_invoice_consolidates_every_room(): void
+    {
+        [$a, $b] = $this->groupOfTwo();
+        BookingPaymentLedger::recordPayment($a, ['amount' => 8960, 'method' => 'upi']);
+
+        $invoice = ReservationInvoiceViewData::buildGroup($b->fresh());
+
+        $this->assertSame('Group Proforma Invoice', $invoice['documentTitle']);
+        $this->assertSame('SHARMA WEDDING', $invoice['billToName']);
+        $this->assertSame('VIKRAM SHARMA', $invoice['guestName']);
+        $this->assertSame('Rooms 101, 102', $invoice['roomLabel']);
+        $this->assertSame('4 (A) / 0 (C)', $invoice['personsLabel']);
+        $this->assertSame(['Room 101 — Room Charges', 'Room 102 — Room Charges'], array_column($invoice['lines'], 'particular'));
+        $this->assertSame([1, 2], array_column($invoice['lines'], 'sr'));
+        $this->assertSame([['label' => 'CGST @ 6%', 'taxable' => '8000.00', 'tax' => '480.00'], ['label' => 'SGST @ 6%', 'taxable' => '8000.00', 'tax' => '480.00']], $invoice['taxDetailRows']);
+        $this->assertSame(['Room 101 — UPI — Payment'], array_column($invoice['paymentRows'], 'description'));
+        $this->assertSame('8960.00', $this->summary($invoice)['Total Payable(Rs)']);
+        $this->assertSame('0.00', $this->summary($invoice)['Balance(Rs)']);
+    }
+
+    public function test_group_invoice_endpoint(): void
+    {
+        [$a] = $this->groupOfTwo();
+        $solo = $this->makeBooking($this->makeRoom('103'), $this->day(-1), $this->day(0), ['status' => 'checked_in']);
+
+        $response = $this->get("/api/bookings/{$a->id}/billing?scope=group")->assertOk();
+
+        $this->assertStringContainsString('Group_Proforma_Sharma_Wedding.pdf', (string) $response->headers->get('content-disposition'));
+        $this->assertStringStartsWith('%PDF', $response->getContent());
+        $this->getJson("/api/bookings/{$solo->id}/billing?scope=group")->assertStatus(422);
     }
 }
