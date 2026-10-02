@@ -17,6 +17,8 @@ use Illuminate\Support\Facades\DB;
  * catalog fields (name, category, UOMs, conversion) re-synced — stock, cost, reorder level,
  * tax and vendor edits are preserved.
  *
+ * Minibar items are flagged is_minibar + is_direct_sale; MinibarMenuSeeder gives them guest prices.
+ *
  * Requires: InventoryTaxSeeder, InventoryUomSeeder.
  */
 class HousekeepingInventorySeeder extends Seeder
@@ -94,6 +96,7 @@ class HousekeepingInventorySeeder extends Seeder
                     ];
                     if ($subName === self::MINIBAR_SUB_CATEGORY) {
                         $catalogFields['is_minibar'] = true;
+                        $catalogFields['is_direct_sale'] = true;
                     }
                     $this->item($sku, $catalogFields, $taxId, $housekeepingCategoryIds);
                 }

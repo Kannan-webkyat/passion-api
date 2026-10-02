@@ -20,6 +20,7 @@ class DatabaseSeeder extends Seeder
             RolePermissionSeeder::class,
             DefaultHotelRolesSeeder::class,
             DepartmentSeeder::class,
+            HousekeepingUsersSeeder::class,
             LocationSeeder::class,
             // --
             PaymentMethodSeeder::class,
@@ -34,17 +35,13 @@ class DatabaseSeeder extends Seeder
             BarMenuConfigurationSeeder::class,
             BarOrganizedItemPricingSeeder::class,
             RestaurantMenuCatalogSeeder::class,
+            MinibarMenuSeeder::class,
             // ----
             RoomTypeRoomSeeder::class,
             // HotelInventoryCatalogSeeder::class,
             RoomParTestTemplatesSeeder::class,
             HousekeepingMainStoreStockSeeder::class,
-            // RoomParProcurementStockSeeder::class,
-            // HousekeepingStoreRoomParStockSeeder::class,
-            // HotelMinibarMenuItemsSeeder::class,
             HousekeepingChecklistSeeder::class,
-            // RbacTestUsersSeeder::class,
-            // BookingSeeder::class,
         ]);
 
         User::firstOrCreate(

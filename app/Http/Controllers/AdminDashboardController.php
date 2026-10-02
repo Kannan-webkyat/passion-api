@@ -26,6 +26,10 @@ class AdminDashboardController extends Controller
             abort(401, 'Unauthenticated.');
         }
 
+        if (! $user->hasRole('Admin') && ! $user->hasRole('Super Admin') && ! $user->can('view-dashboard-financials')) {
+            abort(403, 'Unauthorized action.');
+        }
+
         $validated = $request->validate([
             'from' => 'required|date',
             'to' => 'required|date|after_or_equal:from',

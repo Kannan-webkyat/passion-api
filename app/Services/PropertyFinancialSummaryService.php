@@ -3,16 +3,34 @@
 namespace App\Services;
 
 use App\Models\Booking;
+use App\Models\BookingPayment;
+use App\Models\BookingSegment;
 use App\Models\Recipe;
 use App\Models\RestaurantMaster;
 use App\Models\Room;
 use App\Models\User;
 use App\Support\BookingInvoiceRoomStay;
+use App\Support\BookingPaymentLedger;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class PropertyFinancialSummaryService
 {
+    /** @var array<string, array<string, mixed>> */
+    private array $coreCache = [];
+
+    /** @var array<string, array<string, int>> */
+    private array $snapshotCache = [];
+
+    /** @var array<int, array{gross: float, extra_charges: float, tax_estimated: float}> */
+    private array $grossCache = [];
+
+    /** @var array<int, list<int>> */
+    private array $outletIdsCache = [];
+
+    /** @var array<string, array{amount: float, source: string}> */
+    private array $foodCostCache = [];
+
     /**
      * @return array<string, mixed>
      */
@@ -40,6 +58,11 @@ class PropertyFinancialSummaryService
      */
     private function summarizeCore(string $from, string $to, User $user): array
     {
+        $cacheKey = $user->id.'|'.$from.'|'.$to;
+        if (isset($this->coreCache[$cacheKey])) {
+            return $this->coreCache[$cacheKey];
+        }
+
         $canRooms = $this->canReadRooms($user);
         $canPos = $this->canReadPos($user);
 
@@ -78,7 +101,7 @@ class PropertyFinancialSummaryService
         $marginBase = $revenue > 0 ? $revenue : 0.0;
         $profitMarginPct = $marginBase > 0 ? round(($profit / $marginBase) * 100, 1) : 0.0;
 
-        return [
+        return $this->coreCache[$cacheKey] = [
             'from' => $from,
             'to' => $to,
             'total_sales' => $totalSales,
@@ -267,12 +290,16 @@ class PropertyFinancialSummaryService
     }
 
     /**
-     * Cash collected from room deposits/payments in the period (parsed from booking audit notes).
+     * Net cash collected on room folios in the period, by payment date.
      *
      * @return array{collected: float, payments_count: int}
      */
     private function roomCollectionsInPeriod(string $from, string $to): array
     {
+        if (BookingPaymentLedger::enabled()) {
+            return $this->ledgerCollectionsInPeriod($from, $to);
+        }
+
         $collected = 0.0;
         $paymentsCount = 0;
         $collectedByBooking = [];
@@ -325,6 +352,32 @@ class PropertyFinancialSummaryService
     }
 
     /**
+     * @return array{collected: float, payments_count: int}
+     */
+    private function ledgerCollectionsInPeriod(string $from, string $to): array
+    {
+        $rows = BookingPayment::query()
+            ->active()
+            ->where('paid_at', '>=', Carbon::parse($from)->startOfDay())
+            ->where('paid_at', '<', Carbon::parse($to)->addDay()->startOfDay())
+            ->get(['type', 'amount', 'meta']);
+
+        $collected = 0.0;
+        $paymentsCount = 0;
+        foreach ($rows as $row) {
+            $collected += $row->signedAmount();
+            if ($row->type === BookingPayment::TYPE_PAYMENT) {
+                $paymentsCount++;
+            }
+        }
+
+        return [
+            'collected' => round($collected, 2),
+            'payments_count' => $paymentsCount,
+        ];
+    }
+
+    /**
      * @return list<array{date: string, amount: float}>
      */
     private function parseDepositAuditLines(string $notes): array
@@ -355,6 +408,24 @@ class PropertyFinancialSummaryService
      * @return array{gross: float, extra_charges: float, tax_estimated: float}
      */
     private function bookingGrossDetails(Booking $booking): array
+    {
+        $id = (int) $booking->id;
+        if ($id > 0 && isset($this->grossCache[$id])) {
+            return $this->grossCache[$id];
+        }
+
+        $details = $this->computeBookingGrossDetails($booking);
+        if ($id > 0) {
+            $this->grossCache[$id] = $details;
+        }
+
+        return $details;
+    }
+
+    /**
+     * @return array{gross: float, extra_charges: float, tax_estimated: float}
+     */
+    private function computeBookingGrossDetails(Booking $booking): array
     {
         if (($booking->booking_unit ?? 'day') === 'hour_package') {
             $gross = (float) ($booking->total_price ?? 0) + (float) ($booking->extra_charges ?? 0);
@@ -515,6 +586,14 @@ class PropertyFinancialSummaryService
      */
     private function resolveAccessibleOutletIds(User $user): array
     {
+        return $this->outletIdsCache[(int) $user->id] ??= $this->computeAccessibleOutletIds($user);
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function computeAccessibleOutletIds(User $user): array
+    {
         if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
             return RestaurantMaster::query()
                 ->where('is_active', true)
@@ -550,7 +629,9 @@ class PropertyFinancialSummaryService
      */
     private function estimateFoodCostForOutlets(array $outletIds, string $from, string $to): array
     {
-        return app(PosFoodCostService::class)->forOutletsWithMeta($outletIds, $from, $to);
+        $key = implode(',', $outletIds).'|'.$from.'|'.$to;
+
+        return $this->foodCostCache[$key] ??= app(PosFoodCostService::class)->forOutletsWithMeta($outletIds, $from, $to);
     }
 
     /**
@@ -848,6 +929,14 @@ class PropertyFinancialSummaryService
      */
     private function roomSnapshot(string $date, User $user): array
     {
+        return $this->snapshotCache[$user->id.'|'.$date] ??= $this->computeRoomSnapshot($date, $user);
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function computeRoomSnapshot(string $date, User $user): array
+    {
         if (! $this->canReadRooms($user)) {
             return [
                 'total' => 0,
@@ -927,19 +1016,28 @@ class PropertyFinancialSummaryService
         $roomPerf = $this->roomSnapshot($to, $user);
         $totalRooms = max(1, (int) ($roomPerf['total'] ?? 1));
         $occupied = (int) ($roomPerf['occupied'] ?? 0);
-        $roomRevenue = (float) ($rooms['revenue'] ?? 0);
         $roomNights = (int) ($rooms['room_nights'] ?? 0);
-        if ($roomNights <= 0 && $roomRevenue > 0) {
-            $roomNights = max(1, (int) ($rooms['payments_count'] ?? $rooms['check_ins'] ?? 1));
-        }
+        $stayRoomRevenue = max(0.0, round(
+            (float) ($rooms['checkout_revenue'] ?? 0)
+                - (float) ($rooms['extra_charges'] ?? 0)
+                - (float) ($rooms['taxes_estimated'] ?? 0),
+            2,
+        ));
 
         $start = Carbon::parse($from)->startOfDay();
         $end = Carbon::parse($to)->startOfDay();
         $days = max(1, (int) $start->diffInDays($end) + 1);
 
-        $occupancyPct = round(($occupied / $totalRooms) * 100, 1);
-        $adr = $roomNights > 0 ? round($roomRevenue / $roomNights, 2) : 0.0;
-        $revpar = round($roomRevenue / ($totalRooms * $days), 2);
+        if ($days === 1 && $end->isToday()) {
+            $occupancyPct = round(($occupied / $totalRooms) * 100, 1);
+        } else {
+            $occupiedNights = $this->canReadRooms($user) ? $this->occupiedRoomNights($from, $to) : 0;
+            $occupancyPct = round(($occupiedNights / ($totalRooms * $days)) * 100, 1);
+            $occupied = (int) round($occupiedNights / $days);
+        }
+
+        $adr = $roomNights > 0 ? round($stayRoomRevenue / $roomNights, 2) : 0.0;
+        $revpar = round($stayRoomRevenue / ($totalRooms * $days), 2);
 
         $avgLos = 0.0;
         $guestCount = 0;
@@ -981,16 +1079,18 @@ class PropertyFinancialSummaryService
 
             $emails = $checkoutBookings->pluck('email')->filter()->map(fn($e) => strtolower(trim((string) $e)))->unique()->values();
             if ($emails->isNotEmpty()) {
-                $repeat = 0;
-                foreach ($emails as $email) {
-                    $count = Booking::query()
-                        ->whereRaw('LOWER(TRIM(email)) = ?', [$email])
+                $repeat = $emails->chunk(500)->sum(function ($chunk) {
+                    $placeholders = implode(',', array_fill(0, $chunk->count(), '?'));
+
+                    return Booking::query()
+                        ->selectRaw('LOWER(TRIM(email)) as guest_email')
+                        ->whereRaw("LOWER(TRIM(email)) IN ({$placeholders})", $chunk->values()->all())
                         ->whereIn('status', ['checked_in', 'checked_out'])
+                        ->groupByRaw('LOWER(TRIM(email))')
+                        ->havingRaw('COUNT(*) > 1')
+                        ->get()
                         ->count();
-                    if ($count > 1) {
-                        $repeat++;
-                    }
-                }
+                });
                 $repeatPct = round(($repeat / $emails->count()) * 100, 1);
             }
         }
@@ -1005,6 +1105,36 @@ class PropertyFinancialSummaryService
             'guest_count' => $guestCount,
             'repeat_guest_pct' => $repeatPct,
         ];
+    }
+
+    /**
+     * Distinct room-nights in [from, to] held by stays that actually checked in.
+     */
+    private function occupiedRoomNights(string $from, string $to): int
+    {
+        $rangeStart = Carbon::parse($from)->startOfDay();
+        $rangeEnd = Carbon::parse($to)->addDay()->startOfDay();
+
+        $segments = BookingSegment::query()
+            ->where('status', '!=', 'cancelled')
+            ->where('check_in_at', '<', $rangeEnd)
+            ->where('check_out_at', '>', $rangeStart)
+            ->where(function ($q) {
+                $q->whereIn('status', ['checked_in', 'checked_out'])
+                    ->orWhereHas('booking', fn ($b) => $b->whereIn('status', ['checked_in', 'checked_out']));
+            })
+            ->get(['room_id', 'check_in_at', 'check_out_at']);
+
+        $nights = [];
+        foreach ($segments as $segment) {
+            $night = Carbon::parse($segment->check_in_at)->startOfDay()->max($rangeStart);
+            $stop = Carbon::parse($segment->check_out_at)->startOfDay()->min($rangeEnd);
+            for (; $night->lt($stop); $night->addDay()) {
+                $nights[$segment->room_id.'|'.$night->toDateString()] = true;
+            }
+        }
+
+        return count($nights);
     }
 
     private function pctChange(float $current, float $previous): ?float
@@ -1065,6 +1195,10 @@ class PropertyFinancialSummaryService
                 'change_pct' => $this->pctChange(
                     (float) ($hospitality['occupancy_pct'] ?? 0),
                     (float) ($prevHospitality['occupancy_pct'] ?? 0),
+                ),
+                'change_pts' => round(
+                    (float) ($hospitality['occupancy_pct'] ?? 0) - (float) ($prevHospitality['occupancy_pct'] ?? 0),
+                    1,
                 ),
             ],
             'adr' => [

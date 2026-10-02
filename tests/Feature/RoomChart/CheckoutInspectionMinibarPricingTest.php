@@ -77,6 +77,17 @@ class CheckoutInspectionMinibarPricingTest extends RoomChartTestCase
             ->assertJsonPath('preview.minibar_total', 120);
     }
 
+    public function test_minibar_item_without_outlets_is_charged_at_its_menu_item_price(): void
+    {
+        $sevenUp = $this->stockMinibarItem('7UP', 480, 24);
+        RestaurantMaster::query()->create(['name' => 'OTTAAL']);
+        MenuItem::query()->create(['name' => '7UP (Minibar)', 'price' => 55, 'inventory_item_id' => $sevenUp->id]);
+
+        $this->previewMinibar($sevenUp, 2)
+            ->assertJsonPath('preview.minibar_lines.0.unit_amount', 55)
+            ->assertJsonPath('preview.minibar_total', 110);
+    }
+
     public function test_minibar_falls_back_to_inventory_unit_cost_without_a_menu_price(): void
     {
         $sevenUp = $this->stockMinibarItem('7UP', 480, 24);

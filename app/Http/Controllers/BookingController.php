@@ -531,7 +531,7 @@ class BookingController extends Controller
     {
         $this->allowReservationRead();
 
-        // Legacy callers (dashboard, room chart group lookups) expect a plain array.
+        // Legacy callers (room chart group lookups) expect a plain array.
         if (! $request->has('page')) {
             return Booking::with(['room.roomType', 'ratePlan', 'creator', 'bookingGroup'])
                 ->when($request->booking_group_id, function ($q) use ($request) {
@@ -553,7 +553,7 @@ class BookingController extends Controller
             'rate_plan_id' => 'nullable|integer',
             'date_from' => 'nullable|date',
             'date_to' => 'nullable|date',
-            'sort' => 'nullable|in:check_in,check_out,guest,room,bill,balance,status,created_at,id',
+            'sort' => 'nullable|in:check_in,check_out,guest,room,bill,balance,status,created_at,updated_at,id',
             'dir' => 'nullable|in:asc,desc',
         ]);
 

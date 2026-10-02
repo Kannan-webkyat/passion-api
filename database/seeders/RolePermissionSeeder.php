@@ -104,6 +104,7 @@ class RolePermissionSeeder extends Seeder
             'accounting-view-trial-balance',
             'accounting-vendor-pay',
             'view-dashboard',
+            'view-dashboard-financials',
         ];
     }
 

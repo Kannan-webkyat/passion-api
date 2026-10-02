@@ -164,7 +164,7 @@ Also at root: `debug_coffee.php`, `debug_consumption.php`, `fix_plan.md`, `passi
 - Canonical list: `Database\Seeders\RolePermissionSeeder::permissionNames()` (static). `RoleController::permissions()` calls `ensureCanonicalPermissionsExist()` which `firstOrCreate`s every name from that list at request time.
 - Naming: kebab-case, `{module}-{action}` or `{module}-{area}`: `reservation-view`, `reservation-create-group`, `rooms-edit`, `housekeeping-dirty-rooms`, `grn-approve`, `pos-settle`, `pos-discount`, `pos-day-closing-unlock`, `inventory-report-ledger`, `report-rooms-performance`, `accounting-vendor-pay`. Legacy coarse names still honoured alongside granular ones: `manage-rooms`, `view-rooms`, `reservation`, `manage-inventory`, `manage-grn`, `manage-settings`, `manage-users`, `manage-menu`.
 - **New permissions after go-live are added by migrations** that `Permission::firstOrCreate([... 'guard_name' => 'web'])`, grant to named roles (`Admin`, `Super Admin`, `Outlet Manager`, or roles that already have a related permission) and call `forgetCachedPermissions()` (e.g. `2026_09_22_085400_add_pos_mini_dash_permission.php`).
-- Role templates: `DefaultHotelRolesSeeder::rolePermissionMap()` (`Admin` ⇒ all permissions; `Waiter`, `Cashier`, `Kitchen Staff`, `Store Keeper`, `Store Manager`, `Outlet Manager`, `Accounts`, …). `Housekeeping` role is created in `RbacTestUsersSeeder`. `Super Admin` is referenced in code/migrations but not created by any seeder found.
+- Role templates: `DefaultHotelRolesSeeder::rolePermissionMap()` (`Admin` ⇒ all permissions; `Waiter`, `Cashier`, `Kitchen Staff`, `Store Keeper`, `Store Manager`, `Outlet Manager`, `Accounts`, …). Housekeeping roles (`Executive Housekeeper`, `Housekeeping Supervisor`, `Room Attendant`, `Laundry Attendant`) are templates in `DefaultHotelRolesSeeder`; `HousekeepingUsersSeeder` creates one or more users per role in the HKP department. `Super Admin` is referenced in code/migrations but not created by any seeder found.
 
 ### 6.3 Three coexisting authorization helper styles
 
@@ -389,7 +389,7 @@ Table groups (from `Schema::create`):
 ## 22. Factories and seeders
 
 - Factories: only `UserFactory` (default skeleton). Tests do not rely on factories for domain models; they `Model::create()` directly or `forceFill()` unsaved models.
-- Seeders (44): operational/reference data for a live property, not generic fakes — tax/UOM/cess, RBAC (`RolePermissionSeeder`, `DefaultHotelRolesSeeder`, `RbacTestUsersSeeder`, role-specific user seeders), departments/locations, F&B catalogs (large arrays in `database/seeders/data/*.php`), bar/restaurant opening stock, room types/rooms, room par, HK checklist, sample bookings (`BookingSeeder`, `RoomChartTestReservationsSeeder`).
+- Seeders (44): operational/reference data for a live property, not generic fakes — tax/UOM/cess, RBAC (`RolePermissionSeeder`, `DefaultHotelRolesSeeder`, role-specific user seeders), departments/locations, F&B catalogs (large arrays in `database/seeders/data/*.php`), bar/restaurant opening stock, room types/rooms, room par, HK checklist, sample bookings (`RoomChartTestReservationsSeeder`).
 - `DatabaseSeeder` calls them in a fixed order and finally creates `admin@hotel.com` with password `'1'` and role `Admin`.
 - `RolePermissionSeeder::permissionNames()` and `DefaultHotelRolesSeeder::rolePermissionMap()` are **also used at runtime** (by `RoleController`), so seeders double as the permission registry.
 - Stray files in seeders dir: `Untitled` (empty), two `.code-workspace` files.
