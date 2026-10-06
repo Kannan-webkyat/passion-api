@@ -154,6 +154,42 @@ class BookingsListActionsTest extends RoomChartTestCase
         $this->assertEqualsCanonicalizing($this->ids(['no_show', 'unpaid_out', 'early_in']), $this->listIds(['quick' => 'attention']));
     }
 
+    public function test_settled_group_is_not_listed_as_unpaid(): void
+    {
+        $this->actingWith(['reservation-view']);
+        $group = BookingGroup::query()->create(['name' => 'Team', 'status' => 'confirmed']);
+        $payer = $this->makeBooking($this->makeRoom('301'), $this->day(-1), $this->day(1), [
+            'status' => 'checked_in',
+            'booking_group_id' => $group->id,
+            'first_name' => 'Asha',
+        ]);
+        $sibling = $this->makeBooking($this->makeRoom('302'), $this->day(-1), $this->day(1), [
+            'status' => 'checked_in',
+            'booking_group_id' => $group->id,
+            'first_name' => 'Asha',
+        ]);
+        $this->pay($payer, 8960);
+
+        $rows = collect($this->getJson('/api/bookings?page=1&view=current&per_page=50')->assertOk()->json('data'))
+            ->keyBy('id');
+
+        $this->assertEqualsWithDelta(8960, $rows[$payer->id]['group_folio']['bill'], 0.01);
+        $this->assertEqualsWithDelta(8960, $rows[$payer->id]['group_folio']['received'], 0.01);
+        $this->assertEqualsWithDelta(0, $rows[$payer->id]['group_folio']['balance'], 0.01);
+        $this->assertEqualsWithDelta(0, $rows[$sibling->id]['group_folio']['balance'], 0.01);
+        $this->assertEqualsWithDelta(0, (float) $rows[$sibling->id]['deposit_amount'], 0.01);
+
+        $due = $this->listIds(['quick' => 'balance_due']);
+        $this->assertNotContains((int) $payer->id, $due);
+        $this->assertNotContains((int) $sibling->id, $due);
+
+        $this->getJson("/api/bookings/{$sibling->id}")
+            ->assertOk()
+            ->assertJsonPath('billing.group.balance_due', 0)
+            ->assertJsonPath('billing.group.credit', 0)
+            ->assertJsonPath('billing.group.credit_booking_id', null);
+    }
+
     public function test_quick_filter_overrides_the_view(): void
     {
         $this->actingWith(['reservation-view']);
@@ -303,7 +339,14 @@ class BookingsListActionsTest extends RoomChartTestCase
         $this->getJson("/api/bookings/{$a->id}")
             ->assertOk()
             ->assertJsonPath('billing.balance_due', 4480)
-            ->assertJsonPath('billing.group', ['bookings' => 2, 'bill' => 8960, 'paid' => 6000, 'balance_due' => 2960]);
+            ->assertJsonPath('billing.group', [
+                'bookings' => 2,
+                'bill' => 8960,
+                'paid' => 6000,
+                'balance_due' => 2960,
+                'credit' => 0,
+                'credit_booking_id' => null,
+            ]);
         $this->getJson("/api/bookings/{$cancelled->id}")
             ->assertOk()
             ->assertJsonPath('billing.bill', 2240)
@@ -406,6 +449,7 @@ class BookingsListActionsTest extends RoomChartTestCase
         $b = $this->makeBooking($this->makeRoom('102'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
         BookingPaymentLedger::recordPayment($b, ['amount' => 8960, 'method' => 'card', 'source' => 'deposit', 'bill_total' => 8960]);
         $this->completeCheckoutInspection($a);
+        $this->completeCheckoutInspection($b);
 
         $this->postJson("/api/bookings/{$a->id}/preview-checkout")
             ->assertOk()

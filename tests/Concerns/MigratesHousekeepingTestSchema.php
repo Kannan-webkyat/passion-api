@@ -70,6 +70,15 @@ trait MigratesHousekeepingTestSchema
             });
         }
 
+        if (Schema::hasTable('room_types') && ! Schema::hasColumn('room_types', 'bedrooms')) {
+            Schema::table('room_types', function (Blueprint $table) {
+                $table->unsignedTinyInteger('bedrooms')->default(1);
+                $table->unsignedTinyInteger('washrooms')->default(1);
+                $table->decimal('weekday_price', 10, 2)->default(0);
+                $table->decimal('weekend_price', 10, 2)->default(0);
+            });
+        }
+
         if (! Schema::hasTable('rooms')) {
             Schema::create('rooms', function (Blueprint $table) {
                 $table->id();

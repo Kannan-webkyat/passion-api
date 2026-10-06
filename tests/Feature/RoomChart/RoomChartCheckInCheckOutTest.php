@@ -374,12 +374,74 @@ class RoomChartCheckInCheckOutTest extends RoomChartTestCase
         $b = $this->makeBooking($this->makeRoom('102'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
         BookingPaymentLedger::recordPayment($b, ['amount' => 8960, 'method' => 'card', 'source' => 'deposit', 'bill_total' => 8960]);
         $this->completeCheckoutInspection($a);
+        $this->completeCheckoutInspection($b);
 
         $this->patchJson("/api/bookings/{$a->id}", ['status' => 'checked_out', 'checkout_scope' => 'room'])
             ->assertStatus(422);
 
         $this->patchJson("/api/bookings/{$a->id}", ['status' => 'checked_out'])
             ->assertOk();
+
+        $this->assertSame('checked_out', $a->fresh()->status);
+        $this->assertSame('checked_out', $b->fresh()->status);
+        $this->assertNotEmpty($a->fresh()->invoice_number);
+        $this->assertNotEmpty($b->fresh()->invoice_number);
+        $this->assertStringContainsString(
+            'Group_Invoice_',
+            (string) $this->get("/api/bookings/{$a->id}/billing?scope=group")->assertOk()->headers->get('content-disposition')
+        );
+    }
+
+    public function test_cancelled_group_member_is_left_out_of_the_pooled_bill(): void
+    {
+        $this->actingWith(['reservation-edit', 'reservation-delete']);
+        $this->setting('cancellation_fee_type', 'none');
+        $group = \App\Models\BookingGroup::query()->create(['name' => 'Team', 'status' => 'confirmed']);
+        $a = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
+        $b = $this->makeBooking($this->makeRoom('102'), $this->day(1), $this->day(3), ['booking_group_id' => $group->id]);
+        $this->postJson("/api/bookings/{$b->id}/cancel", ['reason' => 'guest_request'])->assertOk();
+        $this->pay($a, 4480);
+        $this->completeCheckoutInspection($a);
+
+        $this->postJson("/api/bookings/{$a->id}/preview-checkout")
+            ->assertOk()
+            ->assertJsonPath('bill', 4480)
+            ->assertJsonPath('can_checkout', true);
+    }
+
+    public function test_group_overpayment_is_refunded_from_the_room_that_holds_it(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $group = \App\Models\BookingGroup::query()->create(['name' => 'Team', 'status' => 'confirmed']);
+        $a = $this->makeBooking($this->makeRoom('101'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
+        $b = $this->makeBooking($this->makeRoom('102'), $this->day(-2), $this->day(0), ['status' => 'checked_in', 'booking_group_id' => $group->id]);
+        $later = $this->makeBooking($this->makeRoom('103'), $this->day(1), $this->day(3), ['booking_group_id' => $group->id]);
+        $this->pay($b, 10000);
+        $this->completeCheckoutInspection($a);
+        $this->completeCheckoutInspection($b);
+
+        $this->postJson("/api/bookings/{$a->id}/preview-checkout")
+            ->assertOk()
+            ->assertJsonPath('bill', 13440)
+            ->assertJsonPath('refund_due', 0);
+
+        $this->pay($b, 4440);
+        $this->postJson("/api/bookings/{$a->id}/preview-checkout")
+            ->assertOk()
+            ->assertJsonPath('refund_due', 1000);
+
+        $this->patchJson("/api/bookings/{$a->id}", [
+            'status' => 'checked_out',
+            'checkout_scope' => 'group',
+            'refund_amount' => 1000,
+            'refund_method' => 'cash',
+        ])->assertOk();
+
+        $this->assertSame('checked_out', $a->fresh()->status);
+        $this->assertSame('checked_out', $b->fresh()->status);
+        $this->assertSame('confirmed', $later->fresh()->status);
+        $this->assertSame(0.0, (float) $a->fresh()->refund_amount);
+        $this->assertSame(1000.0, (float) $b->fresh()->refund_amount);
     }
 
     public function test_request_inspection_on_checkout_day_creates_pending_inspection_block(): void

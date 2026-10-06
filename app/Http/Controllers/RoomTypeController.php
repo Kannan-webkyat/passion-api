@@ -47,6 +47,21 @@ class RoomTypeController extends Controller
         }
     }
 
+    private function validateChildAgeRange(array $data): void
+    {
+        if (! array_key_exists('child_age_from', $data) || ! array_key_exists('child_age_limit', $data)) {
+            return;
+        }
+        if ($data['child_age_from'] === null || $data['child_age_limit'] === null) {
+            return;
+        }
+        if ((int) $data['child_age_from'] > (int) $data['child_age_limit']) {
+            throw ValidationException::withMessages([
+                'child_age_from' => 'Child age from cannot be higher than child age to.',
+            ]);
+        }
+    }
+
     public function store(Request $request)
     {
         $this->authorizePermissions(['room-types-create']);
@@ -56,11 +71,14 @@ class RoomTypeController extends Controller
             'is_active' => 'nullable|boolean',
             'breakfast_price' => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
+            'adult_meal_price' => 'nullable|numeric|min:0',
+            'child_meal_price' => 'nullable|numeric|min:0',
             'adult_lunch_price' => 'nullable|numeric|min:0',
             'child_lunch_price' => 'nullable|numeric|min:0',
             'adult_dinner_price' => 'nullable|numeric|min:0',
             'child_dinner_price' => 'nullable|numeric|min:0',
-            'child_age_limit' => 'nullable|integer|min:1',
+            'child_age_from' => 'nullable|integer|min:0|max:18',
+            'child_age_limit' => 'nullable|integer|min:0|max:18',
             'extra_bed_cost' => 'required|numeric|min:0',
             'child_extra_bed_cost' => 'nullable|numeric|min:0',
             'early_check_in_fee' => 'nullable|numeric|min:0',
@@ -71,6 +89,10 @@ class RoomTypeController extends Controller
             'late_check_out_buffer_minutes' => 'nullable|integer|min:0',
             'base_occupancy' => 'required|integer|min:1',
             'capacity' => 'required|integer|min:1',
+            'bedrooms' => 'required|integer|min:1|max:50',
+            'washrooms' => 'required|integer|min:1|max:50',
+            'weekday_price' => 'required|numeric|min:0',
+            'weekend_price' => 'required|numeric|min:0',
             'extra_bed_capacity' => 'required|integer|min:0',
             'child_sharing_limit' => 'required|integer|min:0',
             'bed_config' => 'nullable|string|max:255',
@@ -96,6 +118,7 @@ class RoomTypeController extends Controller
         ]);
 
         $this->validateCapacity($validated);
+        $this->validateChildAgeRange($validated);
 
         $ratePlans = $validated['rate_plans'] ?? [];
         $seasonalPrices = $validated['seasonal_prices'] ?? [];
@@ -136,15 +159,22 @@ class RoomTypeController extends Controller
             'is_active' => 'nullable|boolean',
             'breakfast_price' => 'nullable|numeric|min:0',
             'child_breakfast_price' => 'nullable|numeric|min:0',
+            'adult_meal_price' => 'nullable|numeric|min:0',
+            'child_meal_price' => 'nullable|numeric|min:0',
             'adult_lunch_price' => 'nullable|numeric|min:0',
             'child_lunch_price' => 'nullable|numeric|min:0',
             'adult_dinner_price' => 'nullable|numeric|min:0',
             'child_dinner_price' => 'nullable|numeric|min:0',
+            'child_age_from' => 'nullable|integer|min:0|max:18',
             'child_age_limit' => 'nullable|integer|min:0|max:18',
             'extra_bed_cost' => 'numeric|min:0',
             'child_extra_bed_cost' => 'nullable|numeric|min:0',
             'base_occupancy' => 'integer|min:1',
             'capacity' => 'integer|min:1',
+            'bedrooms' => 'integer|min:1|max:50',
+            'washrooms' => 'integer|min:1|max:50',
+            'weekday_price' => 'numeric|min:0',
+            'weekend_price' => 'numeric|min:0',
             'extra_bed_capacity' => 'integer|min:0',
             'child_sharing_limit' => 'integer|min:0',
             'bed_config' => 'nullable|string|max:255',
@@ -186,9 +216,12 @@ class RoomTypeController extends Controller
             'extra_bed_capacity' => $roomType->extra_bed_capacity,
             'child_sharing_limit' => $roomType->child_sharing_limit,
             'capacity' => $roomType->capacity,
+            'child_age_from' => $roomType->child_age_from,
+            'child_age_limit' => $roomType->child_age_limit,
         ], $validated);
 
         $this->validateCapacity($merged);
+        $this->validateChildAgeRange($merged);
 
         $syncRatePlans = array_key_exists('rate_plans', $validated);
         $syncSeasonalPrices = array_key_exists('seasonal_prices', $validated);

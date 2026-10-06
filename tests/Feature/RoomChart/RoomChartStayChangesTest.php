@@ -420,6 +420,64 @@ class RoomChartStayChangesTest extends RoomChartTestCase
             ->assertStatus(422);
     }
 
+    public function test_split_stay_rejected_for_cancelled_or_checked_out_booking(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $cancelled = $this->makeBooking($this->makeRoom('101'), $this->day(0), $this->day(2), ['status' => 'cancelled']);
+        $departed = $this->makeBooking($this->makeRoom('102'), $this->day(-2), $this->day(0), ['status' => 'checked_out']);
+        $other = $this->makeRoom('103');
+
+        $this->postJson("/api/bookings/{$cancelled->id}/split-stay", ['new_room_id' => $other->id, 'new_check_out' => $this->day(4)])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Cannot split a cancelled reservation.');
+        $this->postJson("/api/bookings/{$departed->id}/split-stay", ['new_room_id' => $other->id, 'new_check_out' => $this->day(2)])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Cannot split a checked out reservation.');
+
+        $this->assertSame($this->day(2), (string) $cancelled->fresh()->check_out);
+        $this->assertSame(1, BookingSegment::query()->where('booking_id', $cancelled->id)->count());
+        $this->assertSame(1, BookingSegment::query()->where('booking_id', $departed->id)->count());
+    }
+
+    public function test_checked_in_split_rejected_when_target_room_needs_cleaning(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(-1), $this->day(1), ['status' => 'checked_in']);
+        $dirty = $this->makeRoom('102');
+        $this->makeBlock($dirty, 'dirty', $this->day(1), $this->day(4));
+
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", [
+            'new_room_id' => $dirty->id,
+            'new_check_out' => $this->day(3),
+        ])->assertStatus(422)
+            ->assertJsonPath('message', 'Room #102 requires cleaning before check-in.');
+
+        $this->assertSame($this->day(1), (string) $booking->fresh()->check_out);
+        $this->assertSame(1, BookingSegment::query()->where('booking_id', $booking->id)->count());
+    }
+
+    public function test_split_stay_same_room_rejection_leaves_segment_dates_unchanged(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $room = $this->makeRoom('101');
+        $booking = $this->makeBooking($room, $this->day(0), $this->day(2));
+        $segment = BookingSegment::query()->where('booking_id', $booking->id)->firstOrFail();
+        $segment->update([
+            'check_out' => $this->day(3),
+            'check_out_at' => Carbon::parse($this->day(3))->startOfDay(),
+        ]);
+
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", [
+            'new_room_id' => $room->id,
+            'new_check_out' => $this->day(4),
+        ])->assertStatus(422)
+            ->assertJsonPath('message', 'Select a different room for the extended nights than the room the guest is in now.');
+
+        $this->assertSame($this->day(2), (string) $booking->fresh()->check_out);
+        $this->assertSame($this->day(3), (string) $segment->fresh()->check_out);
+        $this->assertSame(1, BookingSegment::query()->where('booking_id', $booking->id)->count());
+    }
+
     /**
      * Known gap (see 50-hotel-domain rule): splitStay() has no availability check.
      */

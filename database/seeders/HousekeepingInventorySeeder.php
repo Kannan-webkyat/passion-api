@@ -13,11 +13,14 @@ use Illuminate\Support\Facades\DB;
  * Housekeeping inventory catalog from data/housekeeping_inventory_catalog.php.
  *
  * Hierarchy matches inventory UI: Housekeeping (root) → Sub-Category → Item (keyed by SKU).
+ * These are ordinary inventory categories. The housekeeping-category flag is cleared on the
+ * categories this seeder owns, because Room Par lists every category and item.
  * Safe to re-run: categories and UOMs are reused by name; existing items only get their
  * catalog fields (name, category, UOMs, conversion) re-synced — stock, cost, reorder level,
  * tax and vendor edits are preserved.
  *
- * Minibar items are flagged is_minibar + is_direct_sale; MinibarMenuSeeder gives them guest prices.
+ * Minibar items are flagged is_minibar + is_direct_sale; MinibarMenuSeeder writes the guest
+ * price on menu_items.price (no outlet link).
  *
  * Requires: InventoryTaxSeeder, InventoryUomSeeder.
  */
@@ -73,15 +76,16 @@ class HousekeepingInventorySeeder extends Seeder
             $taxId = $this->defaultTaxId();
 
             $main = $this->category(self::MAIN_CATEGORY, self::MAIN_DESCRIPTION, null, 'main');
-            if ($main->parent_id === null && ! $main->is_housekeeping) {
-                $main->update(['is_housekeeping' => true]);
-            }
 
             $subIds = [];
             foreach (array_keys($catalog) as $subName) {
                 $subIds[$subName] = $this->category($subName, "{$subName} — ".self::MAIN_CATEGORY, $main->id, 'sub')->id;
             }
             $housekeepingCategoryIds = array_map('intval', array_merge([$main->id], array_values($subIds)));
+            InventoryCategory::query()
+                ->whereIn('id', $housekeepingCategoryIds)
+                ->where('is_housekeeping', true)
+                ->update(['is_housekeeping' => false]);
 
             foreach ($catalog as $subName => $rows) {
                 foreach ($rows as [$sku, $name, $purchaseUom, $issueUom, $factor]) {
@@ -123,6 +127,7 @@ class HousekeepingInventorySeeder extends Seeder
                 'name' => $name,
                 'description' => $description,
                 'parent_id' => $parentId,
+                'is_housekeeping' => false,
             ]);
         }
 

@@ -442,4 +442,60 @@ class RoomChartReservationCreateTest extends RoomChartTestCase
         $this->getJson('/api/bookings/guest-search?phone=12')->assertStatus(422);
         $this->getJson('/api/bookings/guest-search?phone=55555')->assertNotFound();
     }
+
+    public function test_duplicate_room_in_a_group_is_rejected_without_a_booking(): void
+    {
+        $this->actingWith(['reservation-create-group']);
+        $a = $this->makeRoom('101');
+
+        $this->postJson('/api/bookings', $this->payload($a, [
+            'room_ids' => [$a->id, $a->id],
+            'group_name' => 'Dup',
+        ]))->assertStatus(422)
+            ->assertJsonPath('message', 'Each room can only be selected once in a group.');
+
+        $this->assertSame(0, Booking::query()->count());
+        $this->assertSame(0, \App\Models\BookingGroup::query()->count());
+    }
+
+    public function test_second_room_over_capacity_rolls_back_the_whole_group(): void
+    {
+        $this->actingWith(['reservation-create-group']);
+        $a = $this->makeRoom('101');
+        $b = $this->makeRoom('102');
+
+        $this->postJson('/api/bookings', $this->payload($a, [
+            'room_ids' => [$a->id, $b->id],
+            'group_name' => 'Too many',
+            'room_occupancy' => [
+                $b->id => ['adults' => 4, 'extra_beds' => 1],
+            ],
+        ]))->assertStatus(422);
+
+        $this->assertSame(0, Booking::query()->count());
+        $this->assertSame(0, \App\Models\BookingGroup::query()->count());
+    }
+
+    public function test_group_day_total_includes_meal_plan_and_early_arrival(): void
+    {
+        $this->actingWith(['reservation-create-group']);
+        $this->roomType->update(['early_check_in_fee' => 500, 'early_check_in_type' => 'flat_fee']);
+        $plan = $this->makeRatePlan($this->roomType, [
+            'name' => 'CP',
+            'meal_plan_type' => 'breakfast',
+            'base_price' => 2000,
+        ]);
+        $a = $this->makeRoom('101');
+        $b = $this->makeRoom('102');
+
+        $rows = $this->postJson('/api/bookings', $this->payload($a, [
+            'room_ids' => [$a->id, $b->id],
+            'group_name' => 'Meals',
+            'rate_plan_id' => $plan->id,
+            'estimated_arrival_time' => '10:30',
+        ]))->assertCreated()->json();
+
+        // 2 nights × (₹2000 + ₹300 × 2 adults) + ₹500 early arrival, then 12% GST = ₹6384.
+        $this->assertSame([6384.0, 6384.0], array_map(fn ($row) => (float) $row['total_price'], $rows));
+    }
 }

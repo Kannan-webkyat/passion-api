@@ -11,7 +11,9 @@ use App\Support\RoomParInventoryContext;
 use Illuminate\Database\Seeder;
 
 /**
- * One "Default" room-par template per room type, built from the housekeeping catalog SKUs.
+ * One "Default" room-par template per room type, built from catalog SKUs.
+ * Room Par is not limited to a housekeeping category; these lines are the standard
+ * room set, and any other catalog item can be added on the Room Par screen.
  * Requires RoomTypeRoomSeeder and HousekeepingInventorySeeder.
  *
  * Re-running syncs each "Default" template to the definitions below (adds, updates and removes

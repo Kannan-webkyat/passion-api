@@ -429,7 +429,16 @@ final class BookingRoomTransferService
             if ($rateMode === 'apply_new_category') {
                 $planId = self::resolveRatePlanId($room, $planId);
             }
-            $calc = self::computeHourlyTotal($room, $planId, $from, $to, (int) ($booking->extra_beds_count ?? 0));
+            $calc = self::computeHourlyTotal(
+                $room,
+                $planId,
+                $from,
+                $to,
+                (int) ($booking->extra_beds_count ?? 0),
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+                is_array($booking->child_ages) ? $booking->child_ages : null,
+            );
             if (! $calc['ok']) {
                 $warnings[] = $calc['message'];
 
@@ -483,12 +492,19 @@ final class BookingRoomTransferService
     private static function computeDayStayInclusive(Booking $booking, Room $room, RatePlan $plan, Carbon $from, Carbon $to): float
     {
         $basePerNight = (float) ($plan->base_price ?? 0);
-        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
+        $extraPerNight = $room->roomType
+            ? SeasonalRoomPricing::extraBedPreTax(
+                $room->roomType,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+                is_array($booking->child_ages) ? $booking->child_ages : null,
+                (int) ($booking->extra_beds_count ?? 0),
+            )
+            : 0.0;
         $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
             $basePerNight,
-            $extraBedCost,
-            $extraBeds,
+            $extraPerNight,
+            $extraPerNight > 0 ? 1 : 0,
             $from->copy()->startOfDay(),
             $to->copy()->startOfDay(),
             $room->roomType?->seasons ?? []
@@ -515,7 +531,7 @@ final class BookingRoomTransferService
     /**
      * @return array{ok: bool, message?: string, total?: float}
      */
-    private static function computeHourlyTotal(Room $room, int $ratePlanId, Carbon $checkInAt, Carbon $checkOutAt, int $extraBeds): array
+    private static function computeHourlyTotal(Room $room, int $ratePlanId, Carbon $checkInAt, Carbon $checkOutAt, int $extraBeds, int $adults = 0, int $children = 0, ?array $childAges = null): array
     {
         $rt = $room->roomType;
         $plan = $rt?->ratePlans?->firstWhere('id', $ratePlanId);
@@ -535,10 +551,7 @@ final class BookingRoomTransferService
         $base = SeasonalRoomPricing::applyToBase($base, $season);
         $total = $base;
 
-        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
-        if ($extraBeds > 0 && $extraBedCost > 0) {
-            $total += $extraBeds * $extraBedCost;
-        }
+        $total += SeasonalRoomPricing::extraBedPreTax($rt, $adults, $children, $childAges, $extraBeds);
 
         if ($checkOutAt->gt($packageEnd)) {
             $overtimeRate = $plan->overtime_hour_price;

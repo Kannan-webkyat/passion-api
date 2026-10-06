@@ -119,13 +119,18 @@ final class BookingInvoiceRoomStay
         $checkOutAt = $booking->check_out_at ? Carbon::parse($booking->check_out_at) : Carbon::parse($booking->check_out)->startOfDay();
 
         $basePerNight = (float) ($plan->base_price ?? 0);
-        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $extraBedCost = (float) ($roomType->extra_bed_cost ?? 0);
+        $extraPerNight = SeasonalRoomPricing::extraBedPreTax(
+            $roomType,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+            is_array($booking->child_ages) ? $booking->child_ages : null,
+            (int) ($booking->extra_beds_count ?? 0),
+        );
 
         $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
             $basePerNight,
-            $extraBedCost,
-            $extraBeds,
+            $extraPerNight,
+            $extraPerNight > 0 ? 1 : 0,
             $checkInAt->copy()->startOfDay(),
             $checkOutAt->copy()->startOfDay(),
             $roomType->seasons ?? []
@@ -161,11 +166,9 @@ final class BookingInvoiceRoomStay
         if (in_array($meal, ['breakfast', 'half_board', 'full_board'], true)) {
             $add += (float) ($roomType->breakfast_price ?? 0) * $adults + (float) ($roomType->child_breakfast_price ?? 0) * $children;
         }
-        if ($meal === 'full_board') {
-            $add += (float) ($roomType->adult_lunch_price ?? 0) * $adults + (float) ($roomType->child_lunch_price ?? 0) * $children;
-        }
-        if (in_array($meal, ['half_board', 'full_board'], true)) {
-            $add += (float) ($roomType->adult_dinner_price ?? 0) * $adults + (float) ($roomType->child_dinner_price ?? 0) * $children;
+        $mealServings = $meal === 'full_board' ? 2 : ($meal === 'half_board' ? 1 : 0);
+        if ($mealServings > 0) {
+            $add += ((float) ($roomType->adult_meal_price ?? 0) * $adults + (float) ($roomType->child_meal_price ?? 0) * $children) * $mealServings;
         }
 
         return $add;

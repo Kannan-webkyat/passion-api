@@ -7,11 +7,16 @@ use App\Models\Department;
 use App\Models\HousekeepingJob;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
+use App\Models\MenuItem;
+use App\Models\PosOrder;
+use App\Models\PosOrderItem;
+use App\Models\RestaurantMaster;
 use App\Models\Room;
 use App\Models\RoomCleaningRelease;
 use App\Models\RoomStatusBlock;
 use App\Models\User;
 use App\Support\BookingPaymentLedger;
+use App\Support\BookingSplitStayRoomMove;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -122,6 +127,42 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         }
         if (! Schema::hasColumn('inventory_locations', 'kind')) {
             Schema::table('inventory_locations', fn (Blueprint $table) => $table->string('kind')->nullable());
+        }
+        if (Schema::hasTable('pos_orders') && ! Schema::hasColumn('pos_orders', 'subtotal')) {
+            Schema::table('pos_orders', function (Blueprint $table) {
+                $table->decimal('subtotal', 10, 2)->default(0);
+                $table->decimal('tax_amount', 10, 2)->default(0);
+                $table->unsignedInteger('covers')->default(1);
+                $table->date('business_date')->nullable();
+                $table->unsignedBigInteger('opened_by')->nullable();
+                $table->string('customer_name')->nullable();
+                $table->string('customer_phone')->nullable();
+            });
+        }
+        if (! Schema::hasTable('pos_order_items')) {
+            Schema::create('pos_order_items', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('order_id');
+                $table->unsignedBigInteger('menu_item_id')->nullable();
+                $table->integer('quantity')->default(1);
+                $table->decimal('unit_price', 10, 2)->default(0);
+                $table->decimal('tax_rate', 8, 2)->default(0);
+                $table->boolean('price_tax_inclusive')->default(true);
+                $table->decimal('line_total', 10, 2)->default(0);
+                $table->boolean('kot_sent')->default(false);
+                $table->string('status')->nullable();
+                $table->boolean('inventory_deducted')->default(false);
+                $table->text('notes')->nullable();
+                $table->timestamps();
+            });
+        }
+        if (! Schema::hasTable('pos_day_closings')) {
+            Schema::create('pos_day_closings', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('restaurant_id');
+                $table->date('closed_date');
+                $table->timestamps();
+            });
         }
     }
 
@@ -607,5 +648,91 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $this->assertFalse($stale->fresh()->is_active);
         $this->assertSame($this->day(-1), $stale->fresh()->end_date->toDateString());
         $this->assertSame('occupied', $room->fresh()->status);
+    }
+
+    public function test_finish_posts_unpriced_minibar_at_issue_unit_cost_while_guest_is_in_the_room(): void
+    {
+        $room = $this->makeRoom('301');
+        $booking = $this->makeBooking($room, $this->day(-1), $this->day(2), ['status' => 'checked_in']);
+        $block = $this->makeBlock($room, 'dirty', $this->day(0), $this->day(1));
+        $item = InventoryItem::query()->create([
+            'name' => '7UP',
+            'sku' => '7UP',
+            'cost_price' => 480,
+            'conversion_factor' => 24,
+            'is_minibar' => true,
+        ]);
+        $location = InventoryLocation::query()->firstOrCreate(
+            ['room_id' => $room->id],
+            ['name' => 'Room 301', 'type' => 'satellite', 'kind' => 'room', 'is_active' => true],
+        );
+        DB::table('inventory_item_locations')->insert([
+            'inventory_item_id' => $item->id,
+            'inventory_location_id' => $location->id,
+            'quantity' => 2,
+        ]);
+        $menu = MenuItem::query()->create(['name' => '7UP (Minibar)', 'price' => 0, 'inventory_item_id' => $item->id]);
+        RestaurantMaster::query()->create(['name' => 'OTTAAL']);
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $this->housekeeper->id])->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
+            'minibar' => [['inventory_item_id' => $item->id, 'menu_item_id' => $menu->id, 'qty' => 2]],
+        ])->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertOk();
+
+        $this->assertEqualsWithDelta(40.0, (float) $booking->fresh()->extra_charges, 0.01);
+        $order = PosOrder::query()->where('booking_id', $booking->id)->sole();
+        $this->assertEqualsWithDelta(40.0, (float) $order->total_amount, 0.01);
+        $this->assertSame('room_charge', (string) $order->payments()->value('method'));
+        $line = PosOrderItem::query()->where('order_id', $order->id)->sole();
+        $this->assertEqualsWithDelta(20.0, (float) $line->unit_price, 0.01);
+        $this->assertSame(0.0, $this->roomQty($room, $item));
+    }
+
+    public function test_finish_after_split_stay_move_does_not_charge_minibar_again(): void
+    {
+        $left = $this->makeRoom('101');
+        $next = $this->makeRoom('102');
+        $booking = $this->makeBooking($left, $this->day(-2), $this->day(0), ['status' => 'checked_in']);
+        $item = InventoryItem::query()->create([
+            'name' => 'Pepsi',
+            'sku' => 'PEPSI',
+            'cost_price' => 240,
+            'conversion_factor' => 12,
+            'is_minibar' => true,
+        ]);
+        $location = InventoryLocation::query()->firstOrCreate(
+            ['room_id' => $left->id],
+            ['name' => 'Room 101', 'type' => 'satellite', 'kind' => 'room', 'is_active' => true],
+        );
+        DB::table('inventory_item_locations')->insert([
+            'inventory_item_id' => $item->id,
+            'inventory_location_id' => $location->id,
+            'quantity' => 2,
+        ]);
+        $menu = MenuItem::query()->create(['name' => 'Pepsi (Minibar)', 'price' => 40, 'inventory_item_id' => $item->id]);
+        RestaurantMaster::query()->create(['name' => 'OTTAAL']);
+
+        $this->as($this->frontDesk);
+        $this->postJson("/api/bookings/{$booking->id}/split-stay", [
+            'new_room_id' => $next->id,
+            'new_check_out' => $this->day(2),
+        ])->assertOk();
+        BookingSplitStayRoomMove::sync((int) $booking->id);
+
+        $block = $this->dirtyBlock($left);
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $this->housekeeper->id])->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
+            'minibar' => [['inventory_item_id' => $item->id, 'menu_item_id' => $menu->id, 'qty' => 1]],
+        ])->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertOk();
+
+        $this->assertEqualsWithDelta(0.0, (float) $booking->fresh()->extra_charges, 0.01);
+        $this->assertSame(0, PosOrder::query()->count());
+        $this->assertSame(1.0, $this->roomQty($left, $item));
     }
 }

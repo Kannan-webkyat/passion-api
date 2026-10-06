@@ -311,7 +311,7 @@ class BookingController extends Controller
         return $isMidnight ? $dt->toDateString() : $dt->copy()->addDay()->toDateString();
     }
 
-    private function computeHourlyPackageTotal(Room $room, int $ratePlanId, Carbon $checkInAt, Carbon $checkOutAt, int $extraBeds = 0): array
+    private function computeHourlyPackageTotal(Room $room, int $ratePlanId, Carbon $checkInAt, Carbon $checkOutAt, int $extraBeds = 0, int $adults = 0, int $children = 0, ?array $childAges = null): array
     {
         $rt = $room->roomType;
         $plan = $rt?->ratePlans?->firstWhere('id', $ratePlanId);
@@ -338,10 +338,7 @@ class BookingController extends Controller
         $total = $base;
 
         // Hourly package: extra bed is charged once per booking/package window.
-        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
-        if ($extraBeds > 0 && $extraBedCost > 0) {
-            $total += $extraBeds * $extraBedCost;
-        }
+        $total += SeasonalRoomPricing::extraBedPreTax($rt, $adults, $children, $childAges, $extraBeds);
 
         // Optional overtime charging
         if ($checkOutAt->gt($packageEnd)) {
@@ -391,6 +388,201 @@ class BookingController extends Controller
         return max(0.0, round($gross - min($disc, $gross), 2));
     }
 
+    /** Cancelled group members contribute their cancellation fee, not the original stay. */
+    private function groupMemberPayable(Booking $booking): float
+    {
+        if ($booking->status === 'cancelled') {
+            return round((float) ($booking->cancellation_fee_amount ?? 0), 2);
+        }
+
+        return $this->effectiveBookingGrand($booking);
+    }
+
+    /**
+     * Checked-in group members that leave with this checkout: due today, or sharing this room's departure day.
+     *
+     * @return \Illuminate\Support\Collection<int, Booking>
+     */
+    private function departingGroupMembers(Booking $booking, string $checkoutScope): \Illuminate\Support\Collection
+    {
+        $members = collect([$booking]);
+        if ($checkoutScope !== 'group' || ! $booking->booking_group_id) {
+            return $members;
+        }
+
+        $today = Carbon::today()->toDateString();
+        $thisDay = $this->bookingCheckoutCalendarDay($booking);
+        $mates = Booking::query()
+            ->where('booking_group_id', '=', $booking->booking_group_id, 'and')
+            ->where('id', '!=', $booking->id)
+            ->where('status', '=', 'checked_in', 'and')
+            ->get()
+            ->filter(function (Booking $mate) use ($today, $thisDay) {
+                $day = $this->bookingCheckoutCalendarDay($mate);
+
+                return $day <= $today || $day === $thisDay;
+            });
+
+        return $members->concat($mates)->values();
+    }
+
+    /**
+     * @param  \Illuminate\Support\Collection<int, Booking>  $members
+     * @return array{status: 'done'|'pending'|'none', rooms: list<string>}
+     */
+    private function checkoutInspectionForDeparture(\Illuminate\Support\Collection $members): array
+    {
+        $rooms = [];
+        $anyNone = false;
+        foreach ($members as $member) {
+            $state = $this->checkoutInspectionState($member);
+            if ($state['status'] === 'done') {
+                continue;
+            }
+            $rooms = array_merge($rooms, $state['rooms']);
+            if ($state['status'] !== 'pending') {
+                $anyNone = true;
+            }
+        }
+        $rooms = array_values(array_unique($rooms));
+        if ($rooms === []) {
+            return ['status' => 'done', 'rooms' => []];
+        }
+
+        return ['status' => $anyNone ? 'none' : 'pending', 'rooms' => $rooms];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function checkedOutStayAttributes(Booking $booking): array
+    {
+        $attrs = ['status' => 'checked_out'];
+        $today = Carbon::today()->toDateString();
+        if ((string) $booking->check_out > $today) {
+            $attrs['check_out'] = $today;
+            $attrs['check_out_at'] = Carbon::parse($today)->startOfDay()->addDay();
+            $userName = Auth::user()?->name ?: '';
+            $auditMsg = "[Early CO: on {$today}" . ($userName !== '' ? " by {$userName}" : '') . ']';
+            $existing = $booking->notes;
+            $attrs['notes'] = $existing ? $existing . "\n" . $auditMsg : $auditMsg;
+        }
+
+        return $attrs;
+    }
+
+    private function recordGroupCheckoutRefund(Booking $booking, float $amount, string $method, ?float $billHint): void
+    {
+        $remaining = round($amount, 2);
+        $members = Booking::query()
+            ->where('booking_group_id', '=', $booking->booking_group_id, 'and')
+            ->where('status', '!=', 'cancelled')
+            ->get()
+            ->sortBy(fn (Booking $member) => (int) $member->id === (int) $booking->id ? 0 : 1)
+            ->values();
+
+        foreach ($members as $member) {
+            if ($remaining <= 0.004) {
+                break;
+            }
+            $net = BookingPaymentLedger::totals($member->fresh())['net'];
+            $slice = round(min($remaining, max(0.0, $net)), 2);
+            if ($slice <= 0.004) {
+                continue;
+            }
+            BookingPaymentLedger::recordRefund($member, [
+                'amount' => $slice,
+                'method' => $method,
+                'source' => 'checkout',
+                'notes' => 'Refund recorded via booking update',
+                'bill_total' => $billHint,
+                'allow_closed' => true,
+            ]);
+            $remaining = round($remaining - $slice, 2);
+        }
+
+        if ($remaining > 0.004) {
+            throw ValidationException::withMessages([
+                'amount' => 'Refund cannot exceed the net amount collected on the group.',
+            ]);
+        }
+    }
+
+    /** Segment, room, and dirty-block side effects for a group room that departed with another. */
+    private function applyCheckoutRoomEffects(Booking $booking): void
+    {
+        $segmentCount = $booking->segments()->count();
+        if ($segmentCount === 0) {
+            $booking->segments()->create([
+                'room_id' => $booking->room_id,
+                'check_in' => $booking->check_in,
+                'check_out' => $booking->check_out,
+                'check_in_at' => $booking->check_in_at ?? Carbon::parse($booking->check_in)->startOfDay(),
+                'check_out_at' => $booking->check_out_at ?? Carbon::parse($booking->check_out)->startOfDay(),
+                'total_price' => $booking->total_price,
+                'status' => 'checked_out',
+            ]);
+        } elseif ($segmentCount === 1) {
+            $booking->segments()->first()->update([
+                'check_in' => $booking->check_in,
+                'check_out' => $booking->check_out,
+                'check_in_at' => $booking->check_in_at ?? Carbon::parse($booking->check_in)->startOfDay(),
+                'check_out_at' => $booking->check_out_at ?? Carbon::parse($booking->check_out)->startOfDay(),
+                'total_price' => $booking->total_price,
+                'status' => 'checked_out',
+            ]);
+        } else {
+            $booking->segments()->update(['status' => 'checked_out']);
+        }
+
+        $roomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->map(fn ($id) => (int) $id)->unique()->filter();
+        Room::whereIn('id', $roomIds->all(), 'and', false)->update(['status' => 'dirty']);
+
+        $notify = [];
+        foreach ($booking->segments()->get() as $segment) {
+            $rid = (int) $segment->room_id;
+            if ($rid <= 0) {
+                continue;
+            }
+            $notify[] = $rid;
+            $checkoutDay = Carbon::parse((string) ($segment->check_out ?? $booking->check_out))->startOfDay();
+            $co = $checkoutDay->toDateString();
+            $coNext = $checkoutDay->copy()->addDay()->toDateString();
+
+            RoomStatusBlock::query()
+                ->where('room_id', '=', $rid, 'and')
+                ->where('is_active', '=', true, 'and')
+                ->whereIn('status', ['inspected', 'pending_inspection'], 'and', false)
+                ->update(['is_active' => false]);
+            RoomStatusBlock::query()
+                ->where('room_id', '=', $rid, 'and')
+                ->where('is_active', '=', true, 'and')
+                ->whereIn('status', ['cleaning', 'dirty'], 'and', false)
+                ->where('start_date', '<', $coNext)
+                ->where('end_date', '>', $co)
+                ->update(['is_active' => false]);
+
+            $hasBlock = RoomStatusBlock::where('room_id', '=', $rid, 'and')
+                ->where('is_active', true)
+                ->where('start_date', '<', $coNext)
+                ->where('end_date', '>', $co)
+                ->exists();
+            if (! $hasBlock) {
+                RoomStatusBlock::create([
+                    'room_id' => $rid,
+                    'status' => 'dirty',
+                    'start_date' => $co,
+                    'end_date' => $coNext,
+                    'note' => 'Auto: checkout',
+                    'is_active' => true,
+                    'created_by' => Auth::id(),
+                ]);
+            }
+        }
+
+        HousekeepingStateUpdated::dispatchIfEnabled(array_values(array_unique($notify)), 'booking_checkout');
+    }
+
     /**
      * Paid-in-full rule for checkout. Group bookings pool payments unless scope is "room".
      * Money held (payments minus refunds) must cover the current bill; payment_status is not trusted because folio
@@ -406,7 +598,7 @@ class BookingController extends Controller
             $groupBookings = Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')
                 ->with(['room.roomType.tax', 'room.roomType.ratePlans'])
                 ->get();
-            $bill = (float) $groupBookings->sum(fn($b) => $this->effectiveBookingGrand($b));
+            $bill = (float) $groupBookings->sum(fn($b) => $this->groupMemberPayable($b));
             $paid = (float) $groupBookings->sum(fn($b) => (float) ($b->deposit_amount ?? 0) - (float) ($b->refund_amount ?? 0));
         } else {
             $bill = $this->effectiveBookingGrand($booking);
@@ -498,13 +690,13 @@ class BookingController extends Controller
         $booking->refresh();
 
         $state = $this->checkoutPaymentState($booking, $scope);
-        $inspection = $this->checkoutInspectionState($booking);
+        $inspection = $this->checkoutInspectionForDeparture($this->departingGroupMembers($booking, $scope));
         $summary = $this->bookingBillingSummary($booking);
         $refunded = round((float) ($booking->refund_amount ?? 0), 2);
         $netReceived = $state['paid'];
         $checkoutDay = $this->bookingCheckoutCalendarDay($booking);
         $today = Carbon::today()->toDateString();
-        $refundDue = $state['pooled'] ? 0.0 : max(0.0, round($netReceived - $state['bill'], 2));
+        $refundDue = max(0.0, round($netReceived - $state['bill'], 2));
 
         return response()->json([
             'booking_id' => $booking->id,
@@ -639,6 +831,7 @@ class BookingController extends Controller
         $query->orderBy('bookings.id', $dir);
 
         $paginator = $query->paginate((int) ($validated['per_page'] ?? 15));
+        $this->attachGroupFolios($paginator->getCollection());
 
         return response()->json(array_merge($paginator->toArray(), [
             'stats' => $this->bookingListStats($today),
@@ -661,6 +854,98 @@ class BookingController extends Controller
 
     /** Bill minus net received (payments − refunds). */
     private const BOOKING_LIST_BALANCE_SQL = '((COALESCE(bookings.total_price, 0) + COALESCE(bookings.extra_charges, 0) - COALESCE(bookings.checkout_discount_amount, 0)) - (COALESCE(bookings.deposit_amount, 0) - COALESCE(bookings.refund_amount, 0)))';
+
+    /**
+     * Group bill minus group net received. A payment recorded on one room covers the whole group.
+     * Cancelled members contribute their fee only.
+     */
+    private const BOOKING_LIST_GROUP_NET_SQL = '(SELECT
+        SUM(CASE WHEN g.status = \'cancelled\' THEN COALESCE(g.cancellation_fee_amount, 0)
+            ELSE COALESCE(g.total_price, 0) + COALESCE(g.extra_charges, 0) - COALESCE(g.checkout_discount_amount, 0) END)
+        - SUM(CASE WHEN COALESCE(g.deposit_amount, 0) - COALESCE(g.refund_amount, 0) > 0
+            THEN COALESCE(g.deposit_amount, 0) - COALESCE(g.refund_amount, 0) ELSE 0 END)
+        FROM bookings AS g
+        WHERE g.booking_group_id = bookings.booking_group_id)';
+
+    /**
+     * Tell the Bookings list that cash recorded on one room settles the whole group.
+     *
+     * @param  \Illuminate\Support\Collection<int, Booking>  $bookings
+     */
+    private function attachGroupFolios($bookings): void
+    {
+        $groupIds = $bookings->pluck('booking_group_id')->filter()->unique()->values();
+        if ($groupIds->isEmpty()) {
+            return;
+        }
+
+        $members = Booking::query()
+            ->whereIn('booking_group_id', $groupIds->all())
+            ->orderBy('id')
+            ->get([
+                'id',
+                'booking_group_id',
+                'status',
+                'total_price',
+                'extra_charges',
+                'checkout_discount_amount',
+                'cancellation_fee_amount',
+                'deposit_amount',
+                'refund_amount',
+            ]);
+
+        $folios = [];
+        foreach ($members->groupBy('booking_group_id') as $groupId => $rows) {
+            $bill = 0.0;
+            $received = 0.0;
+            $holderId = null;
+            $holderNet = -1.0;
+            foreach ($rows as $row) {
+                $bill += $this->listMemberBill($row);
+                $net = $this->listMemberReceived($row);
+                $received += $net;
+                if ($holderId === null || $net > $holderNet) {
+                    $holderNet = $net;
+                    $holderId = (int) $row->id;
+                }
+            }
+            $bill = round($bill, 2);
+            $received = round($received, 2);
+            $credit = round(max(0, $received - $bill), 2);
+            $folios[(int) $groupId] = [
+                'bill' => $bill,
+                'received' => $received,
+                'balance' => round(max(0, $bill - $received), 2),
+                'credit' => $credit,
+                'credit_booking_id' => $credit > 0.009 ? $holderId : null,
+            ];
+        }
+
+        foreach ($bookings as $booking) {
+            $groupId = (int) ($booking->booking_group_id ?? 0);
+            if ($groupId > 0 && isset($folios[$groupId])) {
+                $booking->setAttribute('group_folio', $folios[$groupId]);
+            }
+        }
+    }
+
+    private function listMemberBill(Booking $booking): float
+    {
+        if ($booking->status === 'cancelled') {
+            return round(max(0, (float) ($booking->cancellation_fee_amount ?? 0)), 2);
+        }
+
+        $bill = (float) ($booking->total_price ?? 0)
+            + (float) ($booking->extra_charges ?? 0)
+            - (float) ($booking->checkout_discount_amount ?? 0);
+
+        return round(max(0, $bill), 2);
+    }
+
+    private function listMemberReceived(Booking $booking): float
+    {
+        return round(max(0, (float) ($booking->deposit_amount ?? 0) - (float) ($booking->refund_amount ?? 0)), 2);
+    }
 
     /** @param  \Illuminate\Database\Eloquent\Builder<Booking>  $query */
     private function applyBookingListView($query, string $view, string $today): void
@@ -688,12 +973,23 @@ class BookingController extends Controller
             'arrivals' => $query->whereDate('check_in', $today)->where('status', '!=', 'cancelled'),
             'departures' => $query->whereDate('check_out', $today)->whereIn('status', ['checked_in', 'checked_out']),
             'balance_due' => $query->whereIn('status', ['checked_in', 'checked_out'])
-                ->whereRaw(self::BOOKING_LIST_BALANCE_SQL.' > 0.01'),
+                ->whereRaw(self::BOOKING_LIST_BALANCE_SQL.' > 0.01')
+                ->where(function ($q) {
+                    $q->whereNull('booking_group_id')
+                        ->orWhereRaw(self::BOOKING_LIST_GROUP_NET_SQL.' > 0.01');
+                }),
             'attention' => $query->where(function ($q) use ($today) {
                 $q->where(fn ($a) => $a->where('status', 'checked_in')->whereDate('check_out', '<', $today))
                     ->orWhere(fn ($a) => $a->whereIn('status', ['confirmed', 'pending'])->whereDate('check_in', '<', $today))
                     ->orWhere(fn ($a) => $a->where('status', 'checked_in')->whereDate('check_in', '>', $today))
-                    ->orWhere(fn ($a) => $a->where('status', 'checked_out')->whereRaw(self::BOOKING_LIST_BALANCE_SQL.' > 0.01'));
+                    ->orWhere(function ($a) {
+                        $a->where('status', 'checked_out')
+                            ->whereRaw(self::BOOKING_LIST_BALANCE_SQL.' > 0.01')
+                            ->where(function ($g) {
+                                $g->whereNull('booking_group_id')
+                                    ->orWhereRaw(self::BOOKING_LIST_GROUP_NET_SQL.' > 0.01');
+                            });
+                    });
             }),
             default => null,
         };
@@ -1073,6 +1369,111 @@ class BookingController extends Controller
         ]);
     }
 
+    /**
+     * Per-room day total for a group: rent, extra beds, meal plan, and early arrival, then GST.
+     * Returns null when the room has no day rate plan so the client total is kept.
+     *
+     * @param  array<string, mixed>  $bookingData
+     */
+    private function groupRoomDayTotal(Room $room, array $bookingData, Carbon $checkInAt, Carbon $checkOutAt): ?float
+    {
+        $planId = (int) ($bookingData['rate_plan_id'] ?? 0);
+        $plan = $room->roomType?->ratePlans?->firstWhere('id', $planId);
+        if (! $plan || ($plan->billing_unit ?? 'day') === 'hour_package') {
+            return null;
+        }
+
+        $start = $checkInAt->copy()->startOfDay();
+        $end = $checkOutAt->copy()->startOfDay();
+        $nights = max(1, (int) $start->diffInDays($end));
+        $extraPerNight = $room->roomType
+            ? SeasonalRoomPricing::extraBedPreTax(
+                $room->roomType,
+                (int) ($bookingData['adults_count'] ?? 1),
+                (int) ($bookingData['children_count'] ?? 0),
+                is_array($bookingData['child_ages'] ?? null) ? $bookingData['child_ages'] : null,
+                (int) ($bookingData['extra_beds_count'] ?? 0),
+            )
+            : 0.0;
+        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
+            (float) ($plan->base_price ?? 0),
+            $extraPerNight,
+            $extraPerNight > 0 ? 1 : 0,
+            $start,
+            $end,
+            $room->roomType?->seasons ?? []
+        );
+        $beforeTax += $this->mealPlanCharges(
+            $plan,
+            $room,
+            (int) ($bookingData['adults_count'] ?? 1),
+            (int) ($bookingData['children_count'] ?? 0),
+            $nights
+        );
+        $beforeTax += $this->earlyCheckInFeeForCreate($room, (string) ($bookingData['estimated_arrival_time'] ?? ''));
+
+        $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
+        $roomRatesIncludeGst = filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
+
+        return $roomRatesIncludeGst
+            ? round($beforeTax, 2)
+            : round($beforeTax * (1 + ($taxRate / 100)), 2);
+    }
+
+    private function mealPlanCharges(RatePlan $plan, Room $room, int $adults, int $children, int $nights): float
+    {
+        $rt = $room->roomType;
+        if (! $rt) {
+            return 0.0;
+        }
+
+        return BookingInvoiceRoomStay::nightlyPlanMealsPreTax($rt, $plan, $adults, $children) * $nights;
+    }
+
+    /**
+     * Early-arrival fee included in the room total at create (same basis as the room chart).
+     */
+    private function earlyCheckInFeeForCreate(Room $room, string $arrival): float
+    {
+        $arrival = trim($arrival);
+        if ($arrival === '') {
+            return 0.0;
+        }
+        try {
+            $actual = Carbon::parse($arrival)->format('H:i');
+        } catch (\Throwable) {
+            return 0.0;
+        }
+        $standard = (string) Setting::get('standard_check_in_time', '14:00');
+        try {
+            $standard = Carbon::parse($standard)->format('H:i');
+        } catch (\Throwable) {
+            $standard = '14:00';
+        }
+        $rt = $room->roomType;
+        if (! $rt || $actual >= $standard) {
+            return 0.0;
+        }
+        $fee = (float) ($rt->early_check_in_fee ?? 0);
+        if ($fee <= 0) {
+            return 0.0;
+        }
+        $gap = (int) Carbon::createFromFormat('H:i', $actual)->diffInMinutes(Carbon::createFromFormat('H:i', $standard));
+        $billable = max(0, $gap - (int) ($rt->early_check_in_buffer_minutes ?? 0));
+        if ($billable <= 0) {
+            return 0.0;
+        }
+        $type = (string) ($rt->early_check_in_type ?? 'flat_fee');
+        if (in_array($type, ['hour', 'per_hour'], true)) {
+            return (float) (ceil($billable / 60) * $fee);
+        }
+        if (in_array($type, ['minute', 'per_minute'], true)) {
+            return $billable * $fee;
+        }
+
+        return $fee;
+    }
+
     public function store(Request $request)
     {
         $roomIdsRaw = $request->input('room_ids');
@@ -1136,7 +1537,10 @@ class BookingController extends Controller
         ]);
 
         $creatorId = Auth::id();
-        $roomIds = $request->input('room_ids', [$request->input('room_id')]);
+        $roomIds = array_values(array_map('intval', (array) $request->input('room_ids', [$request->input('room_id')])));
+        if (count($roomIds) !== count(array_unique($roomIds))) {
+            return response()->json(['message' => 'Each room can only be selected once in a group.'], 422);
+        }
         $bookingUnit = $validated['booking_unit'] ?? 'day';
         // Normalize into APP_TIMEZONE wall time before persisting. Clients may send either a
         // hotel-local naive datetime (preferred) or a UTC ISO instant; without this, UTC
@@ -1204,6 +1608,8 @@ class BookingController extends Controller
 
         $isGroup = count($roomIds) > 1 || $request->filled('group_name');
 
+        DB::beginTransaction();
+        try {
         $bookingGroupId = null;
         if ($isGroup) {
             $group = BookingGroup::create([
@@ -1288,18 +1694,13 @@ class BookingController extends Controller
 
             $room = Room::with(['roomType.tax', 'roomType.ratePlans', 'roomType.seasons'])->findOrFail($roomId);
 
-            try {
-                BookingRoomAvailability::assertCapacity(
-                    $room,
-                    (int) ($bookingData['adults_count'] ?? 1),
-                    (int) ($bookingData['children_count'] ?? 0),
-                    (int) ($bookingData['extra_beds_count'] ?? 0),
-                );
-            } catch (ValidationException $e) {
-                return response()->json([
-                    'message' => collect($e->errors())->flatten()->first() ?: 'Occupancy exceeds room capacity.',
-                ], 422);
-            }
+            BookingRoomAvailability::assertCapacity(
+                $room,
+                (int) ($bookingData['adults_count'] ?? 1),
+                (int) ($bookingData['children_count'] ?? 0),
+                (int) ($bookingData['extra_beds_count'] ?? 0),
+                is_array($bookingData['child_ages'] ?? null) ? $bookingData['child_ages'] : null,
+            );
 
             // Compute/check datetime and totals for hourly packages
             $finalCheckInAt = $checkInAt->copy();
@@ -1309,7 +1710,9 @@ class BookingController extends Controller
             if ($bookingUnit === 'hour_package') {
                 $planId = (int) ($bookingData['rate_plan_id'] ?? 0);
                 if ($planId <= 0) {
-                    return response()->json(['message' => 'rate_plan_id is required for hourly package bookings.'], 422);
+                    throw ValidationException::withMessages([
+                        'rate_plan_id' => 'rate_plan_id is required for hourly package bookings.',
+                    ]);
                 }
 
                 // If checkout not provided, compute it as package end
@@ -1318,41 +1721,35 @@ class BookingController extends Controller
                     $plan = $room->roomType?->ratePlans?->firstWhere('id', $planId);
                     $pkgHours = (int) ($plan?->package_hours ?? 0);
                     if (($plan?->billing_unit ?? 'day') !== 'hour_package' || $pkgHours <= 0) {
-                        return response()->json(['message' => 'Invalid hourly package plan for this room.'], 422);
+                        throw ValidationException::withMessages([
+                            'rate_plan_id' => 'Invalid hourly package plan for this room.',
+                        ]);
                     }
                     $finalCheckOutAt = $finalCheckInAt->copy()->addHours($pkgHours);
                 }
 
                 $extraBedsForRoom = (int) ($bookingData['extra_beds_count'] ?? 0);
-                $calc = $this->computeHourlyPackageTotal($room, $planId, $finalCheckInAt, $finalCheckOutAt, $extraBedsForRoom);
+                $calc = $this->computeHourlyPackageTotal(
+                    $room,
+                    $planId,
+                    $finalCheckInAt,
+                    $finalCheckOutAt,
+                    $extraBedsForRoom,
+                    (int) ($bookingData['adults_count'] ?? 1),
+                    (int) ($bookingData['children_count'] ?? 0),
+                    is_array($bookingData['child_ages'] ?? null) ? $bookingData['child_ages'] : null,
+                );
                 if (! $calc['ok']) {
-                    return response()->json(['message' => $calc['message']], 422);
+                    throw ValidationException::withMessages(['booking' => $calc['message']]);
                 }
                 $totalPrice = (float) $calc['total'];
             } else {
                 // For multi-room bookings, compute per-room day total server-side so
                 // each booking holds only its own room price (prevents grouped over/under totals).
-                if (count($roomIds) > 1) {
-                    $planId = (int) ($bookingData['rate_plan_id'] ?? 0);
-                    $plan = $room->roomType?->ratePlans?->firstWhere('id', $planId);
-                    if ($plan) {
-                        $effectiveCheckOutAt = $finalCheckOutAt ? $finalCheckOutAt->copy() : $finalCheckInAt->copy()->addDay();
-                        $basePerNight = (float) ($plan->base_price ?? 0);
-                        $extraBeds = (int) ($bookingData['extra_beds_count'] ?? 0);
-                        $extraBedCost = (float) ($room->roomType?->extra_bed_cost ?? 0);
-                        $beforeTax = SeasonalRoomPricing::sumDayRoomRentWithSeasons(
-                            $basePerNight,
-                            $extraBedCost,
-                            $extraBeds,
-                            $finalCheckInAt->copy()->startOfDay(),
-                            $effectiveCheckOutAt->copy()->startOfDay(),
-                            $room->roomType?->seasons ?? []
-                        );
-                        $taxRate = (float) ($room->roomType?->tax?->rate ?? 0);
-                        $roomRatesIncludeGst = filter_var(Setting::get('room_rates_include_gst', '0'), FILTER_VALIDATE_BOOLEAN);
-                        $totalPrice = $roomRatesIncludeGst
-                            ? round($beforeTax, 2)
-                            : round($beforeTax * (1 + ($taxRate / 100)), 2);
+                if (count($roomIds) > 1 && $finalCheckOutAt) {
+                    $priced = $this->groupRoomDayTotal($room, $bookingData, $finalCheckInAt, $finalCheckOutAt);
+                    if ($priced !== null) {
+                        $totalPrice = $priced;
                     }
                 }
             }
@@ -1380,7 +1777,6 @@ class BookingController extends Controller
             $this->assignEarlyCheckinTimeFromEstimatedArrival($bookingData, $bookingUnit);
 
             // Concurrent booking safety: lock the room row and re-check overlap before insert.
-            try {
                 $booking = BookingRoomAvailability::withRoomLocks([(int) $roomId], function () use (
                     $roomId,
                     $bookingData,
@@ -1415,11 +1811,6 @@ class BookingController extends Controller
 
                     return $booking;
                 });
-            } catch (ValidationException $e) {
-                return response()->json([
-                    'message' => collect($e->errors())->flatten()->first() ?: 'Room is not available for the selected dates.',
-                ], 422);
-            }
 
             $bookings[] = $booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments']);
 
@@ -1440,6 +1831,18 @@ class BookingController extends Controller
                     $booking->refresh();
                 }
             }
+        }
+
+        DB::commit();
+        } catch (ValidationException $e) {
+            DB::rollBack();
+
+            return response()->json([
+                'message' => collect($e->errors())->flatten()->first() ?: 'Could not create the reservation.',
+            ], 422);
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            throw $e;
         }
 
         if ($isGroup) {
@@ -1577,11 +1980,22 @@ class BookingController extends Controller
         $group = null;
         if (! empty($booking->booking_group_id)) {
             $pooled = $this->checkoutPaymentState($booking, 'group');
+            $credit = round(max(0.0, $pooled['paid'] - $pooled['bill']), 2);
+            $creditBookingId = null;
+            if ($credit > 0.009) {
+                $creditBookingId = (int) Booking::query()
+                    ->where('booking_group_id', '=', $booking->booking_group_id, 'and')
+                    ->orderByRaw('(COALESCE(deposit_amount, 0) - COALESCE(refund_amount, 0)) DESC')
+                    ->orderBy('id')
+                    ->value('id');
+            }
             $group = [
                 'bookings' => Booking::where('booking_group_id', '=', $booking->booking_group_id, 'and')->count(),
                 'bill' => $pooled['bill'],
                 'paid' => $pooled['paid'],
                 'balance_due' => round(max(0.0, $pooled['bill'] - $pooled['paid']), 2),
+                'credit' => $credit,
+                'credit_booking_id' => $creditBookingId ?: null,
             ];
         }
 
@@ -1769,7 +2183,7 @@ class BookingController extends Controller
                 return response()->json(['message' => 'Select how the refund will be issued (cash, card, UPI, or bank transfer).'], 422);
             }
 
-            $inspection = $this->checkoutInspectionState($booking);
+            $inspection = $this->checkoutInspectionForDeparture($this->departingGroupMembers($booking, $checkoutScope));
             if ($inspection['status'] !== 'done') {
                 $rooms = implode(', #', $inspection['rooms']);
 
@@ -1914,16 +2328,22 @@ class BookingController extends Controller
                 $newRefund = round((float) $validated['refund_amount'], 2);
                 $refundDelta = round($newRefund - $oldRefund, 2);
                 if ($refundDelta > 0.004) {
-                    BookingPaymentLedger::recordRefund($booking, [
-                        'amount' => $refundDelta,
-                        'method' => (string) ($validated['refund_method'] ?? ($booking->refund_method ?: 'cash')),
-                        'source' => isset($validated['status']) && $validated['status'] === 'checked_out'
-                            ? 'checkout'
-                            : 'legacy_patch',
-                        'notes' => 'Refund recorded via booking update',
-                        'bill_total' => $billHint,
-                        'allow_closed' => true,
-                    ]);
+                    $refundMethod = (string) ($validated['refund_method'] ?? ($booking->refund_method ?: 'cash'));
+                    $refundSource = isset($validated['status']) && $validated['status'] === 'checked_out'
+                        ? 'checkout'
+                        : 'legacy_patch';
+                    if ($refundSource === 'checkout' && $checkoutScope === 'group' && $booking->booking_group_id) {
+                        $this->recordGroupCheckoutRefund($booking, $refundDelta, $refundMethod, $billHint);
+                    } else {
+                        BookingPaymentLedger::recordRefund($booking, [
+                            'amount' => $refundDelta,
+                            'method' => $refundMethod,
+                            'source' => $refundSource,
+                            'notes' => 'Refund recorded via booking update',
+                            'bill_total' => $billHint,
+                            'allow_closed' => true,
+                        ]);
+                    }
                 }
                 unset($validated['refund_amount'], $validated['refund_method']);
                 $booking->refresh();
@@ -1989,6 +2409,7 @@ class BookingController extends Controller
                         (int) ($validated['adults_count'] ?? $booking->adults_count ?? 1),
                         (int) ($validated['children_count'] ?? $booking->children_count ?? 0),
                         (int) ($validated['extra_beds_count'] ?? $booking->extra_beds_count ?? 0),
+                        is_array($validated['child_ages'] ?? null) ? $validated['child_ages'] : (is_array($booking->child_ages) ? $booking->child_ages : null),
                     );
                 } catch (ValidationException $e) {
                     return response()->json([
@@ -1998,8 +2419,14 @@ class BookingController extends Controller
             }
         }
 
+        $groupMates = $isNewCheckout
+            ? $this->departingGroupMembers($booking, $checkoutScope)
+                ->filter(fn (Booking $mate) => (int) $mate->id !== (int) $booking->id)
+                ->values()
+            : collect();
+
         // Keep status flip + ledger post atomic so a journal failure cannot leave checked_out without books.
-        DB::transaction(function () use ($booking, $validated, $isNewCheckout) {
+        DB::transaction(function () use ($booking, $validated, $isNewCheckout, $groupMates) {
             $booking->update($validated);
 
             if ($isNewCheckout) {
@@ -2008,6 +2435,14 @@ class BookingController extends Controller
                     auth()->id(),
                 );
                 BookingInvoiceNumber::issue($booking);
+                foreach ($groupMates as $mate) {
+                    $mate->update($this->checkedOutStayAttributes($mate));
+                    app(BookingCheckoutPoster::class)->post(
+                        $mate->fresh(['room.roomType.tax']),
+                        auth()->id(),
+                    );
+                    BookingInvoiceNumber::issue($mate);
+                }
             }
         });
 
@@ -2176,6 +2611,9 @@ class BookingController extends Controller
                     }
                 }
                 HousekeepingStateUpdated::dispatchIfEnabled($checkoutNotifyRoomIds, 'booking_checkout');
+                foreach ($groupMates as $mate) {
+                    $this->applyCheckoutRoomEffects($mate->fresh());
+                }
             } elseif ($validated['status'] === 'checked_in') {
                 // Daily cleaning tasks are created when front office releases the room for cleaning.
             }
@@ -2658,10 +3096,15 @@ class BookingController extends Controller
             }
 
             $basePrice = $ratePlan ? $ratePlan->base_price : $rt->base_price;
-            $extraBedCost = $rt->extra_bed_cost ?? 0;
-            $extraBeds = $booking->extra_beds_count ?? 0;
+            $extraPerNight = SeasonalRoomPricing::extraBedPreTax(
+                $rt,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+                is_array($booking->child_ages) ? $booking->child_ages : null,
+                (int) ($booking->extra_beds_count ?? 0),
+            );
 
-            $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+            $nightlyRoomCost = $basePrice + $extraPerNight;
 
             $nightlyRoomCost += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
                 $rt,
@@ -2743,9 +3186,14 @@ class BookingController extends Controller
         }
 
         $basePrice = $ratePlan ? (float) $ratePlan->base_price : (float) ($rt->base_price ?? 0);
-        $extraBedCost = (float) ($rt->extra_bed_cost ?? 0);
-        $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $nightlyRoom = $basePrice + ($extraBedCost * $extraBeds);
+        $extraPerNight = SeasonalRoomPricing::extraBedPreTax(
+            $rt,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+            is_array($booking->child_ages) ? $booking->child_ages : null,
+            (int) ($booking->extra_beds_count ?? 0),
+        );
+        $nightlyRoom = $basePrice + $extraPerNight;
 
         $mealSubtotal = 0.0;
         if ($includeMeals) {
@@ -3233,7 +3681,16 @@ class BookingController extends Controller
         }
 
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $calc = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $newCheckOutAt, $extraBeds);
+        $calc = $this->computeHourlyPackageTotal(
+            $room,
+            $planId,
+            $checkInAt,
+            $newCheckOutAt,
+            $extraBeds,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+            is_array($booking->child_ages) ? $booking->child_ages : null,
+        );
         if (! $calc['ok']) {
             return response()->json(['message' => $calc['message']], 422);
         }
@@ -3316,12 +3773,31 @@ class BookingController extends Controller
         }
 
         $extraBeds = (int) ($booking->extra_beds_count ?? 0);
-        $calcCurrent = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $currentCheckOutAt, $extraBeds);
+        $hourlyAges = is_array($booking->child_ages) ? $booking->child_ages : null;
+        $calcCurrent = $this->computeHourlyPackageTotal(
+            $room,
+            $planId,
+            $checkInAt,
+            $currentCheckOutAt,
+            $extraBeds,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+            $hourlyAges,
+        );
         if (! $calcCurrent['ok']) {
             return response()->json(['message' => $calcCurrent['message']], 422);
         }
 
-        $calcNew = $this->computeHourlyPackageTotal($room, $planId, $checkInAt, $newCheckOutAt, $extraBeds);
+        $calcNew = $this->computeHourlyPackageTotal(
+            $room,
+            $planId,
+            $checkInAt,
+            $newCheckOutAt,
+            $extraBeds,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+            $hourlyAges,
+        );
         if (! $calcNew['ok']) {
             return response()->json(['message' => $calcNew['message']], 422);
         }
@@ -3347,6 +3823,12 @@ class BookingController extends Controller
     {
         $this->allowReservationEdit();
 
+        if (in_array($booking->status, ['cancelled', 'checked_out'], true)) {
+            return response()->json([
+                'message' => 'Cannot split a ' . str_replace('_', ' ', $booking->status) . ' reservation.',
+            ], 422);
+        }
+
         $validated = $request->validate([
             'new_room_id' => 'required|exists:rooms,id',
             'new_check_out' => 'required|date|after:' . $booking->check_out,
@@ -3369,10 +3851,15 @@ class BookingController extends Controller
         $segmentTotal = 0.0;
         if (! $complimentaryUpgrade) {
             $basePrice = $ratePlan ? $ratePlan->base_price : ($rt->base_price ?? 0);
-            $extraBedCost = $rt->extra_bed_cost ?? 0;
-            $extraBeds = $booking->extra_beds_count ?? 0;
+            $extraPerNight = SeasonalRoomPricing::extraBedPreTax(
+                $rt,
+                (int) ($booking->adults_count ?? 1),
+                (int) ($booking->children_count ?? 0),
+                is_array($booking->child_ages) ? $booking->child_ages : null,
+                (int) ($booking->extra_beds_count ?? 0),
+            );
 
-            $nightlyRoomCost = $basePrice + ($extraBedCost * $extraBeds);
+            $nightlyRoomCost = $basePrice + $extraPerNight;
 
             $nightlyRoomCost += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
                 $rt,
@@ -3390,88 +3877,92 @@ class BookingController extends Controller
             }
         }
 
+        $oldCheckOutCarbon = Carbon::parse($oldCheckOut)->startOfDay();
+        $currentRoomId = (int) ($booking->segments()->orderByDesc('check_out')->orderByDesc('check_out_at')->value('room_id') ?: $booking->room_id);
+        if ((int) $newRoomId === $currentRoomId) {
+            return response()->json([
+                'message' => 'Select a different room for the extended nights than the room the guest is in now.',
+            ], 422);
+        }
+
+        $sellStatus = $booking->status === 'checked_in' ? 'checked_in' : 'confirmed';
+
         try {
-            BookingRoomAvailability::assertSellable(
-                (int) $newRoomId,
-                Carbon::parse($oldCheckOut)->startOfDay(),
-                Carbon::parse($newCheckOut)->startOfDay(),
-                'confirmed',
-                (int) $booking->id,
-            );
+            DB::transaction(function () use ($booking, $newRoom, $newRoomId, $newCheckOut, $oldCheckOut, $oldCheckOutCarbon, $ratePlan, $segmentTotal, $complimentaryUpgrade, $rt, $sellStatus) {
+                BookingRoomAvailability::lockAndAssertSellable(
+                    [(int) $newRoomId],
+                    $oldCheckOutCarbon,
+                    Carbon::parse($newCheckOut)->startOfDay(),
+                    $sellStatus,
+                    (int) $booking->id,
+                );
+
+                // End the stay in the current room at $oldCheckOut (same as booking.check_out) before adding
+                // the new room segment. Otherwise the previous segment can still extend into the extension
+                // window and overlap the new segment — same guest on two rooms for the same dates / OVERLAP.
+                $lastSegment = $booking->segments()->orderByDesc('check_out')->orderByDesc('check_out_at')->first();
+                if (! $lastSegment) {
+                    $lastSegment = BookingSegment::create([
+                        'booking_id' => $booking->id,
+                        'room_id' => $booking->room_id,
+                        'check_in' => $booking->check_in,
+                        'check_out' => $oldCheckOutCarbon->toDateString(),
+                        'check_in_at' => $booking->check_in_at ?? Carbon::parse($booking->check_in)->startOfDay(),
+                        'check_out_at' => $oldCheckOutCarbon,
+                        'rate_plan_id' => $booking->rate_plan_id,
+                        'adults_count' => $booking->adults_count,
+                        'children_count' => $booking->children_count,
+                        'extra_beds_count' => $booking->extra_beds_count,
+                        'total_price' => $booking->total_price,
+                        'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
+                    ]);
+                } else {
+                    $lastSegment->update([
+                        'check_out' => $oldCheckOutCarbon->toDateString(),
+                        'check_out_at' => $oldCheckOutCarbon,
+                    ]);
+                }
+
+                // Add segment — inherit the parent booking's status so a checked_in guest
+                // shows as "occupied" (not "reserved") on the room chart for the new room.
+                $segmentStatus = $booking->status === 'checked_in' ? 'checked_in' : 'confirmed';
+
+                BookingSegment::create([
+                    'booking_id' => $booking->id,
+                    'room_id' => $newRoomId,
+                    'check_in' => $oldCheckOutCarbon->toDateString(),
+                    'check_out' => $newCheckOut,
+                    'check_in_at' => $oldCheckOutCarbon,
+                    'check_out_at' => Carbon::parse($newCheckOut)->startOfDay(),
+                    'rate_plan_id' => $ratePlan ? $ratePlan->id : null,
+                    'adults_count' => $booking->adults_count,
+                    'children_count' => $booking->children_count,
+                    'extra_beds_count' => $booking->extra_beds_count,
+                    'total_price' => $segmentTotal,
+                    'status' => $segmentStatus,
+                ]);
+
+                $user = Auth::user();
+                $userName = $user ? $user->name : '';
+                $auditMsg = $complimentaryUpgrade
+                    ? "[Split Stay: Complimentary upgrade to Room #{$newRoom->room_number} ({$rt->name}) from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']'
+                    : "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']';
+                $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
+
+                $booking->update([
+                    'check_out' => $newCheckOut,
+                    'check_out_at' => Carbon::parse($newCheckOut)->startOfDay(),
+                    'total_price' => (float) $booking->total_price + $segmentTotal,
+                    'notes' => $notes,
+                ]);
+            });
         } catch (ValidationException $e) {
             return response()->json([
                 'message' => collect($e->errors())->flatten()->first() ?: 'Room is not available for the selected dates.',
             ], 422);
         }
 
-        // End the stay in the current room at $oldCheckOut (same as booking.check_out) before adding
-        // the new room segment. Otherwise the previous segment can still extend into the extension
-        // window and overlap the new segment — same guest on two rooms for the same dates / OVERLAP.
-        $lastSegment = $booking->segments()->orderByDesc('check_out')->orderByDesc('check_out_at')->first();
-        $oldCheckOutCarbon = Carbon::parse($oldCheckOut)->startOfDay();
-        if (! $lastSegment) {
-            $lastSegment = BookingSegment::create([
-                'booking_id' => $booking->id,
-                'room_id' => $booking->room_id,
-                'check_in' => $booking->check_in,
-                'check_out' => $oldCheckOutCarbon->toDateString(),
-                'check_in_at' => $booking->check_in_at ?? Carbon::parse($booking->check_in)->startOfDay(),
-                'check_out_at' => $oldCheckOutCarbon,
-                'rate_plan_id' => $booking->rate_plan_id,
-                'adults_count' => $booking->adults_count,
-                'children_count' => $booking->children_count,
-                'extra_beds_count' => $booking->extra_beds_count,
-                'total_price' => $booking->total_price,
-                'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
-            ]);
-        } else {
-            $lastSegment->update([
-                'check_out' => $oldCheckOutCarbon->toDateString(),
-                'check_out_at' => $oldCheckOutCarbon,
-            ]);
-        }
-
-        if ((int) $newRoomId === (int) $lastSegment->room_id) {
-            return response()->json([
-                'message' => 'Select a different room for the extended nights than the room the guest is in now.',
-            ], 422);
-        }
-
-        // Add segment — inherit the parent booking's status so a checked_in guest
-        // shows as "occupied" (not "reserved") on the room chart for the new room.
-        $segmentStatus = $booking->status === 'checked_in' ? 'checked_in' : 'confirmed';
-
-        $newSegment = BookingSegment::create([
-            'booking_id' => $booking->id,
-            'room_id' => $newRoomId,
-            'check_in' => $oldCheckOutCarbon->toDateString(),
-            'check_out' => $newCheckOut,
-            'check_in_at' => $oldCheckOutCarbon,
-            'check_out_at' => Carbon::parse($newCheckOut)->startOfDay(),
-            'rate_plan_id' => $ratePlan ? $ratePlan->id : null,
-            'adults_count' => $booking->adults_count,
-            'children_count' => $booking->children_count,
-            'extra_beds_count' => $booking->extra_beds_count,
-            'total_price' => $segmentTotal,
-            'status' => $segmentStatus,
-        ]);
-
-        // Update main booking
-        $user = Auth::user();
-        $userName = $user ? $user->name : ($user ? "User #{$user->id}" : '');
-        $auditMsg = $complimentaryUpgrade
-            ? "[Split Stay: Complimentary upgrade to Room #{$newRoom->room_number} ({$rt->name}) from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']'
-            : "[Split Stay: Room #{$newRoom->room_number} from {$oldCheckOut} to {$newCheckOut}" . ($userName ? " by {$userName}" : '') . ' on ' . now()->format('Y-m-d H:i:s') . ']';
-        $notes = $booking->notes ? $booking->notes . "\n" . $auditMsg : $auditMsg;
-
-        $booking->update([
-            'check_out' => $newCheckOut,
-            'check_out_at' => Carbon::parse($newCheckOut)->startOfDay(),
-            'total_price' => (float) $booking->total_price + $segmentTotal,
-            'notes' => $notes,
-        ]);
-
-        return response()->json($booking->load(['segments.room.roomType', 'creator']));
+        return response()->json($booking->fresh()->load(['segments.room.roomType', 'creator']));
     }
 
     public function reservationVoucher(Request $request, Booking $booking)

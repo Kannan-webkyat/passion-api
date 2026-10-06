@@ -1686,11 +1686,14 @@ class HousekeepingController extends Controller
                 $onHand[$itemId] = $onHandQty - $consumed;
             }
 
-            // Minibar billing via POS room_charge
+            // Minibar billing via POS room_charge. Only while this room still has the in-house
+            // segment — a split-stay move leaves booking.room_id on the room the guest already left,
+            // and checkout inspection owns that folio charge.
             $minibarLines = $job->lines->where('kind', 'minibar')->values();
             if ($minibarLines->isNotEmpty()) {
-                $booking = $this->activeBookingForRoom($roomStatusBlock->room_id);
-                if ($booking) {
+                $roomId = (int) $roomStatusBlock->room_id;
+                $booking = $this->activeBookingForRoom($roomId);
+                if ($booking && $this->guestStillInRoom($roomId, (int) $booking->id)) {
                     $this->postMinibarRoomCharge($booking, $minibarLines, $userId);
                 }
             }
@@ -1816,6 +1819,20 @@ class HousekeepingController extends Controller
             ->where('status', '=', 'checked_in', 'and')
             ->orderByDesc('id')
             ->first();
+    }
+
+    /** True when an in-house segment for this booking still covers the room. */
+    private function guestStillInRoom(int $roomId, int $bookingId): bool
+    {
+        $now = now();
+
+        return BookingSegment::query()
+            ->where('room_id', '=', $roomId, 'and')
+            ->where('booking_id', '=', $bookingId, 'and')
+            ->where('status', '=', 'checked_in', 'and')
+            ->where('check_in_at', '<=', $now)
+            ->where('check_out_at', '>', $now)
+            ->exists();
     }
 
     /**
@@ -1991,10 +2008,25 @@ class HousekeepingController extends Controller
         $pricedLines = [];
         foreach ($minibarLines as $ln) {
             $qty = (float) ($ln->qty ?? 0);
-            $pricing = $menuPricing[(int) ($ln->inventory_item_id ?? 0)] ?? null;
-            if ($qty > 0 && $pricing !== null && ($pricing['price'] ?? 0) > 0) {
-                $pricedLines[] = [$qty, $pricing];
+            $itemId = (int) ($ln->inventory_item_id ?? 0);
+            if ($qty <= 0 || $itemId <= 0) {
+                continue;
             }
+            $pricing = $menuPricing[$itemId] ?? null;
+            if ($pricing === null) {
+                continue;
+            }
+            $item = InventoryItem::query()->find($itemId, ['id', 'cost_price', 'conversion_factor']);
+            if (! $item) {
+                continue;
+            }
+            // Same guest price as checkout inspection, including the issue-unit cost fallback.
+            $unit = $this->minibarGuestUnitPrice($item, $menuPricing);
+            if ($unit <= 0) {
+                continue;
+            }
+            $pricing['price'] = $unit;
+            $pricedLines[] = [$qty, $pricing];
         }
         if ($pricedLines === []) {
             return;

@@ -173,6 +173,7 @@ final class BookingRoomAvailability
         int $adults,
         int $children,
         int $extraBeds,
+        ?array $childAges = null,
     ): array {
         $baseOcc = (int) ($roomType->base_occupancy ?? 2);
         $maxCap = (int) ($roomType->capacity ?? 2);
@@ -193,6 +194,10 @@ final class BookingRoomAvailability
         $remBase = max(0, $baseOcc - $adults);
         $extraChildrenMin = max(0, $children - $remBase - $childLimit);
         $actualMinBedsRequired = $extraAdults + $extraChildrenMin;
+        $aged = SeasonalRoomPricing::requiredExtraBeds($roomType, $adults, $children, $childAges);
+        if ($aged !== null) {
+            $actualMinBedsRequired = $aged['adult'] + $aged['child'];
+        }
 
         if ($actualMinBedsRequired > $maxExBed) {
             $errors[] = "This guest mix requires {$actualMinBedsRequired} extra bed(s), but only {$maxExBed} are available.";
@@ -206,7 +211,7 @@ final class BookingRoomAvailability
     /**
      * @throws ValidationException
      */
-    public static function assertCapacity(Room $room, int $adults, int $children, int $extraBeds): void
+    public static function assertCapacity(Room $room, int $adults, int $children, int $extraBeds, ?array $childAges = null): void
     {
         $room->loadMissing('roomType');
         $rt = $room->roomType;
@@ -214,7 +219,7 @@ final class BookingRoomAvailability
             return;
         }
 
-        $errors = self::capacityErrors($rt, $adults, $children, $extraBeds);
+        $errors = self::capacityErrors($rt, $adults, $children, $extraBeds, $childAges);
         if ($errors !== []) {
             throw ValidationException::withMessages([
                 'adults_count' => $errors,

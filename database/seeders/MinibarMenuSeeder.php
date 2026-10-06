@@ -13,8 +13,9 @@ use Illuminate\Support\Facades\DB;
  * Minibar menu items: one menu item per minibar inventory item (HousekeepingInventorySeeder),
  * linked by inventory_item_id, with item_code = the inventory SKU.
  *
- * No outlet availability is seeded: minibar items are not sold on the POS. Checkout inspection
- * charges consumption at the menu item's base price (GST-inclusive) and posts it to the room.
+ * No outlet availability is seeded: minibar items are not sold on the POS. The price written
+ * here is menu_items.price, the Menu Pricing minibar sell price (GST-inclusive). Checkout
+ * inspection charges that price when no outlet price is set, and posts it to the room.
  *
  * Safe to re-run: existing minibar menu items keep their name, price, tax, availability and any
  * outlet links; only the inventory link, category and direct-sale / no-KOT flags are re-synced.

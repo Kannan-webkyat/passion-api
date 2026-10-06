@@ -88,11 +88,14 @@ trait MigratesRoomChartTestSchema
                 $table->text('description')->nullable();
                 $table->decimal('breakfast_price', 10, 2)->default(0);
                 $table->decimal('child_breakfast_price', 10, 2)->default(0);
+                $table->decimal('adult_meal_price', 10, 2)->default(0);
+                $table->decimal('child_meal_price', 10, 2)->default(0);
                 $table->decimal('adult_lunch_price', 10, 2)->default(0);
                 $table->decimal('child_lunch_price', 10, 2)->default(0);
                 $table->decimal('adult_dinner_price', 10, 2)->default(0);
                 $table->decimal('child_dinner_price', 10, 2)->default(0);
                 $table->integer('child_age_limit')->default(12);
+                $table->unsignedTinyInteger('child_age_from')->default(0);
                 $table->decimal('early_check_in_fee', 10, 2)->nullable();
                 $table->string('early_check_in_type')->nullable();
                 $table->integer('early_check_in_buffer_minutes')->default(0);
@@ -110,6 +113,28 @@ trait MigratesRoomChartTestSchema
                 $table->json('amenities')->nullable();
                 $table->boolean('is_active')->default(true);
                 $table->timestamps();
+            });
+        }
+
+        if (Schema::hasTable('room_types') && ! Schema::hasColumn('room_types', 'child_age_from')) {
+            Schema::table('room_types', function (Blueprint $table) {
+                $table->unsignedTinyInteger('child_age_from')->default(0);
+            });
+        }
+
+        if (Schema::hasTable('room_types') && ! Schema::hasColumn('room_types', 'adult_meal_price')) {
+            Schema::table('room_types', function (Blueprint $table) {
+                $table->decimal('adult_meal_price', 10, 2)->default(0);
+                $table->decimal('child_meal_price', 10, 2)->default(0);
+            });
+        }
+
+        if (Schema::hasTable('room_types') && ! Schema::hasColumn('room_types', 'bedrooms')) {
+            Schema::table('room_types', function (Blueprint $table) {
+                $table->unsignedTinyInteger('bedrooms')->default(1);
+                $table->unsignedTinyInteger('washrooms')->default(1);
+                $table->decimal('weekday_price', 10, 2)->default(0);
+                $table->decimal('weekend_price', 10, 2)->default(0);
             });
         }
 

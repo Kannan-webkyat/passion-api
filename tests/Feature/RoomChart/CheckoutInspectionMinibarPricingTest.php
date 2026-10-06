@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\RoomChart;
 
+use App\Models\BookingExtraCharge;
 use App\Models\InventoryItem;
 use App\Models\InventoryLocation;
 use App\Models\MenuItem;
@@ -9,7 +10,9 @@ use App\Models\RestaurantMaster;
 use App\Models\RestaurantMenuItem;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class CheckoutInspectionMinibarPricingTest extends RoomChartTestCase
 {
@@ -20,6 +23,24 @@ class CheckoutInspectionMinibarPricingTest extends RoomChartTestCase
     protected function setUp(): void
     {
         parent::setUp();
+
+        if (! Schema::hasTable('inventory_transactions')) {
+            Schema::create('inventory_transactions', function (Blueprint $table) {
+                $table->id();
+                $table->unsignedBigInteger('inventory_item_id');
+                $table->unsignedBigInteger('inventory_location_id')->nullable();
+                $table->string('type');
+                $table->decimal('quantity', 14, 4);
+                $table->decimal('unit_cost', 12, 4)->nullable();
+                $table->decimal('total_cost', 12, 2)->nullable();
+                $table->string('reason')->nullable();
+                $table->text('notes')->nullable();
+                $table->unsignedBigInteger('user_id')->nullable();
+                $table->string('reference_id')->nullable();
+                $table->string('reference_type')->nullable();
+                $table->timestamps();
+            });
+        }
 
         $user = $this->actingWith(['housekeeping-checkout-inspection']);
         $this->room = $this->makeRoom('207');
@@ -96,5 +117,25 @@ class CheckoutInspectionMinibarPricingTest extends RoomChartTestCase
         $this->previewMinibar($sevenUp, 2)
             ->assertJsonPath('preview.minibar_lines.0.unit_amount', 20)
             ->assertJsonPath('preview.minibar_total', 40);
+    }
+
+    public function test_apply_charges_unpriced_minibar_at_issue_unit_cost(): void
+    {
+        $sevenUp = $this->stockMinibarItem('7UP', 480, 24);
+        MenuItem::query()->create(['name' => '7UP (Minibar)', 'price' => 0, 'inventory_item_id' => $sevenUp->id]);
+
+        $this->postJson("/api/housekeeping/blocks/{$this->block->id}/checkout-inspection/apply", [
+            'minibar' => [['inventory_item_id' => $sevenUp->id, 'qty' => 2]],
+        ])->assertOk()
+            ->assertJsonPath('added_amount', 40);
+
+        $charge = BookingExtraCharge::query()->where('kind', 'minibar')->sole();
+        $this->assertEqualsWithDelta(20.0, (float) $charge->unit_amount, 0.01);
+        $this->assertEqualsWithDelta(40.0, (float) $charge->total_amount, 0.01);
+        $this->assertDatabaseHas('inventory_transactions', [
+            'inventory_item_id' => $sevenUp->id,
+            'reference_type' => 'checkout_inspection',
+            'total_cost' => 40,
+        ]);
     }
 }

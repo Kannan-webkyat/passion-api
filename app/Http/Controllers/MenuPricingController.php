@@ -36,6 +36,7 @@ class MenuPricingController extends Controller
             'category',
             'subCategory',
             'tax',
+            'inventoryItem:id,is_minibar',
             'restaurantMenuItems.restaurant',
             'restaurantMenuItems.variantOverrides',
             'variants',
@@ -67,6 +68,7 @@ class MenuPricingController extends Controller
                 'type' => $item->type,
                 'is_active' => (bool) $item->is_active,
                 'is_direct_sale' => (bool) $item->is_direct_sale,
+                'is_minibar' => (bool) ($item->inventoryItem?->is_minibar),
                 'menu_category_id' => $item->menu_category_id,
                 'category' => $item->category,
                 'base_price' => (float) ($item->price ?? 0),
@@ -81,22 +83,49 @@ class MenuPricingController extends Controller
     }
 
     /**
-     * Update outlet + variant prices only (same shapes as menu sync service).
+     * Update outlet prices, variant prices, and the minibar guest price (menu_items.price).
      */
     public function update(Request $request, MenuItem $menuItem)
     {
         $this->checkPermission('menu-pricing');
 
         $validated = $request->validate([
-            'restaurant_links' => 'required|array|min:1',
+            'restaurant_links' => 'present|array',
             'restaurant_links.*.restaurant_master_id' => 'required|exists:restaurant_masters,id',
             // 0 = not priced at this outlet yet (POS skips until set).
             'restaurant_links.*.price' => 'nullable|numeric|min:0',
             'restaurant_links.*.fixed_ept' => 'nullable|integer|min:0',
             'restaurant_links.*.is_active' => 'boolean',
+            // Guest minibar price (menu_items.price). Ignored unless the linked inventory item is minibar.
+            'price' => 'nullable|numeric|min:0',
         ]);
 
-        $this->menuItemSync->syncRestaurantLinks($menuItem, $validated['restaurant_links']);
+        $menuItem->loadMissing('inventoryItem:id,is_minibar');
+        $isMinibar = (bool) ($menuItem->inventoryItem?->is_minibar);
+        $links = $validated['restaurant_links'];
+
+        if ($links === [] && ! $isMinibar) {
+            return response()->json([
+                'message' => 'Add at least one linked outlet under Menu Configuration.',
+            ], 422);
+        }
+
+        if ($isMinibar && array_key_exists('price', $validated) && $validated['price'] !== null) {
+            $nextPrice = (float) $validated['price'];
+            if ($links === [] && $nextPrice <= 0) {
+                return response()->json([
+                    'message' => 'Enter a minibar selling price greater than zero.',
+                ], 422);
+            }
+            $menuItem->price = $nextPrice;
+            $menuItem->save();
+        } elseif ($isMinibar && $links === [] && (float) $menuItem->price <= 0) {
+            return response()->json([
+                'message' => 'Enter a minibar selling price greater than zero.',
+            ], 422);
+        }
+
+        $this->menuItemSync->syncRestaurantLinks($menuItem, $links);
         $menuItem->load('restaurantMenuItems');
 
         if ($request->has('variants')) {
