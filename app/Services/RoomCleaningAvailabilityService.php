@@ -328,6 +328,8 @@ class RoomCleaningAvailabilityService
             'priority' => $release->priority,
         ]);
 
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $release->room_id], 'cleaning_released');
+
         return $release->fresh(['room.roomType', 'assignedUser:id,name', 'startedByUser:id,name']);
     }
 

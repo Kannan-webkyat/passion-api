@@ -42,6 +42,7 @@ use App\Support\HousekeepingTurnoverCarryForward;
 use App\Support\CleaningServiceClassification;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
+use App\Support\PortalNotifications;
 use App\Support\RoomParInventoryContext;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
@@ -1420,7 +1421,27 @@ class HousekeepingController extends Controller
             }
         }
 
+        $previousAssigned = $roomStatusBlock->assigned_to !== null
+            ? (int) $roomStatusBlock->assigned_to
+            : null;
+
         $roomStatusBlock->update(['assigned_to' => $assignedTo]);
+
+        if ($assignedTo !== null && $assignedTo !== $previousAssigned) {
+            if ($roomStatusBlock->status === 'pending_inspection') {
+                PortalNotifications::recordCheckoutInspectionAssigned(
+                    (int) $roomStatusBlock->room_id,
+                    null,
+                    $assignedTo,
+                );
+            } else {
+                PortalNotifications::recordDirtyRoomAssigned(
+                    (int) $roomStatusBlock->room_id,
+                    null,
+                    $assignedTo,
+                );
+            }
+        }
 
         $event = $roomStatusBlock->status === 'pending_inspection'
             ? 'assign_inspection_staff'
@@ -1738,6 +1759,12 @@ class HousekeepingController extends Controller
 
             HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
             RoomParStockUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
+            if (! $assetProblem) {
+                PortalNotifications::recordRoomReady(
+                    (int) $room->id,
+                    $userId ? (int) $userId : null,
+                );
+            }
 
             return response()->json([
                 'message' => $assetProblem ? 'Cleaning finished.' : 'Cleaning complete. Room is available.',
@@ -2126,6 +2153,30 @@ class HousekeepingController extends Controller
     }
 
     /**
+     * Requested re-service and other extra cleans must be allocated first.
+     * Only that staff member can start the clean.
+     */
+    private function externalCleaningStartError(
+        RoomCleaningRelease $release,
+        ?DailyRoomCleaning $cleaning,
+    ): ?JsonResponse {
+        $assigneeId = $cleaning?->assigned_to ?: $release->assigned_to;
+        if (! $assigneeId) {
+            return response()->json([
+                'message' => 'Assign a housekeeping staff member before starting this cleaning.',
+            ], 422);
+        }
+
+        if ((int) $assigneeId !== (int) Auth::id()) {
+            return response()->json([
+                'message' => 'Only the assigned staff member can start this cleaning.',
+            ], 403);
+        }
+
+        return null;
+    }
+
+    /**
      * Pending checkout inspections must be assigned first; only the assignee or a user who can
      * assign checkout inspections may perform them.
      */
@@ -2213,6 +2264,15 @@ class HousekeepingController extends Controller
             DB::commit();
 
             HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'checkout_inspection_clear');
+
+            $guestName = $booking ? trim((string) ($booking->guest_name ?? '')) : '';
+            PortalNotifications::recordCheckoutInspectionCompleted(
+                $roomId,
+                $bookingId,
+                $guestName !== '' ? $guestName : null,
+                false,
+                $userId ? (int) $userId : null,
+            );
 
             return response()->json([
                 'message' => 'Inspection completed. Room marked inspected on the chart.',
@@ -2662,6 +2722,15 @@ class HousekeepingController extends Controller
 
             HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'checkout_inspection_apply');
 
+            $guestName = trim((string) ($booking->guest_name ?? ''));
+            PortalNotifications::recordCheckoutInspectionCompleted(
+                $roomId,
+                (int) $booking->id,
+                $guestName !== '' ? $guestName : null,
+                round((float) $chargeTotal, 2) > 0,
+                $userId ? (int) $userId : null,
+            );
+
             return response()->json([
                 'message' => 'Inspection completed. Charges applied; room marked inspected on the chart.',
                 'booking_id' => (int) $booking->id,
@@ -2944,6 +3013,22 @@ class HousekeepingController extends Controller
             }
         }
 
+        if (
+            $newStatus === 'in_progress'
+            && ! $reopening
+            && $release->service_type === CleaningServiceClassification::TYPE_OTHER
+        ) {
+            $existingCleaning = DailyRoomCleaning::query()
+                ->where('room_id', '=', $roomId, 'and')
+                ->whereDate('service_date', $d)
+                ->first();
+            $alreadyStarted = $existingCleaning
+                && in_array($existingCleaning->status, ['in_progress', 'cleaned'], true);
+            if (! $alreadyStarted && ($assigneeError = $this->externalCleaningStartError($release, $existingCleaning))) {
+                return $assigneeError;
+            }
+        }
+
         $segments = $this->dailyCleaningOccupiedSegments(Carbon::parse($d));
         $seg = $segments->firstWhere('room_id', '=', $roomId);
         if (! $seg && $release->daily_room_cleaning_id === null) {
@@ -2957,6 +3042,7 @@ class HousekeepingController extends Controller
 
         $bookingId = $seg->booking ? (int) $seg->booking->id : null;
         $room = Room::find($roomId, ['id', 'room_number']);
+        $assignDailyCleaning = null;
 
         DB::beginTransaction();
         try {
@@ -2996,6 +3082,16 @@ class HousekeepingController extends Controller
                     $this->assertCanAssignHousekeepingStaff();
                 }
                 $cleaning->assigned_to = $validated['assigned_to'];
+                if ($release->service_type === CleaningServiceClassification::TYPE_OTHER) {
+                    $release->assigned_to = $nextAssigned;
+                    $release->save();
+                }
+                if ($nextAssigned !== null && $nextAssigned !== $prevAssigned) {
+                    $assignDailyCleaning = [
+                        'recipient' => $nextAssigned,
+                        're_service' => $release->service_type === CleaningServiceClassification::TYPE_OTHER,
+                    ];
+                }
             }
             if (array_key_exists('remarks', $validated)) {
                 $cleaning->remarks = $validated['remarks'];
@@ -3026,6 +3122,7 @@ class HousekeepingController extends Controller
                 $cleaning->started_by = null;
                 $cleaning->completed_at = null;
                 $cleaning->completed_by = null;
+                $cleaning->front_desk_notified_at = null;
             } elseif ($newStatus === 'in_progress') {
                 if (! $cleaning->started_at) {
                     $cleaning->started_at = now();
@@ -3033,6 +3130,7 @@ class HousekeepingController extends Controller
                 }
                 $cleaning->completed_at = null;
                 $cleaning->completed_by = null;
+                $cleaning->front_desk_notified_at = null;
             } elseif ($newStatus === 'cleaned') {
                 if (! $cleaning->started_at) {
                     $cleaning->started_at = now();
@@ -3050,28 +3148,57 @@ class HousekeepingController extends Controller
 
             HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'daily_cleaning_status');
 
-            $notify = $request->boolean('notify_front_desk') && $newStatus === 'cleaned';
-            if ($notify && ! $cleaning->front_desk_notified_at && config('broadcasting.default') !== 'null') {
+            if (is_array($assignDailyCleaning)) {
+                PortalNotifications::recordDailyCleaningAssigned(
+                    $roomId,
+                    $bookingId,
+                    $d,
+                    (int) $assignDailyCleaning['recipient'],
+                    (bool) $assignDailyCleaning['re_service'],
+                );
+            }
+
+            if ($newStatus === 'cleaned' && ! $cleaning->front_desk_notified_at) {
                 $guest = $seg->booking ? (string) ($seg->booking->guest_name ?? '') : '';
                 $msg = 'Daily cleaning completed for room #' . (string) ($room?->room_number ?? $roomId);
                 $rn = (string) ($room?->room_number ?? '');
                 $guestBroadcast = $guest !== '' ? $guest : null;
-                App::terminating(function () use ($roomId, $rn, $bookingId, $d, $msg, $guestBroadcast) {
-                    try {
-                        event(new DailyRoomCleaningDeskNotify(
-                            $roomId,
-                            $rn,
-                            $bookingId,
-                            $guestBroadcast,
-                            $d,
-                            $msg,
-                        ));
-                    } catch (\Throwable $e) {
-                        report($e);
-                    }
-                });
-                $cleaning->front_desk_notified_at = now();
-                $cleaning->save();
+                $notificationId = null;
+                try {
+                    $notificationId = PortalNotifications::recordDailyCleaning(
+                        $roomId,
+                        $rn,
+                        $bookingId,
+                        $guestBroadcast,
+                        $d,
+                        $msg,
+                        $userId ? (int) $userId : null,
+                    );
+                } catch (\Throwable $e) {
+                    report($e);
+                }
+                $willBroadcast = config('broadcasting.default') !== 'null';
+                if ($willBroadcast) {
+                    App::terminating(function () use ($roomId, $rn, $bookingId, $d, $msg, $guestBroadcast, $notificationId) {
+                        try {
+                            event(new DailyRoomCleaningDeskNotify(
+                                $roomId,
+                                $rn,
+                                $bookingId,
+                                $guestBroadcast,
+                                $d,
+                                $msg,
+                                $notificationId,
+                            ));
+                        } catch (\Throwable $e) {
+                            report($e);
+                        }
+                    });
+                }
+                if ($notificationId !== null || $willBroadcast) {
+                    $cleaning->front_desk_notified_at = now();
+                    $cleaning->save();
+                }
             }
 
             return response()->json([

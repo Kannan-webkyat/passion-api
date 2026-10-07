@@ -100,6 +100,40 @@ class RoomChartStayChangesTest extends RoomChartTestCase
         $this->assertEqualsWithDelta(2912.0, (float) $booking->fresh()->total_price - $before, 0.01);
     }
 
+    public function test_preview_extend_returns_the_same_charge_without_saving(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $cp = $this->makeRatePlan($this->roomType, ['name' => 'CP', 'meal_plan_type' => 'breakfast']);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(0), $this->day(2), ['rate_plan_id' => $cp->id]);
+
+        $this->postJson("/api/bookings/{$booking->id}/preview-extend", ['new_check_out' => $this->day(4)])
+            ->assertOk()
+            ->assertJson([
+                'current_total' => 4480,
+                'delta' => 5824,
+                'new_total' => 10304,
+                'extra_nights' => 2,
+                'has_conflict' => false,
+            ]);
+
+        $this->assertSame($this->day(2), (string) $booking->fresh()->check_out);
+        $this->assertSame(4480.0, (float) $booking->fresh()->total_price);
+    }
+
+    public function test_preview_extend_flags_a_room_conflict_without_saving(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $room = $this->makeRoom('101');
+        $booking = $this->makeBooking($room, $this->day(0), $this->day(2));
+        $this->makeBooking($room, $this->day(2), $this->day(4));
+
+        $this->postJson("/api/bookings/{$booking->id}/preview-extend", ['new_check_out' => $this->day(3)])
+            ->assertOk()
+            ->assertJsonPath('has_conflict', true);
+
+        $this->assertSame($this->day(2), (string) $booking->fresh()->check_out);
+    }
+
     // ── Hourly extension ────────────────────────────────────────────────────
 
     private function makeHourlyBooking(): Booking

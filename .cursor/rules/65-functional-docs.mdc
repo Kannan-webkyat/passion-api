@@ -1,0 +1,49 @@
+---
+description: After a behavior change, create or update the functional doc that describes that feature so it matches the code
+alwaysApply: true
+---
+
+# 65 — Functional documentation
+
+## Purpose
+Keep the written description of each feature aligned with what the code does after a change.
+
+## When it applies
+Every change in `passion-api` that changes what a person or another system can do: an endpoint,
+workflow, permission, status, money rule, schema the product relies on, or side effect. It also
+applies when the same change is made in `../passion`.
+
+Skip formatting, comments, local renames, and test-only edits that do not change that behavior.
+
+## Where the doc lives
+One description per feature. Do not copy it into both repos.
+
+| The change is about | Update this file |
+|---|---|
+| Doorloom, the online calendar, or stay sync with Doorloom | `docs/DOORLOOM.md` |
+| GRN, goods receipt, or frozen GRN cost | `docs/GRN_MODULE.md` |
+| Store requisition, Main Store, or the POS stock path in the ERP SOP | `docs/PASSION_ERP_WORKFLOW_SOP.md` |
+| QZ Tray install or signing | `../passion/QZ_TRAY_SETUP.md` |
+| A fact stated in `PASSION_LARAVEL_ARCHITECTURE.md` (route, permission, status, owner class, JSON key, event name) | That section only |
+| A fact stated in `../passion/PASSION_FRONTEND_ARCHITECTURE.md` | That section only |
+| Any other workflow that has no doc yet | Create `docs/<TOPIC>.md` |
+
+Search `docs/` before creating a file. Extend the existing doc when the feature is already described.
+
+## Required behavior
+- Before finishing, read the matching doc and rewrite every sentence the change made false.
+- A new doc uses the same voice as `docs/DOORLOOM.md`: what the product does now, the screen and the endpoint, permission names, status strings, and a short "not included" note. No recommendations.
+- A feature that spans the API and the Next.js screen is one file under `docs/`. Name the frontend route in that file.
+- Patch an architecture section only when a statement in it is now wrong. Leave file counts and the measured-on date alone.
+- In the final message, name the doc you created or updated.
+
+## Things Cursor must NOT do
+- Do not finish a behavior change with the old description still in the doc.
+- Do not add a second doc in `../passion/` for a feature already described under `docs/`.
+- Do not put product behavior into `.cursor/rules/` or a skill. Those files tell the agent how to work.
+- Do not refresh unrelated sections of the architecture docs.
+
+## Real examples from the codebase
+- Doorloom webhook + stay push + the settings card: `docs/DOORLOOM.md`.
+- GRN approval posts stock: `docs/GRN_MODULE.md`.
+- API facts by section: `PASSION_LARAVEL_ARCHITECTURE.md`.

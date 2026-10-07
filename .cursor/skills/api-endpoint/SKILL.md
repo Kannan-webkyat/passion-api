@@ -96,3 +96,4 @@ return response()->json($method, 201);
 - [ ] No FormRequest / JsonResource / Policy / middleware added
 - [ ] Frontend impact checked in `../passion`
 - [ ] Tests pass vs baseline
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

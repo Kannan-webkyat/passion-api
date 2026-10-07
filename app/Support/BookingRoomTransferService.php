@@ -10,6 +10,7 @@ use App\Models\RatePlan;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\Setting;
+use App\Support\PortalNotifications;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -481,12 +482,35 @@ final class BookingRoomTransferService
     private static function resolveRatePlanId(Room $room, int $preferredId): int
     {
         $plans = $room->roomType?->ratePlans ?? collect();
+        if ($plans->isEmpty()) {
+            return $preferredId;
+        }
         if ($preferredId > 0 && $plans->contains('id', $preferredId)) {
             return $preferredId;
         }
-        $first = $plans->first();
 
-        return $first ? (int) $first->id : $preferredId;
+        $preferred = $preferredId > 0 ? RatePlan::query()->find($preferredId) : null;
+        if ($preferred) {
+            $unit = (string) ($preferred->billing_unit ?? 'day');
+            $sameUnit = $plans->filter(fn ($plan) => (string) ($plan->billing_unit ?? 'day') === $unit);
+            $pool = $sameUnit->isNotEmpty() ? $sameUnit : $plans;
+            $meal = trim((string) ($preferred->meal_plan_type ?? ''));
+            if ($meal !== '') {
+                $match = $pool->first(fn ($plan) => trim((string) ($plan->meal_plan_type ?? '')) === $meal);
+                if ($match) {
+                    return (int) $match->id;
+                }
+            }
+            $name = trim((string) ($preferred->name ?? ''));
+            if ($name !== '') {
+                $byName = $pool->first(fn ($plan) => strcasecmp(trim((string) ($plan->name ?? '')), $name) === 0);
+                if ($byName) {
+                    return (int) $byName->id;
+                }
+            }
+        }
+
+        return (int) $plans->first()->id;
     }
 
     private static function computeDayStayInclusive(Booking $booking, Room $room, RatePlan $plan, Carbon $from, Carbon $to): float
@@ -771,6 +795,19 @@ final class BookingRoomTransferService
                 'is_active' => true,
                 'created_by' => Auth::id(),
             ]);
+
+            $roomId = (int) $fromRoom->id;
+            $bookingId = (int) $booking->id;
+            $guestName = trim((string) ($booking->guest_name ?? ''));
+            $actorId = Auth::id() ? (int) Auth::id() : null;
+            DB::afterCommit(function () use ($roomId, $bookingId, $guestName, $actorId) {
+                PortalNotifications::recordDirtyRoom(
+                    $roomId,
+                    $bookingId,
+                    $guestName !== '' ? $guestName : null,
+                    $actorId,
+                );
+            });
         }
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $fromRoom->id, (int) $toRoom->id], 'room_transfer');

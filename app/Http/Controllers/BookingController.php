@@ -26,7 +26,9 @@ use App\Support\BookingPaymentLedger;
 use App\Support\BookingRoomAvailability;
 use App\Support\BookingRoomTransferService;
 use App\Support\BookingSplitStayRoomMove;
+use App\Support\DoorloomStaySync;
 use App\Support\HousekeepingTurnoverCarryForward;
+use App\Support\PortalNotifications;
 use App\Support\CheckoutInspectionInspector;
 use App\Support\CheckoutInspectionPenaltyAmount;
 use App\Support\ReservationInvoiceViewData;
@@ -539,6 +541,7 @@ class BookingController extends Controller
         Room::whereIn('id', $roomIds->all(), 'and', false)->update(['status' => 'dirty']);
 
         $notify = [];
+        $dirtyRoomIds = [];
         foreach ($booking->segments()->get() as $segment) {
             $rid = (int) $segment->room_id;
             if ($rid <= 0) {
@@ -577,7 +580,19 @@ class BookingController extends Controller
                     'is_active' => true,
                     'created_by' => Auth::id(),
                 ]);
+                $dirtyRoomIds[] = $rid;
             }
+        }
+
+        $guestName = trim((string) ($booking->guest_name ?? ''));
+        $actorId = Auth::id() ? (int) Auth::id() : null;
+        foreach (array_values(array_unique($dirtyRoomIds)) as $dirtyRoomId) {
+            PortalNotifications::recordDirtyRoom(
+                (int) $dirtyRoomId,
+                (int) $booking->id,
+                $guestName !== '' ? $guestName : null,
+                $actorId,
+            );
         }
 
         HousekeepingStateUpdated::dispatchIfEnabled(array_values(array_unique($notify)), 'booking_checkout');
@@ -1362,6 +1377,17 @@ class BookingController extends Controller
 
         HousekeepingStateUpdated::dispatchIfEnabled(array_keys($affectedRoomIds), 'request_inspection');
 
+        $guestName = trim((string) ($booking->guest_name ?? ''));
+        $actorId = Auth::id() ? (int) Auth::id() : null;
+        foreach (array_keys($affectedRoomIds) as $rid) {
+            PortalNotifications::recordCheckoutInspectionRequested(
+                (int) $rid,
+                (int) $booking->id,
+                $guestName !== '' ? $guestName : null,
+                $actorId,
+            );
+        }
+
         return response()->json([
             'message' => 'Inspection requested.',
             'blocks' => collect($createdBlocks)->map(fn($b) => $b->fresh()->load('room.roomType'))->values(),
@@ -1575,6 +1601,10 @@ class BookingController extends Controller
             // normalize to midnight so old semantics stay consistent
             $checkInAt = $checkInAt->copy()->startOfDay();
             $checkOutAt = $checkOutAt->copy()->startOfDay();
+            $doorloomRefusal = DoorloomStaySync::refusalMessage($roomIds, $checkInAt, $checkOutAt);
+            if ($doorloomRefusal) {
+                return response()->json(['message' => $doorloomRefusal], 422);
+            }
         }
 
         // Breakfast count validation
@@ -1845,11 +1875,14 @@ class BookingController extends Controller
             throw $e;
         }
 
+        $doorloom = DoorloomStaySync::syncBookings($bookings);
+
         if ($isGroup) {
             return response()->json($bookings, 201);
         }
 
         $payload = $this->bookingJsonWithGuestIdentityMeta($bookings[0], $guestIdentityUploadMeta ?? []);
+        $payload['doorloom'] = $doorloom;
 
         return response()->json($payload, 201);
     }
@@ -2619,10 +2652,13 @@ class BookingController extends Controller
             }
         }
 
-        return response()->json($this->bookingJsonWithGuestIdentityMeta(
+        $payload = $this->bookingJsonWithGuestIdentityMeta(
             $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']),
             $guestIdentityUploadMeta,
-        ));
+        );
+        $payload['doorloom'] = DoorloomStaySync::syncBooking($booking);
+
+        return response()->json($payload);
     }
 
     /**
@@ -3083,43 +3119,7 @@ class BookingController extends Controller
         // Recalculate total price using rate plan if available (based on the room being extended)
         $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->find($roomId);
         $extraNights = Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
-        $extraCost = 0;
-
-        if ($room?->roomType) {
-            $rt = $room->roomType;
-            $ratePlan = null;
-            if ($booking->rate_plan_id) {
-                $ratePlan = $rt->ratePlans->find($booking->rate_plan_id);
-            }
-            if (! $ratePlan) {
-                $ratePlan = $rt->ratePlans->first(); // Fallback
-            }
-
-            $basePrice = $ratePlan ? $ratePlan->base_price : $rt->base_price;
-            $extraPerNight = SeasonalRoomPricing::extraBedPreTax(
-                $rt,
-                (int) ($booking->adults_count ?? 1),
-                (int) ($booking->children_count ?? 0),
-                is_array($booking->child_ages) ? $booking->child_ages : null,
-                (int) ($booking->extra_beds_count ?? 0),
-            );
-
-            $nightlyRoomCost = $basePrice + $extraPerNight;
-
-            $nightlyRoomCost += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
-                $rt,
-                $ratePlan,
-                (int) ($booking->adults_count ?? 1),
-                (int) ($booking->children_count ?? 0),
-            );
-
-            $subtotalExtension = $nightlyRoomCost * $extraNights;
-            $extraCost = $subtotalExtension;
-
-            if ($rt->tax) {
-                $extraCost += $subtotalExtension * ($rt->tax->rate / 100);
-            }
-        }
+        $extraCost = $this->dayExtensionExtraCost($booking, $room, (int) $extraNights);
         $newTotalPrice = (float) $booking->total_price + $extraCost;
 
         $user = Auth::user();
@@ -3141,7 +3141,141 @@ class BookingController extends Controller
             'total_price' => (float) $lastSegment->total_price + $extraCost,
         ]);
 
-        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']));
+        $doorloom = DoorloomStaySync::syncBooking($booking);
+
+        return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room'])->toArray() + ['doorloom' => $doorloom]);
+    }
+
+    /**
+     * Preview a day-stay extension (same charge as {@see extendReservation}) without saving.
+     */
+    public function previewExtend(Request $request, Booking $booking)
+    {
+        $this->allowReservationEdit();
+
+        if (in_array($booking->status, ['cancelled', 'checked_out'], true)) {
+            return response()->json([
+                'message' => 'Cannot extend a ' . str_replace('_', ' ', $booking->status) . ' reservation.',
+            ], 422);
+        }
+        if (($booking->booking_unit ?? 'day') === 'hour_package') {
+            return response()->json([
+                'message' => 'Use preview extend hours for hourly bookings.',
+            ], 422);
+        }
+
+        $lastSegment = $booking->segments()->orderBy('check_out', 'desc')->first();
+        $anchorCheckOut = $lastSegment?->check_out ?? $booking->check_out;
+        $request->validate([
+            'new_check_out' => 'required|date|after:' . $anchorCheckOut,
+        ]);
+
+        $oldCheckOut = $anchorCheckOut;
+        $newCheckOut = $request->input('new_check_out');
+        $roomId = (int) ($lastSegment?->room_id ?? $booking->room_id);
+        $extraNights = (int) Carbon::parse($oldCheckOut)->diffInDays(Carbon::parse($newCheckOut));
+        $room = Room::with(['roomType.tax', 'roomType.ratePlans'])->find($roomId);
+        $extraCost = $this->dayExtensionExtraCost($booking, $room, $extraNights);
+        $oldTotal = (float) ($booking->total_price ?? 0);
+
+        $conflictMessage = null;
+        $onHold = false;
+        $conflictSegment = BookingSegment::query()
+            ->where('room_id', $roomId)
+            ->where('booking_id', '!=', $booking->id)
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+            ->where('check_in_at', '<', Carbon::parse($newCheckOut)->startOfDay())
+            ->where('check_out_at', '>', Carbon::parse($oldCheckOut)->startOfDay())
+            ->exists();
+        if ($conflictSegment) {
+            $conflictMessage = 'Room conflict for the extra nights — move the overlapping reservation or pick another checkout date.';
+        }
+
+        $holdBlock = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+            ->where('is_active', true)
+            ->where('status', 'on_hold')
+            ->where('start_date', '<', $newCheckOut)
+            ->where('end_date', '>', $oldCheckOut)
+            ->first();
+        if ($holdBlock) {
+            $onHold = true;
+            $conflictMessage = 'Room is on hold for the extra nights.';
+        }
+
+        $maintenanceBlock = RoomStatusBlock::where('room_id', '=', $roomId, 'and')
+            ->where('is_active', true)
+            ->where('status', 'maintenance')
+            ->where('start_date', '<', $newCheckOut)
+            ->where('end_date', '>', $oldCheckOut)
+            ->exists();
+        if ($maintenanceBlock && $conflictMessage === null) {
+            $roomNumber = Room::whereKey($roomId)->value('room_number');
+            $conflictMessage = "Room #{$roomNumber} is under maintenance for the extension dates.";
+        }
+
+        return response()->json([
+            'current_total' => round($oldTotal, 2),
+            'new_total' => round($oldTotal + $extraCost, 2),
+            'delta' => round($extraCost, 2),
+            'extra_nights' => $extraNights,
+            'has_conflict' => $conflictMessage !== null,
+            'on_hold' => $onHold,
+            'conflict_message' => $conflictMessage,
+        ]);
+    }
+
+    /**
+     * Extra inclusive charge for added nights. Same formula as extendReservation.
+     */
+    private function dayExtensionExtraCost(Booking $booking, ?Room $room, int $extraNights): float
+    {
+        if ($extraNights <= 0 || ! $room?->roomType) {
+            return 0.0;
+        }
+
+        $rt = $room->roomType;
+        $ratePlan = null;
+        if ($booking->rate_plan_id) {
+            $ratePlan = $rt->ratePlans->find($booking->rate_plan_id);
+        }
+        // Complimentary upgrade keeps the previous category's plan id. That plan is not on
+        // this room type, so grow the stored room total by its current nightly average
+        // instead of switching to the new category's first plan.
+        if (! $ratePlan && $booking->rate_plan_id) {
+            $checkIn = Carbon::parse($booking->check_in_at ?? $booking->check_in)->startOfDay();
+            $checkOut = Carbon::parse($booking->check_out_at ?? $booking->check_out)->startOfDay();
+            $nights = max(1, (int) $checkIn->diffInDays($checkOut));
+
+            return ((float) ($booking->total_price ?? 0) / $nights) * $extraNights;
+        }
+        if (! $ratePlan) {
+            $ratePlan = $rt->ratePlans->first();
+        }
+
+        $basePrice = $ratePlan ? $ratePlan->base_price : $rt->base_price;
+        $extraPerNight = SeasonalRoomPricing::extraBedPreTax(
+            $rt,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+            is_array($booking->child_ages) ? $booking->child_ages : null,
+            (int) ($booking->extra_beds_count ?? 0),
+        );
+
+        $nightlyRoomCost = $basePrice + $extraPerNight;
+        $nightlyRoomCost += BookingInvoiceRoomStay::nightlyPlanMealsPreTax(
+            $rt,
+            $ratePlan,
+            (int) ($booking->adults_count ?? 1),
+            (int) ($booking->children_count ?? 0),
+        );
+
+        $subtotalExtension = $nightlyRoomCost * $extraNights;
+        $extraCost = $subtotalExtension;
+        if ($rt->tax) {
+            $extraCost += $subtotalExtension * ($rt->tax->rate / 100);
+        }
+
+        return (float) $extraCost;
     }
 
     /**
@@ -3448,9 +3582,12 @@ class BookingController extends Controller
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $lastSegment->room_id], 'early_checkout');
 
+        $fresh = $booking->fresh()->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']);
+
         return response()->json([
             'message' => 'Early checkout applied.',
-            'booking' => $booking->fresh()->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room']),
+            'doorloom' => DoorloomStaySync::syncBooking($fresh),
+            'booking' => $fresh,
             'preview' => $preview,
             'suggest_settle_folio' => $wasCheckedIn,
         ]);
@@ -3962,7 +4099,9 @@ class BookingController extends Controller
             ], 422);
         }
 
-        return response()->json($booking->fresh()->load(['segments.room.roomType', 'creator']));
+        $fresh = $booking->fresh()->load(['segments.room.roomType', 'creator']);
+
+        return response()->json($fresh->toArray() + ['doorloom' => DoorloomStaySync::syncBooking($fresh)]);
     }
 
     public function reservationVoucher(Request $request, Booking $booking)
@@ -4856,6 +4995,7 @@ class BookingController extends Controller
 
         return response()->json([
             'message' => 'Reservation cancelled.',
+            'doorloom' => DoorloomStaySync::syncBooking($booking),
             'booking' => $booking,
             'settlement' => [
                 'cancellation_fee' => $effectiveFee,
@@ -5000,6 +5140,7 @@ class BookingController extends Controller
 
         return response()->json([
             'booking' => $result['booking'],
+            'doorloom' => DoorloomStaySync::syncBooking($result['booking']),
             'transfer' => $result['transfer'],
             'transfers' => BookingRoomTransferService::historyPayload($result['booking']),
         ]);

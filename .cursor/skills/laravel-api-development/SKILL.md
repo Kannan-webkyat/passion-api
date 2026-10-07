@@ -99,3 +99,4 @@ task names; ask if unclear.
 - [ ] Broadcasts use the module's existing timing (deferred HK/folio, immediate POS outlet)
 - [ ] Test suite: no new failures vs baseline
 - [ ] Open questions about possibly-intentional behavior listed for the user
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

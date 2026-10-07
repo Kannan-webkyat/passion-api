@@ -161,11 +161,18 @@ trait MigratesHousekeepingTestSchema
                 $table->unsignedBigInteger('started_by')->nullable();
                 $table->unsignedBigInteger('completed_by')->nullable();
                 $table->unsignedBigInteger('assigned_to')->nullable();
+                $table->timestamp('front_desk_notified_at')->nullable();
                 $table->text('remarks')->nullable();
                 $table->text('maintenance_note')->nullable();
                 $table->json('checklist_done')->nullable();
                 $table->timestamps();
                 $table->unique(['room_id', 'service_date']);
+            });
+        }
+
+        if (Schema::hasTable('daily_room_cleanings') && ! Schema::hasColumn('daily_room_cleanings', 'front_desk_notified_at')) {
+            Schema::table('daily_room_cleanings', function (Blueprint $table) {
+                $table->timestamp('front_desk_notified_at')->nullable();
             });
         }
 

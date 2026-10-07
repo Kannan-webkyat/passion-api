@@ -7,6 +7,7 @@ use App\Events\HousekeepingStateUpdated;
 use App\Models\BookingSegment;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
+use App\Support\PortalNotifications;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
@@ -192,6 +193,15 @@ class RoomStatusBlockController extends Controller
         ]);
 
         $this->syncRoomStatusFromBlocks((int) $block->room_id);
+
+        if ($validated['status'] === 'dirty') {
+            PortalNotifications::recordDirtyRoom(
+                (int) $block->room_id,
+                null,
+                null,
+                $userId ? (int) $userId : null,
+            );
+        }
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $block->room_id], 'room_status_block_store');
 

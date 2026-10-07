@@ -380,7 +380,7 @@ Status codes seen: 200 (default), 201 (create), 204 (`response()->json(null, 204
 - Accounting: `chart_of_accounts`, `journal_entries` (unique-ish by `source_type` + `source_id` when `status=posted`), `journal_lines`, `vendor_payments`, `inventory_cost_layers`, `inventory_cost_audit_log`.
 
 Table groups (from `Schema::create`):
-- **Front office**: `room_types`, `room_type_seasons`, `rate_plans`, `rooms`, `bookings`, `booking_groups`, `booking_segments`, `booking_payments`, `booking_extra_charges`, `booking_room_transfers`, `room_status_blocks`.
+- **Front office**: `room_types`, `room_type_seasons`, `rate_plans`, `rooms`, `bookings`, `booking_groups`, `booking_segments`, `booking_payments`, `booking_extra_charges`, `booking_room_transfers`, `room_status_blocks`, `doorloom_integrations`, `doorloom_nights`, `doorloom_event_cursors`, `doorloom_booking_links`.
 - **Housekeeping**: `housekeeping_jobs`, `housekeeping_job_lines`, `daily_room_cleanings`, `daily_room_cleaning_consumptions`, `room_cleaning_releases`, `room_cleaning_release_audits`, `housekeeping_checklist_items`, `service_checklist_items`, `laundry_requests`, `laundry_request_lines`, `room_par_templates`, `room_par_template_lines`.
 - **F&B / POS**: `restaurant_masters`, `restaurant_tables`, `table_categories`, `table_reservations`, `menu_categories`, `menu_sub_categories`, `menu_items`, `menu_item_variants`, `restaurant_menu_items`, `restaurant_menu_item_variants`, `combos`, `combo_items`, `restaurant_combos`, `dietary_types`, `menu_item_stocks`, `pos_orders`, `pos_order_items`, `pos_payments`, `pos_order_refunds`, `pos_payment_amendments`, `pos_void_waste`, `pos_day_closings`, `pos_day_closing_archives`, `restaurant_user`, `outlets` (unused).
 - **Inventory / procurement**: `inventory_categories`, `inventory_items`, `inventory_uoms`, `inventory_taxes`, `inventory_locations`, `inventory_item_locations`, `inventory_transactions`, `vendors`, `purchase_orders`, `purchase_order_items`, `grns`, `grn_items`, `grn_attachments`, `grn_audit_logs`, `store_requests`, `store_request_items`, `stock_returns`, `procurement_requisitions`, `procurement_requisition_items`, `procurement_requisition_item_vendors`, `recipes`, `recipe_ingredients`, `production_logs`, `cess_slabs`.
@@ -477,7 +477,8 @@ No activity-log package. `AdminDashboardController::auditEventCount24h()` approx
 | PhpSpreadsheet | XLSX exports (excise bar report, POS reports) |
 | File storage | `GuestIdentityImageService` stores guest ID images/PDFs on disk `config('guest_identity.disk')` (default `public`, dir `identities`), compresses large images (GD, max dimension/JPEG quality from config); restaurant logos and receipt logo via `Storage` |
 | Statutory (Kerala / India) | In-house logic only: `KeralaComplianceService` (GSTR-1 / KVAT summaries + CSV export), `KgstBarTotPolicy`, `BarTurnoverTaxService`, `LiquorTaxValidator`, `CessSlabResolver`, `BevcoPoTaxCorrection` |
-| HTTP APIs | **None** — no `Http::` client, Guzzle or curl; no payment gateway, channel manager, OTA, SMS or email provider integration |
+| Doorloom Brand Integration API (v2026-09) | `App\Support\DoorloomClient` calls `config('services.doorloom.base_url')` only when an API key is saved and the integration is enabled. Public `POST /api/doorloom/webhook` verifies `X-Doorloom-Signature` and `DoorloomAdapter` writes the online calendar. Walk-in `rate_plans` are not updated from Doorloom. See `docs/DOORLOOM.md`. |
+| Other HTTP APIs | No payment gateway, SMS, or email provider client |
 
 ## 30. Multi-hotel / property / tenant isolation
 

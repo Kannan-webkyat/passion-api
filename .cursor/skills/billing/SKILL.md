@@ -95,3 +95,4 @@ description: Changes room folio billing and payments in passion-api — BookingP
 - [ ] Journals posted in the same transaction as the state change; idempotent source key
 - [ ] Bill-total change reviewed across checkout, payments, invoice and poster
 - [ ] Response includes `totals`; status codes unchanged (201 on record, 503 ledger missing)
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

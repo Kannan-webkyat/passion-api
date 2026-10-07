@@ -89,3 +89,4 @@ description: Changes guest check-in, pre-checkout inspection, check-out, early c
 - [ ] One-day `dirty` block created on each segment's checkout date
 - [ ] Refunds recorded through the ledger with `allow_closed`
 - [ ] Broadcast after commit; response shape unchanged
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

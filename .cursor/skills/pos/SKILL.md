@@ -82,3 +82,4 @@ description: Changes POS / F&B behavior in passion-api — orders, items, KOT/BO
 - [ ] Journal posted in the same transaction using the sibling's poster method
 - [ ] `room_charge` guard kept; booking `extra_charges` updated; folio broadcast deferred
 - [ ] `broadcastPosOutletUpdate()` fired; response shape unchanged
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

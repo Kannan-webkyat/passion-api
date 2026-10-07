@@ -11,6 +11,7 @@ use App\Models\BookingExtraCharge;
 use App\Models\BookingSegment;
 use App\Models\LaundryRequest;
 use App\Models\LaundryRequestLine;
+use App\Support\PortalNotifications;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\App;
@@ -293,6 +294,12 @@ class LaundryRequestController extends Controller
 
         $lr->load(['room:id,room_number', 'booking:id,first_name,last_name', 'lines']);
         HousekeepingStateUpdated::dispatchIfEnabled([$roomId], 'laundry_request_created');
+        PortalNotifications::recordLaundryRequested(
+            $roomId,
+            (int) $booking->id,
+            $guestName,
+            Auth::id() ? (int) Auth::id() : null,
+        );
 
         return response()->json($this->formatRequest($lr->fresh(['lines'])), 201);
     }
@@ -411,6 +418,28 @@ class LaundryRequestController extends Controller
             'lines.*.unit_price' => 'required|numeric|min:0',
         ]);
 
+        $collected = $this->collectedItemCounts($laundryRequest->pickup_items);
+        if ($collected !== []) {
+            $used = [];
+            foreach ($validated['lines'] as $row) {
+                $key = mb_strtolower(trim((string) $row['item_type']));
+                if (! isset($collected[$key])) {
+                    return response()->json([
+                        'message' => 'Choose an item from the collection.',
+                    ], 422);
+                }
+                $used[$key] = ($used[$key] ?? 0) + (float) $row['qty'];
+                if ($used[$key] > $collected[$key]['qty'] + 0.001) {
+                    $label = $collected[$key]['label'];
+                    $count = $this->formatCollectedQty($collected[$key]['qty']);
+
+                    return response()->json([
+                        'message' => $label.' was collected as '.$count.'. The charge quantity is higher.',
+                    ], 422);
+                }
+            }
+        }
+
         DB::beginTransaction();
         try {
             $laundryRequest->lines()->delete();
@@ -420,9 +449,14 @@ class LaundryRequestController extends Controller
                 $qty = round((float) $row['qty'], 2);
                 $unit = round((float) $row['unit_price'], 2);
                 $lineTotal = round($qty * $unit, 2);
+                $itemType = trim((string) $row['item_type']);
+                $collectedKey = mb_strtolower($itemType);
+                if (isset($collected[$collectedKey])) {
+                    $itemType = $collected[$collectedKey]['label'];
+                }
                 LaundryRequestLine::create([
                     'laundry_request_id' => $laundryRequest->id,
-                    'item_type' => trim((string) $row['item_type']),
+                    'item_type' => $itemType,
                     'service_type' => (string) $row['service_type'],
                     'qty' => $qty,
                     'unit_price' => $unit,
@@ -496,6 +530,14 @@ class LaundryRequestController extends Controller
 
         $laundryRequest->load(['room:id,room_number', 'booking:id,first_name,last_name', 'lines']);
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $laundryRequest->room_id], 'laundry_status');
+        if ($next === LaundryRequest::STATUS_READY) {
+            PortalNotifications::recordLaundryReady(
+                (int) $laundryRequest->room_id,
+                $laundryRequest->booking_id ? (int) $laundryRequest->booking_id : null,
+                (string) ($laundryRequest->guest_name ?? ''),
+                Auth::id() ? (int) Auth::id() : null,
+            );
+        }
 
         return response()->json($this->formatRequest($laundryRequest));
     }
@@ -587,6 +629,12 @@ class LaundryRequestController extends Controller
         $booking->refresh();
         $this->broadcastCharges($booking, $total);
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $laundryRequest->room_id], 'laundry_posted');
+        PortalNotifications::recordLaundryPosted(
+            (int) $laundryRequest->room_id,
+            (int) $booking->id,
+            (string) ($laundryRequest->guest_name ?? ''),
+            Auth::id() ? (int) Auth::id() : null,
+        );
 
         $laundryRequest->load(['room:id,room_number', 'booking:id,first_name,last_name', 'lines']);
 
@@ -597,5 +645,44 @@ class LaundryRequestController extends Controller
             'extra_charges' => round((float) ($booking->extra_charges ?? 0), 2),
             'posted_amount' => $total,
         ]);
+    }
+
+    /**
+     * @return array<string, array{label: string, qty: float}>
+     */
+    private function collectedItemCounts(mixed $pickupItems): array
+    {
+        if (! is_array($pickupItems)) {
+            return [];
+        }
+
+        $counts = [];
+        foreach ($pickupItems as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $label = trim((string) ($item['label'] ?? ''));
+            if ($label === '') {
+                continue;
+            }
+            $key = mb_strtolower($label);
+            $qty = (float) ($item['qty'] ?? 0);
+            if (! isset($counts[$key])) {
+                $counts[$key] = ['label' => $label, 'qty' => 0.0];
+            }
+            $counts[$key]['qty'] += $qty;
+        }
+
+        return $counts;
+    }
+
+    private function formatCollectedQty(float $qty): string
+    {
+        $rounded = round($qty, 2);
+        if (abs($rounded - round($rounded)) < 0.001) {
+            return (string) (int) round($rounded);
+        }
+
+        return rtrim(rtrim(number_format($rounded, 2, '.', ''), '0'), '.');
     }
 }

@@ -93,3 +93,4 @@ description: Changes reservation behavior in passion-api — booking create (sin
 - [ ] `rooms.status` updated for every room across segments; broadcast fired after commit
 - [ ] Response shape unchanged; frontend fields checked
 - [ ] Known gaps (`splitStay`, hard `destroy` cascading `booking_payments`, client-supplied single-room price) not silently changed
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

@@ -12,6 +12,7 @@ use App\Models\RoomCleaningReleaseAudit;
 use App\Models\RoomStatusBlock;
 use App\Support\CleaningReleasePriority;
 use App\Support\CleaningServiceClassification;
+use App\Support\PortalNotifications;
 use App\Services\RoomCleaningAvailabilityService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -103,6 +104,29 @@ class RoomCleaningReleaseController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
+        $bookingId = ! empty($validated['booking_id']) ? (int) $validated['booking_id'] : null;
+        $serviceDate = $release->release_date?->toDateString()
+            ?? Carbon::parse($validated['release_date'])->toDateString();
+        $actorId = Auth::id() ? (int) Auth::id() : null;
+        $linkedBookingId = $release->booking_id ? (int) $release->booking_id : $bookingId;
+
+        PortalNotifications::recordDailyCleaningReleased(
+            (int) $release->room_id,
+            $linkedBookingId,
+            $serviceDate,
+            $actorId,
+        );
+
+        if ($release->service_type === CleaningServiceClassification::TYPE_OTHER) {
+            PortalNotifications::recordReserviceRequested(
+                (int) $release->room_id,
+                $linkedBookingId,
+                $serviceDate,
+                $release->service_subtype,
+                $actorId,
+            );
+        }
+
         return response()->json($release, 201);
     }
 
@@ -151,6 +175,13 @@ class RoomCleaningReleaseController extends Controller
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
+        PortalNotifications::recordDailyCleaningReleased(
+            (int) $release->room_id,
+            $release->booking_id ? (int) $release->booking_id : null,
+            $release->release_date?->toDateString() ?? Carbon::parse($validated['release_date'])->toDateString(),
+            Auth::id() ? (int) Auth::id() : null,
+        );
+
         return response()->json($release);
     }
 
@@ -194,6 +225,15 @@ class RoomCleaningReleaseController extends Controller
             $roomCleaningRelease,
             $validated['remarks'] ?? null,
         );
+
+        if ($roomCleaningRelease->service_type === CleaningServiceClassification::TYPE_OTHER) {
+            PortalNotifications::recordReserviceApproved(
+                (int) $roomCleaningRelease->room_id,
+                $roomCleaningRelease->booking_id ? (int) $roomCleaningRelease->booking_id : null,
+                $roomCleaningRelease->release_date?->toDateString(),
+                Auth::id() ? (int) Auth::id() : null,
+            );
+        }
 
         HousekeepingStateUpdated::dispatchIfEnabled(
             [(int) $roomCleaningRelease->room_id],

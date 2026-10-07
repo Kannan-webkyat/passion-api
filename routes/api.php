@@ -27,6 +27,7 @@ use App\Http\Controllers\MenuAvailabilityController;
 use App\Http\Controllers\MenuPricingController;
 use App\Http\Controllers\MenuSubCategoryController;
 use App\Http\Controllers\PaymentMethodController;
+use App\Http\Controllers\PortalNotificationController;
 use App\Http\Controllers\PosController;
 use App\Http\Controllers\ProcurementRequisitionController;
 use App\Http\Controllers\PurchaseOrderController;
@@ -45,15 +46,22 @@ use App\Http\Controllers\StoreRequestController;
 use App\Http\Controllers\TableCategoryController;
 use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
+use App\Http\Controllers\DoorloomIntegrationController;
+use App\Http\Controllers\DoorloomWebhookController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\VendorController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
+Route::post('/doorloom/webhook', [DoorloomWebhookController::class, 'store']);
 
 Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
+
+    Route::get('notifications', [PortalNotificationController::class, 'index']);
+    Route::post('notifications/read-all', [PortalNotificationController::class, 'markAllRead']);
+    Route::post('notifications/{notification}/read', [PortalNotificationController::class, 'markRead']);
 
     // Room Types
     Route::apiResource('room-types', RoomTypeController::class);
@@ -162,6 +170,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('bookings/{booking}/early-checkin', [BookingController::class, 'earlyCheckin']);
     Route::post('bookings/{booking}/late-checkout', [BookingController::class, 'lateCheckout']);
     Route::post('bookings/{booking}/extend', [BookingController::class, 'extendReservation']);
+    Route::post('bookings/{booking}/preview-extend', [BookingController::class, 'previewExtend']);
     Route::post('bookings/{booking}/preview-early-checkout', [BookingController::class, 'previewEarlyCheckout']);
     Route::post('bookings/{booking}/early-checkout', [BookingController::class, 'applyEarlyCheckout']);
     Route::post('bookings/{booking}/preview-change-check-in', [BookingController::class, 'previewChangeCheckIn']);
@@ -211,6 +220,13 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::put('settings/inventory-costing', [SettingController::class, 'updateInventoryCosting']);
     Route::get('settings/bom-deduction', [SettingController::class, 'bomDeduction']);
     Route::put('settings/bom-deduction', [SettingController::class, 'updateBomDeduction']);
+
+    Route::get('doorloom', [DoorloomIntegrationController::class, 'show']);
+    Route::put('doorloom', [DoorloomIntegrationController::class, 'update']);
+    Route::post('doorloom/listings', [DoorloomIntegrationController::class, 'pushListings']);
+    Route::post('doorloom/catch-up', [DoorloomIntegrationController::class, 'catchUp']);
+    Route::post('doorloom/sync', [DoorloomIntegrationController::class, 'fullSync']);
+    Route::get('doorloom/calendar', [DoorloomIntegrationController::class, 'calendar']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);

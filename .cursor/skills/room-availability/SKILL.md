@@ -72,3 +72,4 @@ description: Uses or changes room availability / sellability rules in passion-ap
 - [ ] Creation path uses `withRoomLocks()`
 - [ ] Availability not derived from `rooms.status`
 - [ ] `BookingRoomAvailabilityTest` passes
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

@@ -97,3 +97,4 @@ description: Changes housekeeping workflows in passion-api — turnover cleaning
 - [ ] Broadcast after commit with snake_case reason
 - [ ] Response shape matches siblings (e.g. block with `room.roomType`, `assignedUser:id,name`)
 - [ ] HK tests pass vs baseline
+- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)

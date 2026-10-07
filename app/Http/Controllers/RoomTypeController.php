@@ -291,7 +291,10 @@ class RoomTypeController extends Controller
             }
         }
 
-        return response()->json($roomType->load(['tax', 'ratePlans', 'seasons']));
+        $fresh = $roomType->fresh()->load(['tax', 'ratePlans', 'seasons']);
+        \App\Support\DoorloomStaySync::updateListingIfLinked($fresh);
+
+        return response()->json($fresh);
     }
 
     public function destroy(RoomType $roomType)

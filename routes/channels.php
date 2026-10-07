@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\RestaurantMaster;
+use App\Support\PortalNotifications;
 use Illuminate\Support\Facades\Broadcast;
 
 Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
@@ -33,13 +34,38 @@ Broadcast::channel('pos.restaurant.{restaurantId}', function ($user, $restaurant
     return false;
 });
 
-/** Housekeeping daily cleaning → front desk toast (occupied room service complete). */
+/** Header notification inbox. Same permission split as PortalNotifications::audiencesFor(). */
+Broadcast::channel('portal.notifications', function ($user) {
+    return PortalNotifications::userCanView($user);
+});
+
+/** Room chart and housekeeping boards. Event: `.housekeeping.state_updated`. */
 Broadcast::channel('reception.housekeeping', function ($user) {
     if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
         return true;
     }
-    if (method_exists($user, 'can') && ($user->can('view-rooms') || $user->can('reservation'))) {
-        return true;
+    if (! method_exists($user, 'can')) {
+        return false;
+    }
+
+    foreach ([
+        'view-rooms',
+        'reservation',
+        'reservation-view',
+        'housekeeping-dirty-rooms',
+        'housekeeping-checkout-inspection',
+        'housekeeping-cleaning-tasks',
+        'housekeeping-daily-room-cleaning',
+        'housekeeping-clean-rooms',
+        'housekeeping-supervisor-inspection',
+        'housekeeping-laundry',
+        'housekeeping-room-stock',
+        'housekeeping-checklist-master',
+        'housekeeping-cleaning-availability',
+    ] as $permission) {
+        if ($user->can($permission)) {
+            return true;
+        }
     }
 
     return false;

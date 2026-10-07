@@ -46,6 +46,7 @@ class RoomType extends Model
         'washrooms',
         'weekday_price',
         'weekend_price',
+        'doorloom_property_id',
         'extra_bed_capacity',
         'child_sharing_limit',
         'bed_config',

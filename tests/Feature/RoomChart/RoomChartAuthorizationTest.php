@@ -28,6 +28,7 @@ class RoomChartAuthorizationTest extends RoomChartTestCase
             ['POST', "/api/bookings/{$id}/early-checkin"],
             ['POST', "/api/bookings/{$id}/late-checkout"],
             ['POST', "/api/bookings/{$id}/extend"],
+            ['POST', "/api/bookings/{$id}/preview-extend"],
             ['POST', "/api/bookings/{$id}/extend-hours"],
             ['POST', "/api/bookings/{$id}/preview-extend-hours"],
             ['POST', "/api/bookings/{$id}/preview-early-checkout"],

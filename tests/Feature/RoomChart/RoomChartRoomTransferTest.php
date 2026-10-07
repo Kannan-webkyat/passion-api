@@ -42,6 +42,37 @@ class RoomChartRoomTransferTest extends RoomChartTestCase
         $this->assertSame((int) $booking->room_id, (int) $booking->fresh()->room_id);
     }
 
+    public function test_apply_new_category_uses_the_same_meal_plan_on_the_new_type(): void
+    {
+        $this->actingWith(['reservation-edit']);
+        $fullBoard = $this->makeRatePlan($this->roomType, [
+            'name' => 'All meals included',
+            'meal_plan_type' => 'full_board',
+            'base_price' => 2000,
+        ]);
+        $suite = $this->makeRoomType([
+            'name' => 'Junior Suite',
+            'breakfast_price' => 0,
+            'adult_meal_price' => 400,
+            'child_meal_price' => 0,
+        ]);
+        $this->makeRatePlan($suite, ['name' => 'Only stay', 'meal_plan_type' => 'room_only', 'base_price' => 3000]);
+        $allMeals = $this->makeRatePlan($suite, ['name' => 'All meals included', 'meal_plan_type' => 'full_board', 'base_price' => 3000]);
+        $booking = $this->makeBooking($this->makeRoom('101'), $this->day(1), $this->day(3), ['rate_plan_id' => $fullBoard->id]);
+        $target = $this->makeRoom('301', $suite);
+
+        // 2 nights × (₹3,000 room + 2 adults × ₹400 × 2 meals) × 12% GST.
+        $this->postJson("/api/bookings/{$booking->id}/preview-room-transfer", $this->payload($target->id, ['rate_mode' => 'apply_new_category']))
+            ->assertOk()
+            ->assertJson(['old_total' => 4480, 'new_total' => 10304, 'delta' => 5824]);
+
+        $this->postJson("/api/bookings/{$booking->id}/room-transfer", $this->payload($target->id, ['rate_mode' => 'apply_new_category']))
+            ->assertOk();
+
+        $this->assertSame((int) $allMeals->id, (int) $booking->fresh()->rate_plan_id);
+        $this->assertSame(10304.0, (float) $booking->fresh()->total_price);
+    }
+
     public function test_pre_arrival_swap_moves_segment_in_place_and_records_history(): void
     {
         $this->actingWith(['reservation-edit']);

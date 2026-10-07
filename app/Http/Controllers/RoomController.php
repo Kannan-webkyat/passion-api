@@ -51,6 +51,10 @@ class RoomController extends Controller
         ]);
 
         $room = Room::create($validated);
+        $type = $room->roomType;
+        if ($type) {
+            \App\Support\DoorloomStaySync::updateListingIfLinked($type);
+        }
 
         return response()->json($room, 201);
     }
@@ -87,6 +91,10 @@ class RoomController extends Controller
         ]);
 
         $room->update($validated);
+        $type = $room->roomType()->first();
+        if ($type) {
+            \App\Support\DoorloomStaySync::updateListingIfLinked($type);
+        }
 
         return response()->json($room);
     }
@@ -94,8 +102,12 @@ class RoomController extends Controller
     public function destroy(Room $room)
     {
         $this->authorizePermissions(['rooms-delete']);
+        $type = $room->roomType()->first();
         try {
             Room::destroy($room->id);
+            if ($type) {
+                \App\Support\DoorloomStaySync::updateListingIfLinked($type);
+            }
 
             return response()->json(null, 204);
         } catch (\Illuminate\Database\QueryException $e) {

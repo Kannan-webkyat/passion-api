@@ -19,6 +19,7 @@ class DailyRoomCleaningDeskNotify implements ShouldBroadcastNow
         public ?string $guestName,
         public string $serviceDate,
         public string $message,
+        public ?int $notificationId = null,
     ) {}
 
     /**
@@ -46,6 +47,7 @@ class DailyRoomCleaningDeskNotify implements ShouldBroadcastNow
             'guest_name' => $this->guestName,
             'service_date' => $this->serviceDate,
             'message' => $this->message,
+            'notification_id' => $this->notificationId,
         ];
     }
 }
