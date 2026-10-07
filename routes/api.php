@@ -46,6 +46,8 @@ use App\Http\Controllers\StoreRequestController;
 use App\Http\Controllers\TableCategoryController;
 use App\Http\Controllers\TableController;
 use App\Http\Controllers\TableReservationController;
+use App\Http\Controllers\AiosellIntegrationController;
+use App\Http\Controllers\AiosellWebhookController;
 use App\Http\Controllers\DoorloomIntegrationController;
 use App\Http\Controllers\DoorloomWebhookController;
 use App\Http\Controllers\UserController;
@@ -54,6 +56,8 @@ use Illuminate\Support\Facades\Route;
 
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/doorloom/webhook', [DoorloomWebhookController::class, 'store']);
+Route::post('/aiosell/webhook', [AiosellWebhookController::class, 'reservation']);
+Route::post('/aiosell/messages', [AiosellWebhookController::class, 'message']);
 
 Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
@@ -227,6 +231,17 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('doorloom/catch-up', [DoorloomIntegrationController::class, 'catchUp']);
     Route::post('doorloom/sync', [DoorloomIntegrationController::class, 'fullSync']);
     Route::get('doorloom/calendar', [DoorloomIntegrationController::class, 'calendar']);
+
+    Route::get('aiosell', [AiosellIntegrationController::class, 'show']);
+    Route::put('aiosell', [AiosellIntegrationController::class, 'update']);
+    Route::post('aiosell/mapping', [AiosellIntegrationController::class, 'loadMapping']);
+    Route::post('aiosell/push', [AiosellIntegrationController::class, 'pushNow']);
+    Route::post('aiosell/catch-up', [AiosellIntegrationController::class, 'catchUp']);
+    Route::post('aiosell/restrictions', [AiosellIntegrationController::class, 'restrictions']);
+    Route::post('aiosell/multiplier', [AiosellIntegrationController::class, 'multiplier']);
+    Route::get('aiosell/bookings/{booking}/messages', [AiosellIntegrationController::class, 'messages']);
+    Route::post('aiosell/bookings/{booking}/messages', [AiosellIntegrationController::class, 'reply']);
+    Route::post('aiosell/bookings/{booking}/no-show', [AiosellIntegrationController::class, 'noShow']);
 
     // F&B Module (Table Master)
     Route::apiResource('table-categories', TableCategoryController::class);

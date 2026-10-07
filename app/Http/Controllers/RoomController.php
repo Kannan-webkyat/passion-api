@@ -53,7 +53,7 @@ class RoomController extends Controller
         $room = Room::create($validated);
         $type = $room->roomType;
         if ($type) {
-            \App\Support\DoorloomStaySync::updateListingIfLinked($type);
+            \App\Support\HotelApiSync::afterRoomType($type);
         }
 
         return response()->json($room, 201);
@@ -93,7 +93,7 @@ class RoomController extends Controller
         $room->update($validated);
         $type = $room->roomType()->first();
         if ($type) {
-            \App\Support\DoorloomStaySync::updateListingIfLinked($type);
+            \App\Support\HotelApiSync::afterRoomType($type);
         }
 
         return response()->json($room);
@@ -106,7 +106,7 @@ class RoomController extends Controller
         try {
             Room::destroy($room->id);
             if ($type) {
-                \App\Support\DoorloomStaySync::updateListingIfLinked($type);
+                \App\Support\HotelApiSync::afterRoomType($type);
             }
 
             return response()->json(null, 204);

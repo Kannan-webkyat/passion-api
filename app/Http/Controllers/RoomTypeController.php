@@ -292,7 +292,7 @@ class RoomTypeController extends Controller
         }
 
         $fresh = $roomType->fresh()->load(['tax', 'ratePlans', 'seasons']);
-        \App\Support\DoorloomStaySync::updateListingIfLinked($fresh);
+        \App\Support\HotelApiSync::afterRoomType($fresh);
 
         return response()->json($fresh);
     }

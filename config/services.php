@@ -39,6 +39,10 @@ return [
         'base_url' => env('DOORLOOM_API_URL', 'https://doorloom.com/api/integrations/v1'),
     ],
 
+    'aiosell' => [
+        'base_url' => env('AIOSELL_API_URL', 'https://live.aiosell.com/api/v2/cm'),
+    ],
+
     'qz' => [
         'private_key_path' => env('QZ_PRIVATE_KEY_PATH'),
         'certificate_path' => env('QZ_CERTIFICATE_PATH'),

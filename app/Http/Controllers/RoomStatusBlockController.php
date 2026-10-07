@@ -7,6 +7,7 @@ use App\Events\HousekeepingStateUpdated;
 use App\Models\BookingSegment;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
+use App\Support\HotelApiSync;
 use App\Support\PortalNotifications;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -204,6 +205,7 @@ class RoomStatusBlockController extends Controller
         }
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $block->room_id], 'room_status_block_store');
+        HotelApiSync::afterRoomBlock((int) $block->room_id);
 
         return response()->json($block->load('room'), 201);
     }
@@ -283,6 +285,7 @@ class RoomStatusBlockController extends Controller
         );
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'room_status_block_update');
+        HotelApiSync::afterRoomBlock((int) $roomStatusBlock->room_id);
 
         return response()->json($roomStatusBlock->load(['room.roomType', 'creator:id,name']));
     }
@@ -297,6 +300,7 @@ class RoomStatusBlockController extends Controller
         $this->syncRoomStatusFromBlocks((int) $roomId, [$releasedStatus]);
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomId], 'room_status_block_destroy');
+        HotelApiSync::afterRoomBlock((int) $roomId);
 
         return response()->json(null, 204);
     }

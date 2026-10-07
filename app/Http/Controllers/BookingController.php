@@ -27,6 +27,7 @@ use App\Support\BookingRoomAvailability;
 use App\Support\BookingRoomTransferService;
 use App\Support\BookingSplitStayRoomMove;
 use App\Support\DoorloomStaySync;
+use App\Support\HotelApiSync;
 use App\Support\HousekeepingTurnoverCarryForward;
 use App\Support\PortalNotifications;
 use App\Support\CheckoutInspectionInspector;
@@ -1875,7 +1876,7 @@ class BookingController extends Controller
             throw $e;
         }
 
-        $doorloom = DoorloomStaySync::syncBookings($bookings);
+        $doorloom = HotelApiSync::syncBookings($bookings);
 
         if ($isGroup) {
             return response()->json($bookings, 201);
@@ -2656,7 +2657,7 @@ class BookingController extends Controller
             $booking->load(['room.roomType.tax', 'creator', 'bookingGroup']),
             $guestIdentityUploadMeta,
         );
-        $payload['doorloom'] = DoorloomStaySync::syncBooking($booking);
+        $payload['doorloom'] = HotelApiSync::syncBooking($booking);
 
         return response()->json($payload);
     }
@@ -3141,7 +3142,7 @@ class BookingController extends Controller
             'total_price' => (float) $lastSegment->total_price + $extraCost,
         ]);
 
-        $doorloom = DoorloomStaySync::syncBooking($booking);
+        $doorloom = HotelApiSync::syncBooking($booking);
 
         return response()->json($booking->load(['room.roomType.tax', 'creator', 'bookingGroup', 'segments.room'])->toArray() + ['doorloom' => $doorloom]);
     }
@@ -3586,7 +3587,7 @@ class BookingController extends Controller
 
         return response()->json([
             'message' => 'Early checkout applied.',
-            'doorloom' => DoorloomStaySync::syncBooking($fresh),
+            'doorloom' => HotelApiSync::syncBooking($fresh),
             'booking' => $fresh,
             'preview' => $preview,
             'suggest_settle_folio' => $wasCheckedIn,
@@ -4101,7 +4102,7 @@ class BookingController extends Controller
 
         $fresh = $booking->fresh()->load(['segments.room.roomType', 'creator']);
 
-        return response()->json($fresh->toArray() + ['doorloom' => DoorloomStaySync::syncBooking($fresh)]);
+        return response()->json($fresh->toArray() + ['doorloom' => HotelApiSync::syncBooking($fresh)]);
     }
 
     public function reservationVoucher(Request $request, Booking $booking)
@@ -4995,7 +4996,7 @@ class BookingController extends Controller
 
         return response()->json([
             'message' => 'Reservation cancelled.',
-            'doorloom' => DoorloomStaySync::syncBooking($booking),
+            'doorloom' => HotelApiSync::syncBooking($booking),
             'booking' => $booking,
             'settlement' => [
                 'cancellation_fee' => $effectiveFee,
@@ -5140,7 +5141,7 @@ class BookingController extends Controller
 
         return response()->json([
             'booking' => $result['booking'],
-            'doorloom' => DoorloomStaySync::syncBooking($result['booking']),
+            'doorloom' => HotelApiSync::syncBooking($result['booking']),
             'transfer' => $result['transfer'],
             'transfers' => BookingRoomTransferService::historyPayload($result['booking']),
         ]);

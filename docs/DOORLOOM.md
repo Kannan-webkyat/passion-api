@@ -1,6 +1,6 @@
 # Doorloom — Passion Hotel PMS
 
-Doorloom is the online listing and nightly calendar. Passion stays the hotel system for walk-in rooms, walk-in prices, meals, seasons, and hourly packages.
+Doorloom is the online listing and nightly calendar. Passion stays the hotel system for walk-in rooms, walk-in prices, meals, seasons, and hourly packages. AioSell can be on at the same time. AioSell’s free-room count includes stays already in Passion, including stays that came from Doorloom.
 
 Base URL: `https://doorloom.com/api/integrations/v1` ([developer overview](https://doorloom.com/developers)). Doorloom staff issue the API key and the webhook secret. Until those are saved and the connection is turned on, the screens are there and every outbound call is skipped.
 
@@ -29,7 +29,7 @@ Meal codes sent with a stay: only stay `EP`, breakfast `CP`, breakfast + 1 meal 
 
 Settings → Integrations, for someone who can `manage-settings` (the Admin role is included).
 
-The section lists hotel APIs in one panel. Doorloom is the hotel API on that list. Each row shows a small Doorloom logo and the API name on the left. On the right are a Settings button, with a settings icon, and an enable toggle. The logo appears only on that list row. The open settings panel groups Credentials, Listing address, Webhook, and Room mapping. Save sits with Send room types, Catch up, and Full sync.
+The section lists hotel APIs in one panel. Doorloom is one hotel API on that list. Each row shows a small logo and the API name on the left. On the right are a Settings button, with a settings icon, and an enable toggle. The logo appears only on that list row. The open settings panel groups Credentials, Listing address, Webhook, and Room mapping. Save sits with Send room types, Catch up, and Full sync.
 
 Clicking Settings opens the Doorloom settings under the list. Clicking Settings again closes them.
 
