@@ -11,6 +11,8 @@ description: Uses or changes room availability / sellability rules in passion-ap
 - Adding a new path that places a guest in a room.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. Read `app/Support/BookingRoomAvailability.php` fully (≈260 lines).
 2. Read every availability variant you may affect:
    - `BookingController::store()` (pre-check + `withRoomLocks` re-check), `update()` (date/room change, `withRoomLocks` re-check)
@@ -73,4 +75,5 @@ description: Uses or changes room availability / sellability rules in passion-ap
 - [ ] Creation path uses `withRoomLocks()`
 - [ ] Availability not derived from `rooms.status`
 - [ ] `BookingRoomAvailabilityTest` passes
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

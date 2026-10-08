@@ -12,6 +12,8 @@ description: Changes reservation behavior in passion-api — booking create (sin
   for money use `billing`.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. `PASSION_LARAVEL_ARCHITECTURE.md` §32 (reservations) and §33 (availability).
 2. Read the relevant `BookingController` method: `store()`, `update()`, `storeGroup()`,
    `extendReservation()`, `extendHourlyReservation()`, `applyEarlyCheckout()`, `earlyCheckin()`,
@@ -93,4 +95,5 @@ description: Changes reservation behavior in passion-api — booking create (sin
 - [ ] `rooms.status` updated for every room across segments; broadcast fired after commit
 - [ ] Response shape unchanged; frontend fields checked
 - [ ] Known gaps (post-transaction side effects in `update()`) not silently changed
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

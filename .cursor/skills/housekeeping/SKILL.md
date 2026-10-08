@@ -11,6 +11,8 @@ description: Changes housekeeping workflows in passion-api — turnover cleaning
 - Changing room/HK state transitions or HK permissions.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. `PASSION_LARAVEL_ARCHITECTURE.md` §36.
 2. Identify which of the three sub-workflows you touch:
    - **A. Turnover** (`room_status_blocks` + `HousekeepingJob`): `assignCleaningStaff()`, `startCleaning()`,
@@ -97,4 +99,5 @@ description: Changes housekeeping workflows in passion-api — turnover cleaning
 - [ ] Broadcast after commit with snake_case reason
 - [ ] Response shape matches siblings (e.g. block with `room.roomType`, `assignedUser:id,name`)
 - [ ] HK tests pass vs baseline
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

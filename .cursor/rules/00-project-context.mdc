@@ -32,8 +32,8 @@ Always, for any task in the `passion-api` repository.
 - Assume the frontend in `../passion` reads the current JSON keys, status strings, permission names
   and broadcast event names. Changing any of them is a cross-repo change; call it out.
 - When unsure whether behavior is intentional, list it as a question instead of "fixing" it.
-- After a behavior change, create or update the functional doc for that feature
-  (see `65-functional-docs.mdc`).
+- Before changing a module, find its functional doc; when there is none, create it from the current
+  code first. After the change, update that doc (see `65-functional-docs.mdc`).
 
 ## Things Cursor must NOT do
 - Do not add tenant/hotel/property scoping, columns or global scopes.

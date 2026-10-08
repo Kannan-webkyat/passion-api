@@ -12,6 +12,8 @@ description: Changes room folio billing and payments in passion-api — BookingP
 - Touching room-side accounting (`BookingCheckoutPoster`) or `JournalPostingService`.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. `PASSION_LARAVEL_ARCHITECTURE.md` §35 (billing), §32 cancel, §34 checkout.
 2. Read `app/Support/BookingPaymentLedger.php` (all public methods) and `BookingController::storePayment()`,
    `voidPayment()`, `listPayments()`, `folioPostings()`, `effectiveBookingGrand()`.
@@ -98,4 +100,5 @@ description: Changes room folio billing and payments in passion-api — BookingP
 - [ ] Journals posted in the same transaction as the state change; idempotent source key
 - [ ] Bill-total change reviewed across checkout, payments, invoice and poster
 - [ ] Response includes `totals`; status codes unchanged (201 on record, 503 ledger missing)
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

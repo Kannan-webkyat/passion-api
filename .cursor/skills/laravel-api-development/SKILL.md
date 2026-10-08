@@ -11,6 +11,8 @@ description: Workflow for any backend change in the passion-api Laravel project 
   availability, check-in/out, billing, housekeeping or POS / day closing.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. Read the matching section of `PASSION_LARAVEL_ARCHITECTURE.md` (topic sections §4–§36).
 2. Find the route in `routes/api.php` and open the controller method it points to.
 3. Read the method's private helpers and any Support/Service class it calls.
@@ -99,4 +101,5 @@ task names; ask if unclear.
 - [ ] Broadcasts use the module's existing timing (deferred HK/folio, immediate POS outlet)
 - [ ] Test suite: no new failures vs baseline
 - [ ] Open questions about possibly-intentional behavior listed for the user
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

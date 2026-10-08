@@ -11,6 +11,8 @@ description: Changes POS / F&B behavior in passion-api — orders, items, KOT/BO
 - For the room-folio side of a POS room charge also read the `billing` skill.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. Rule `55-pos.mdc` and `PASSION_LARAVEL_ARCHITECTURE.md` (POS / day-closing sections).
 2. Find the route in the `Route::prefix('pos')` blocks of `routes/api.php` and read the controller method.
 3. Read the sibling action closest to your change end-to-end (e.g. `settle()`, `refund()`, `void()`,
@@ -82,4 +84,5 @@ description: Changes POS / F&B behavior in passion-api — orders, items, KOT/BO
 - [ ] Journal posted in the same transaction using the sibling's poster method
 - [ ] `room_charge` guard kept; booking `extra_charges` updated; folio broadcast deferred
 - [ ] `broadcastPosOutletUpdate()` fired; response shape unchanged
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

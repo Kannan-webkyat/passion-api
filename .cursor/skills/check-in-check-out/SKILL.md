@@ -11,6 +11,8 @@ description: Changes guest check-in, pre-checkout inspection, check-out, early c
   `preview-early-checkout`, `early-checkout`.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. `PASSION_LARAVEL_ARCHITECTURE.md` §34 (and §35 for money, §36 for housekeeping handoff).
 2. Read `BookingController::update()` end-to-end (≈560 lines) — guards, ledger postings, transaction,
    then post-commit segment/room/HK sync.
@@ -89,4 +91,5 @@ description: Changes guest check-in, pre-checkout inspection, check-out, early c
 - [ ] One-day `dirty` block created on each segment's checkout date
 - [ ] Refunds recorded through the ledger with `allow_closed`
 - [ ] Broadcast after commit; response shape unchanged
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message

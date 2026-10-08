@@ -1,49 +1,95 @@
 ---
-description: After a behavior change, create or update the functional doc that describes that feature so it matches the code
+description: Before changing any module, find its functional doc and create it first when it is missing; after the change, update that doc so it matches the code
 alwaysApply: true
 ---
 
 # 65 — Functional documentation
 
 ## Purpose
-Keep the written description of each feature aligned with what the code does after a change.
+Every module the agent creates or changes has a functional doc, and that doc matches the code when
+the task ends.
 
 ## When it applies
-Every change in `passion-api` that changes what a person or another system can do: an endpoint,
-workflow, permission, status, money rule, schema the product relies on, or side effect. It also
-applies when the same change is made in `../passion`.
+Every task in `passion-api` that creates or changes code in a module, section or workflow: a new
+feature, a new section of an existing module, an endpoint, a bug fix, a permission, status, money
+rule, schema the product relies on, or side effect. It also applies when the same task changes
+`../passion`.
 
-Skip formatting, comments, local renames, and test-only edits that do not change that behavior.
+Not needed for: formatting or comment-only edits, test-only edits, and edits to `.cursor/rules/`,
+`.cursor/skills/` or the docs themselves.
 
-## Where the doc lives
-One description per feature. Do not copy it into both repos.
+## Doc map
+One description per feature. Do not copy it into both repos. All functional docs live in `docs/`.
 
-| The change is about | Update this file |
+| The module / change is about | Doc |
 |---|---|
+| Room Chart: booking create, holds and blocks, booking panel, check-in, stay changes, folio and payments, checkout inspection, check-out, release for cleaning, guest ID | `docs/ROOM_CHART.md` |
+| Rooms master | `docs/ROOMS.md` |
+| Room types, rate plans, seasons, meals, early check-in / late checkout fees | `docs/ROOM_TYPES.md` |
+| AioSell channel manager, OTA bookings, free-room and price push | `docs/AIOSELL.md` |
 | Doorloom, the online calendar, or stay sync with Doorloom | `docs/DOORLOOM.md` |
+| Daily room cleaning (stay-over cleaning, cleaning releases board) | `docs/DAILY_ROOM_CLEANING.md` |
+| Room cleaning history | `docs/ROOM_CLEANING_HISTORY.md` |
+| Laundry | `docs/LAUNDRY.md` |
+| Portal notifications (header bell) | `docs/PORTAL_NOTIFICATIONS.md` |
+| Portal sidebar menu search | `docs/PORTAL_MENU_SEARCH.md` |
+| `db:wipe-bookings` booking data reset | `docs/BOOKING_DATA_RESET.md` |
 | GRN, goods receipt, or frozen GRN cost | `docs/GRN_MODULE.md` |
 | Store requisition, Main Store, or the POS stock path in the ERP SOP | `docs/PASSION_ERP_WORKFLOW_SOP.md` |
 | QZ Tray install or signing | `../passion/QZ_TRAY_SETUP.md` |
-| A fact stated in `PASSION_LARAVEL_ARCHITECTURE.md` (route, permission, status, owner class, JSON key, event name) | That section only |
-| A fact stated in `../passion/PASSION_FRONTEND_ARCHITECTURE.md` | That section only |
-| Any other workflow that has no doc yet | Create `docs/<TOPIC>.md` |
+| A fact stated in `PASSION_LARAVEL_ARCHITECTURE.md` (route, permission, status, owner class, JSON key, event name) | That section, in addition to the module doc |
+| A fact stated in `../passion/PASSION_FRONTEND_ARCHITECTURE.md` | That section, in addition to the module doc |
+| Any module not listed above | None yet — create `docs/<TOPIC>.md` before changing it |
 
-Search `docs/` before creating a file. Extend the existing doc when the feature is already described.
+Modules with no doc today include POS orders / KOT / settle / refund, day closing, housekeeping
+turnover (dirty, cleaning, inspected blocks), room stock and par, inventory items and procurement
+(purchase orders, vendors, quotes), accounting and journals, users / roles / permissions, login and
+auth, settings, dashboard and reports. The first task that touches one of them creates its doc.
 
 ## Required behavior
-- Before finishing, read the matching doc and rewrite every sentence the change made false.
-- A new doc uses the same voice as `docs/DOORLOOM.md`: what the product does now, the screen and the endpoint, permission names, status strings, and a short "not included" note. No recommendations.
-- A feature that spans the API and the Next.js screen is one file under `docs/`. Name the frontend route in that file.
-- Patch an architecture section only when a statement in it is now wrong. Leave file counts and the measured-on date alone.
-- In the final message, name the doc you created or updated.
+
+### 1. Before writing code — doc check
+1. Name the module and section the task touches. Look it up in the doc map, then search
+   `rg -il "<module keyword>" docs/` to catch a doc the map does not list yet.
+2. A doc exists → read the part that covers the section before changing code.
+3. An existing module has no doc → do not start the code change. First create `docs/<TOPIC>.md`
+   that describes how the module works today, read from the code: the screen route, the endpoints,
+   permission names, status strings, side effects, and a "Not included" note. Cover the module being
+   touched, not the whole application. Then continue with the task.
+4. A new module → create its doc in the same task. A new section of a module that already has a doc
+   goes into that doc as a new `##` section, not a new file.
+5. Say in a progress note which doc was found or created before moving on.
+
+### 2. After the change — doc update
+- Read the doc again, rewrite every sentence the change made false, and add what the change added.
+- Bug fix: do not write about the bug or the fix. Update the doc only where the fix changed the code
+  flow or behavior the doc describes (a step, guard, status, message, endpoint, permission or side
+  effect). When the fix changes none of that, leave the doc as it is.
+- A feature that spans the API and the Next.js screen is one file under `docs/`. Name the frontend
+  route in that file.
+- Patch an architecture section only when a statement in it is now wrong. Leave file counts and the
+  measured-on date alone.
+- When a new doc is created, add its row to the doc map here and in
+  `../passion/.cursor/rules/120-functional-docs.mdc`, and remove the module from the "no doc today" list.
+- In the final message, name every doc created or updated, and say which ones were created for a
+  module that had no doc before.
+
+### Doc format
+Same voice as `docs/DOORLOOM.md`: what the product does now, the screen and the endpoint, permission
+names, status strings, and a short "Not included" note. Plain sentences. No recommendations, no plans,
+no change history.
 
 ## Things Cursor must NOT do
-- Do not finish a behavior change with the old description still in the doc.
+- Do not start a code change in a module whose doc is missing; create the doc first.
+- Do not finish a change with the old description still in the doc.
+- Do not add bug descriptions, "fixed …" notes or change logs to a doc.
 - Do not add a second doc in `../passion/` for a feature already described under `docs/`.
+- Do not write the baseline doc from memory or from the task request; read it from the code.
 - Do not put product behavior into `.cursor/rules/` or a skill. Those files tell the agent how to work.
 - Do not refresh unrelated sections of the architecture docs.
 
 ## Real examples from the codebase
 - Doorloom webhook + stay push + the settings card: `docs/DOORLOOM.md`.
+- Room Chart screen with sections per front-desk step: `docs/ROOM_CHART.md`.
 - GRN approval posts stock: `docs/GRN_MODULE.md`.
 - API facts by section: `PASSION_LARAVEL_ARCHITECTURE.md`.

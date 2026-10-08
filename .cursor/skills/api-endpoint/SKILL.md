@@ -10,6 +10,8 @@ description: Adds or changes a JSON endpoint in passion-api following the projec
 - Changing request fields, validation, authorization, status codes or response keys of an endpoint.
 
 ## 2. Required investigation before coding
+0. **Doc check first** (`.cursor/rules/65-functional-docs.mdc`): find the module's doc in `docs/`. If the
+   module has none, create it from the current code before changing anything.
 1. Find sibling endpoints in the same controller; the new endpoint copies the closest one.
 2. Note the controller's authorization style (trait `authorizePermissions` / `allow*()`,
    private `checkPermission`, or `InventoryAuthorization`), its error style, and DI style.
@@ -96,4 +98,5 @@ return response()->json($method, 201);
 - [ ] No FormRequest / JsonResource / Policy / middleware added
 - [ ] Frontend impact checked in `../passion`
 - [ ] Tests pass vs baseline
-- [ ] The functional doc for this change is created or updated (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] Doc check done before coding: the module's doc was found, or created from the current code first (`.cursor/rules/65-functional-docs.mdc`)
+- [ ] That doc now matches this change and is named in the final message
