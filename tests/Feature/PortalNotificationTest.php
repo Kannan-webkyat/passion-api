@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Events\PortalNotificationCreated;
 use App\Models\Booking;
 use App\Models\BookingSegment;
 use App\Models\PortalNotification;
@@ -11,6 +12,7 @@ use App\Support\PortalNotifications;
 use Carbon\Carbon;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\Concerns\CreatesHousekeepingFixtures;
@@ -92,6 +94,81 @@ class PortalNotificationTest extends TestCase
 
         Sanctum::actingAs($desk);
         $this->getJson('/api/notifications')->assertJsonPath('unread_count', 0);
+    }
+
+    public function test_only_read_notifications_are_cleared_and_only_for_that_user(): void
+    {
+        $desk = $this->createUserWithPermission('view-rooms');
+        $other = $this->createUserWithPermission('reservation-view');
+
+        $first = PortalNotifications::recordDailyCleaning(12, '204', 88, 'Asha Rao', '2026-10-07', 'Daily cleaning completed for room #204');
+        $second = PortalNotifications::recordDailyCleaning(13, '205', 89, 'Ravi Nair', '2026-10-07', 'Daily cleaning completed for room #205');
+        $this->assertNotNull($first);
+        $this->assertNotNull($second);
+
+        Sanctum::actingAs($desk);
+        $this->postJson("/api/notifications/{$second}/clear")
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Only read notifications can be cleared.');
+
+        $this->postJson("/api/notifications/{$second}/read")->assertOk();
+        $this->postJson("/api/notifications/{$second}/clear")
+            ->assertOk()
+            ->assertJsonPath('id', $second)
+            ->assertJsonPath('unread_count', 1);
+
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonPath('unread_count', 1)
+            ->assertJsonCount(1, 'notifications')
+            ->assertJsonPath('notifications.0.id', $first);
+
+        Sanctum::actingAs($other);
+        $this->postJson("/api/notifications/{$first}/read")->assertOk();
+        $this->postJson('/api/notifications/clear-read')
+            ->assertOk()
+            ->assertJsonPath('cleared', 1)
+            ->assertJsonPath('unread_count', 1);
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonCount(1, 'notifications')
+            ->assertJsonPath('notifications.0.id', $second)
+            ->assertJsonPath('notifications.0.read_at', null);
+
+        Sanctum::actingAs($desk);
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonCount(1, 'notifications')
+            ->assertJsonPath('notifications.0.id', $first);
+        $this->postJson('/api/notifications/999/clear')->assertNotFound();
+    }
+
+    public function test_live_event_names_the_actor_and_the_link(): void
+    {
+        config(['broadcasting.default' => 'log']);
+        Event::fake([PortalNotificationCreated::class]);
+        $actor = $this->createUserWithPermission('housekeeping-dirty-rooms');
+
+        $id = PortalNotifications::record(
+            PortalNotification::AUDIENCE_DIRTY_ROOMS,
+            PortalNotification::KIND_DIRTY_ROOM,
+            'Room 101 needs cleaning',
+            'Room 101 is dirty and waiting for housekeeping.',
+            ['room_id' => 5, 'room_number' => '101', 'booking_id' => 44],
+            PortalNotifications::HREF_DIRTY_ROOMS,
+            (int) $actor->id,
+        );
+        $this->app->terminate();
+
+        Event::assertDispatched(PortalNotificationCreated::class, function (PortalNotificationCreated $event) use ($id, $actor) {
+            $payload = $event->broadcastWith();
+
+            return $payload['id'] === $id
+                && $payload['actor_user_id'] === (int) $actor->id
+                && $payload['href'] === PortalNotifications::HREF_DIRTY_ROOMS
+                && $payload['booking_id'] === 44
+                && $payload['room_id'] === 5;
+        });
     }
 
     public function test_missing_notification_is_not_found(): void
@@ -443,8 +520,15 @@ class PortalNotificationTest extends TestCase
                 $table->unsignedBigInteger('portal_notification_id');
                 $table->unsignedBigInteger('user_id');
                 $table->timestamp('read_at');
+                $table->timestamp('cleared_at')->nullable();
                 $table->timestamps();
                 $table->unique(['portal_notification_id', 'user_id']);
+            });
+        }
+
+        if (! Schema::hasColumn('portal_notification_reads', 'cleared_at')) {
+            Schema::table('portal_notification_reads', function (Blueprint $table) {
+                $table->timestamp('cleared_at')->nullable();
             });
         }
     }

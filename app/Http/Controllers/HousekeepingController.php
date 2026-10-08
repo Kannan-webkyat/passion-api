@@ -3027,6 +3027,21 @@ class HousekeepingController extends Controller
             if (! $alreadyStarted && ($assigneeError = $this->externalCleaningStartError($release, $existingCleaning))) {
                 return $assigneeError;
             }
+        } elseif ($newStatus === 'in_progress' && ! $reopening) {
+            $existingCleaning = DailyRoomCleaning::query()
+                ->where('room_id', '=', $roomId, 'and')
+                ->whereDate('service_date', $d)
+                ->first();
+            $alreadyStarted = $existingCleaning
+                && in_array($existingCleaning->status, ['in_progress', 'cleaned'], true);
+            $assigneeId = array_key_exists('assigned_to', $validated)
+                ? $validated['assigned_to']
+                : ($existingCleaning?->assigned_to ?: $release->assigned_to);
+            if (! $alreadyStarted && ! $assigneeId) {
+                return response()->json([
+                    'message' => 'Assign a housekeeping staff member in the daily cleaning schedule before starting this cleaning.',
+                ], 422);
+            }
         }
 
         $segments = $this->dailyCleaningOccupiedSegments(Carbon::parse($d));

@@ -21,6 +21,11 @@ class PortalNotificationCreated implements ShouldBroadcastNow
         public string $title,
         public string $message,
         public ?int $recipientUserId = null,
+        public ?int $actorUserId = null,
+        public ?string $href = null,
+        public ?int $bookingId = null,
+        public ?int $roomId = null,
+        public ?string $serviceDate = null,
     ) {}
 
     /**
@@ -48,10 +53,15 @@ class PortalNotificationCreated implements ShouldBroadcastNow
             'title' => $this->title,
             'message' => $this->message,
             'recipient_user_id' => $this->recipientUserId,
+            'actor_user_id' => $this->actorUserId,
+            'href' => $this->href,
+            'booking_id' => $this->bookingId,
+            'room_id' => $this->roomId,
+            'service_date' => $this->serviceDate,
         ];
     }
 
-    public static function dispatchIfEnabled(PortalNotification $notification): void
+    public static function dispatchIfEnabled(PortalNotification $notification, ?int $actorUserId = null): void
     {
         if (config('broadcasting.default') === 'null') {
             return;
@@ -65,10 +75,16 @@ class PortalNotificationCreated implements ShouldBroadcastNow
         $recipientUserId = $notification->recipient_user_id !== null
             ? (int) $notification->recipient_user_id
             : null;
+        $payload = is_array($notification->payload) ? $notification->payload : [];
+        $href = isset($payload['href']) && trim((string) $payload['href']) !== '' ? trim((string) $payload['href']) : null;
+        $bookingId = isset($payload['booking_id']) ? (int) $payload['booking_id'] : null;
+        $roomId = isset($payload['room_id']) ? (int) $payload['room_id'] : null;
+        $serviceDate = isset($payload['service_date']) ? (string) $payload['service_date'] : null;
+        $actorUserId = $actorUserId !== null && $actorUserId > 0 ? $actorUserId : null;
 
-        App::terminating(function () use ($id, $audience, $kind, $title, $message, $recipientUserId) {
+        App::terminating(function () use ($id, $audience, $kind, $title, $message, $recipientUserId, $actorUserId, $href, $bookingId, $roomId, $serviceDate) {
             try {
-                event(new self($id, $audience, $kind, $title, $message, $recipientUserId));
+                event(new self($id, $audience, $kind, $title, $message, $recipientUserId, $actorUserId, $href, $bookingId, $roomId, $serviceDate));
             } catch (\Throwable $e) {
                 report($e);
             }

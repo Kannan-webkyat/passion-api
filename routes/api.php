@@ -65,7 +65,9 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
 
     Route::get('notifications', [PortalNotificationController::class, 'index']);
     Route::post('notifications/read-all', [PortalNotificationController::class, 'markAllRead']);
+    Route::post('notifications/clear-read', [PortalNotificationController::class, 'clearRead']);
     Route::post('notifications/{notification}/read', [PortalNotificationController::class, 'markRead']);
+    Route::post('notifications/{notification}/clear', [PortalNotificationController::class, 'clear']);
 
     // Room Types
     Route::post('room-types/{roomType}/restore', [RoomTypeController::class, 'restore'])->withTrashed();

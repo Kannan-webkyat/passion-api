@@ -26,7 +26,7 @@ There is no Admin bypass on these endpoints.
 
 **Archive** in the card's Actions menu replaces Delete. After a confirmation, the type gets a `deleted_at` time. Nothing is removed.
 
-- Archive is refused with 409 while any room is assigned to the type: "Cannot archive room type as it has existing rooms assigned to it. Move or delete those rooms first."
+- Archive is refused with 409 while any room that is not archived is assigned to the type: "Cannot archive room type as it has existing rooms assigned to it. Move or delete those rooms first." Archived rooms do not count (see `ROOMS.md`).
 - An archived type disappears from every room-type list and lookup: the Room Types page, room chart, rate calendar, new bookings, and the Doorloom and AioSell settings and syncs.
 - Rate plans and seasons stay in the database, so past bookings keep their rate plan.
 - `is_active` is separate. An inactive type is still listed with `include_inactive=1` and can still be edited. An archived type is not listed until restored.

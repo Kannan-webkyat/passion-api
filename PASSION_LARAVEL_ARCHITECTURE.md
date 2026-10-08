@@ -221,7 +221,7 @@ Variations on B:
 ## 9. Models and Eloquent relationships
 
 - 78 models `extends Model`, `User extends Authenticatable`. Flat namespace.
-- `$fillable` everywhere; **no `$guarded`**. `SoftDeletes` only on `RoomType` (delete = archive, see `docs/ROOM_TYPES.md`). `HasFactory` only on `User`, `InventoryLocation`, `InventoryTax`, `StoreRequest`, `StoreRequestItem`.
+- `$fillable` everywhere; **no `$guarded`**. `SoftDeletes` only on `RoomType` and `Room` (delete = archive, see `docs/ROOM_TYPES.md`, `docs/ROOMS.md`); history models reach archived rooms through `withTrashed()` relations. `HasFactory` only on `User`, `InventoryLocation`, `InventoryTax`, `StoreRequest`, `StoreRequestItem`.
 - Casts via `protected $casts = [...]` (property) in most models; `User` uses `casts()` method. Money columns cast `'decimal:2'` in some models (`BookingPayment`, `RoomType`, `BookingRoomTransfer`) but not others (`Booking.total_price`, `deposit_amount` are uncast). JSON columns cast `'array'` (`guest_identities`, `inspection_snapshot`, `meta`, `checklist_done`, `amenities`).
 - Custom `$table`: `BookingExtraCharge` (`booking_extra_charges`), `GRN` (`grns`), `InventoryCostAuditLog` (`inventory_cost_audit_log`), `PosVoidWaste` (`pos_void_waste`).
 - `$timestamps = false`: `GrnAuditLog`, `JournalLine`, `LoginAttempt`, `RoomCleaningReleaseAudit` (they set `created_at` manually).
@@ -353,7 +353,7 @@ None. `User` uses `Notifiable` but no Notification classes, no `Mail::`, no `->n
 3. `try { … } catch (\RuntimeException $e) { return response()->json(['message' => $e->getMessage()], 422); }` around service calls (GRN, PO, procurement).
 4. `try { … } catch (\InvalidArgumentException $e) { …422 }` (cleaning releases).
 5. `DB::beginTransaction(); try { … DB::commit(); } catch (\Exception $e) { DB::rollBack(); return response()->json(['message' => $e->getMessage()], 500); }` — 25 places return **500 with the raw exception message** (HK, room par, room stock, inventory, PO, store requests, `RoomController::syncInventoryLocations`).
-6. FK-violation on delete: `catch (QueryException $e) { if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') return 409 {...}; throw $e; }` — consistent across master-data `destroy()` methods, except `RoomTypeController::destroy()`, which archives and returns 409 itself while rooms are assigned.
+6. FK-violation on delete: `catch (QueryException $e) { if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') return 409 {...}; throw $e; }` — consistent across master-data `destroy()` methods, except `RoomTypeController::destroy()` and `RoomController::destroy()`, which archive and return 409 themselves (rooms assigned / current or upcoming stay).
 7. `throw new HttpResponseException(response()->json([...], 422))` inside `DB::transaction` closures to abort + roll back with a specific response (POS).
 8. `ValidationException` caught and flattened to `{message}` (booking availability/capacity).
 
@@ -372,7 +372,7 @@ Status codes seen: 200 (default), 201 (create), 204 (`response()->json(null, 204
 - Naming: `YYYY_MM_DD_HHMMSS_{verb}_{object}.php` — `create_*_table(s)`, `add_*_to_*`, `alter_*`, `widen_*`, `expand_*`, `backfill_*`, `enforce_*`, `zero_*`, and permission migrations `add_*_permission`.
 - Heavy defensive style: **243 `Schema::hasTable/hasColumn` guards** inside migrations; **131 raw `DB::statement`/`DB::table`** usages (ENUM changes, data backfills, permission grants).
 - Driver-specific branches (`getDriverName() === 'mysql'`) in several migrations; ENUM `MODIFY COLUMN` statements are MySQL-only.
-- Foreign keys: `foreignId(...)->constrained()` (185) and `->foreign()` both used; soft deletes only on `room_types.deleted_at`.
+- Foreign keys: `foreignId(...)->constrained()` (185) and `->foreign()` both used; soft deletes only on `room_types.deleted_at` and `rooms.deleted_at`.
 - **Data migrations and permission seeding happen in migrations** (not only seeders).
 - Dual date/time representation on stays: `bookings.check_in`/`check_out` (DATE) **and** `check_in_at`/`check_out_at` (DATETIME); same on `booking_segments`. Code keeps them in sync on every write ("legacy date columns").
 - Booking money is stored as scalars on `bookings` (`total_price`, `deposit_amount`, `refund_amount`, `extra_charges`, `checkout_discount_amount`, `cancellation_fee_amount`, `payment_status`, `payment_method`) **and** as line items (`booking_payments`, `booking_extra_charges`); `BookingPaymentLedger::syncScalars()` keeps scalars in sync with the ledger.
@@ -630,7 +630,7 @@ Three parallel sub-workflows share `room_status_blocks`, `rooms.status` and `roo
 **C. Cleaning availability windows + daily (stay-over) cleaning** (`RoomCleaningReleaseController` + `RoomCleaningAvailabilityService`, permission `housekeeping-cleaning-availability`; `HK_DAILY` for daily board):
 1. Front office `POST housekeeping/cleaning-releases` {room, date, window_start/end, priority, service type/subtype, assignee} → service transaction: cancel previous active releases for the room, resolve dirty block, classify service (`DailyRoomCleaningClassificationService`), if the room is occupied that day `firstOrCreate` a `DailyRoomCleaning` row, create `RoomCleaningRelease` (`available`), write audit rows (`released`, optionally `service_reclassified`), broadcast.
 2. Extend / reschedule / cancel endpoints mutate the window with audits; `expireOverdueWindows()` marks `available` releases past `window_end` as `expired` lazily on board reads.
-3. Daily board `GET housekeeping/daily-cleaning` lists occupied rooms with a release; `POST housekeeping/daily-cleaning/status` (`pending_cleaning → in_progress → cleaned`) requires an active release and, for `in_progress`, an open window (`assertCanStartCleaning`); rooms without an occupied segment are redirected to the Dirty Rooms workflow. `notify_front_desk` → `DailyRoomCleaningDeskNotify` event. `POST …/consumption` records amenity consumption from room location.
+3. Daily board `GET housekeeping/daily-cleaning` lists occupied rooms with a release; `POST housekeeping/daily-cleaning/status` (`pending_cleaning → in_progress → cleaned`) requires an active release and, for `in_progress`, an open window (`assertCanStartCleaning`) and an assigned housekeeper (request, cleaning row or release `assigned_to`); rooms without an occupied segment are redirected to the Dirty Rooms workflow. `notify_front_desk` → `DailyRoomCleaningDeskNotify` event. `POST …/consumption` records amenity consumption from room location.
 4. Supervisor `POST cleaning-releases/{id}/mark-inspected` (`housekeeping-supervisor-inspection`) when release is `inspection_pending`.
 5. Release statuses: `available → in_progress → completed → inspection_pending → ready`, plus `expired`, `cancelled`.
 

@@ -147,8 +147,8 @@ final class PortalNotifications
 
             self::prune();
 
-            DB::afterCommit(function () use ($row) {
-                PortalNotificationCreated::dispatchIfEnabled($row);
+            DB::afterCommit(function () use ($row, $actorUserId) {
+                PortalNotificationCreated::dispatchIfEnabled($row, $actorUserId);
             });
 
             return (int) $row->id;
@@ -453,7 +453,7 @@ final class PortalNotifications
             ];
         }
 
-        $rows = self::visibleQuery($user)->orderByDesc('id')->limit(40)->get();
+        $rows = self::feedQuery($user)->orderByDesc('id')->limit(40)->get();
         $reads = self::readsFor($user, $rows->pluck('id')->all());
 
         $notifications = [];
@@ -525,6 +525,54 @@ final class PortalNotifications
         return self::feedFor($user)['unread_count'];
     }
 
+    public static function clearingEnabled(): bool
+    {
+        return self::enabled() && Schema::hasColumn('portal_notification_reads', 'cleared_at');
+    }
+
+    /**
+     * Hides one read notification from this user's feed only. Returns false when the user has not read it.
+     */
+    public static function clear(User $user, PortalNotification $notification): bool
+    {
+        $read = PortalNotificationRead::query()
+            ->where('portal_notification_id', '=', $notification->id, 'and')
+            ->where('user_id', '=', $user->id, 'and')
+            ->first();
+        if (! $read || $read->read_at === null) {
+            return false;
+        }
+
+        $read->cleared_at = now();
+        $read->save();
+
+        return true;
+    }
+
+    /**
+     * Hides every read notification in this user's feed. Unread ones and other users' feeds are untouched.
+     */
+    public static function clearRead(User $user): int
+    {
+        if (! self::clearingEnabled()) {
+            return 0;
+        }
+
+        $visibleIds = self::feedQuery($user)->pluck('id');
+        if ($visibleIds->isEmpty()) {
+            return 0;
+        }
+
+        $now = now();
+
+        return PortalNotificationRead::query()
+            ->where('user_id', '=', $user->id, 'and')
+            ->whereIn('portal_notification_id', $visibleIds->all())
+            ->whereNotNull('read_at')
+            ->whereNull('cleared_at')
+            ->update(['cleared_at' => $now, 'updated_at' => $now]);
+    }
+
     private static function recordTaskAssigned(
         string $audience,
         string $kind,
@@ -546,6 +594,25 @@ final class PortalNotifications
             null,
             $recipientUserId,
         );
+    }
+
+    /**
+     * @return Builder<PortalNotification>
+     */
+    private static function feedQuery(User $user): Builder
+    {
+        $query = self::visibleQuery($user);
+        if (! self::clearingEnabled()) {
+            return $query;
+        }
+
+        return $query->whereNotExists(function ($cleared) use ($user) {
+            $cleared->selectRaw('1')
+                ->from('portal_notification_reads')
+                ->whereColumn('portal_notification_reads.portal_notification_id', 'portal_notifications.id')
+                ->where('portal_notification_reads.user_id', '=', $user->id)
+                ->whereNotNull('portal_notification_reads.cleared_at');
+        });
     }
 
     /**

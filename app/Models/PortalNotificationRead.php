@@ -11,10 +11,12 @@ class PortalNotificationRead extends Model
         'portal_notification_id',
         'user_id',
         'read_at',
+        'cleared_at',
     ];
 
     protected $casts = [
         'read_at' => 'datetime',
+        'cleared_at' => 'datetime',
     ];
 
     public function notification(): BelongsTo

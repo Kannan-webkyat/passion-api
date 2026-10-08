@@ -24,7 +24,8 @@ Creating/editing migrations, seeders or Eloquent models, or adding columns/statu
 - Data backfills ship as migrations. Permissions are registered two ways (seeder list + runtime
   ensure, or a permission migration) — see 40-security.
 - Models: `$fillable` (never `$guarded`), `protected $casts` (only `User` uses `casts()`), `SoftDeletes`
-  only on `RoomType` (delete = archive), no observers/`booted()`. Newer models have typed relations and `public const`
+  only on `RoomType` and `Room` (delete = archive; history relations
+  to `Room` use `withTrashed()`), no observers/`booted()`. Newer models have typed relations and `public const`
   status/type lists (`BookingPayment::TYPE_*`, `RoomCleaningRelease::STATUS_*`, `GRN::STATUS_*`);
   older ones (`Booking`, `Room`, `RoomStatusBlock`, `PosOrder`) use raw strings and untyped relations.
 - Stays store dates twice: `check_in`/`check_out` (DATE) **and** `check_in_at`/`check_out_at`
@@ -56,7 +57,7 @@ Creating/editing migrations, seeders or Eloquent models, or adding columns/statu
   a `reference_type` tag, and re-syncs the item total, like the existing writers.
 
 ## Things Cursor must NOT do
-- Do not add PHP enums, `SoftDeletes` (beyond `RoomType`), `$guarded`, observers or model events.
+- Do not add PHP enums, `SoftDeletes` (beyond `RoomType` and `Room`), `$guarded`, observers or model events.
 - Do not add `hotel_id`/`tenant_id` columns.
 - Do not drop the legacy DATE columns, the booking money scalars, or `inventory_items.current_stock`.
 - Do not rely on `php artisan migrate` running under SQLite: several migrations are MySQL-only.
