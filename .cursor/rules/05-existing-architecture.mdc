@@ -28,8 +28,8 @@ routes/api.php (one auth:sanctum + active group, implicit model binding)
   → response()->json(model | array)            (no JsonResource)
 ```
 Absent layers: Form Requests, API Resources, Policies/Gates, Repositories, Actions, PHP `enum`,
-Jobs/queued work, Listeners, Notifications, Observers/model events, scheduler, API versioning,
-route-level `permission:` middleware.
+Jobs/queued work (single exception: `App\Jobs\PushAiosellInventory`), Listeners, Notifications,
+Observers/model events, scheduler, API versioning, route-level `permission:` middleware.
 
 Where logic lives, per module (intentionally different):
 | Module | Pattern |

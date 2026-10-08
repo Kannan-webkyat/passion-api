@@ -15,7 +15,7 @@
 | App type | Pure JSON API for a separate Next.js frontend (`passion/`), plus PDF/CSV/XLSX downloads and Reverb broadcasts |
 | Size | 48 controllers (≈43k LOC), 79 models, 56 service classes (`app/Services` + `app/Services/Accounting`), 14 `app/Support` classes, 266 migrations, 44 seeders, 30 test files |
 | Dominant pattern | **Fat controllers** with inline `$request->validate()`, inline authorization helpers, direct Eloquent/`DB::table` queries, and hand-built JSON arrays. Services/Support classes are used for *specific* domain rules (availability, payment ledger, accounting postings, GRN, cleaning releases), not as a uniform layer. |
-| Absent layers | No Form Requests, no API Resources, no Policies/Gates, no Repositories, no Actions, no Enums (PHP `enum`), no Jobs, no Listeners, no Notifications, no Observers, no custom Traits dir, no route-level permission middleware, no API versioning |
+| Absent layers | No Form Requests, no API Resources, no Policies/Gates, no Repositories, no Actions, no Enums (PHP `enum`), no Jobs except `PushAiosellInventory` (§17), no Listeners, no Notifications, no Observers, no custom Traits dir, no route-level permission middleware, no API versioning |
 | Tenancy | **Single property.** No `hotel_id` / `property_id` / `tenant_id` anywhere. Only F&B has an *outlet* dimension (`restaurant_masters`). |
 
 Largest files (these are where most business logic lives):
@@ -330,8 +330,8 @@ Current `room_status_blocks.status` ENUM: `maintenance, dirty, cleaning, pending
 
 ## 17. Jobs / queues
 
-- **No Job classes; nothing implements `ShouldQueue`.** No `dispatch()` of jobs.
-- Queue is configured (`QUEUE_CONNECTION=database`, `jobs`/`failed_jobs`/`job_batches` tables exist) and `composer dev` runs `queue:listen`, but application code does not enqueue work.
+- **One Job class:** `App\Jobs\PushAiosellInventory` (`ShouldQueue`, `ShouldBeUniqueUntilProcessing` per room type, 5 tries). `AiosellInventorySync::pushPending()` dispatches it from an `App::terminating()` callback after stay and room-block saves. `AIOSELL_PUSH_QUEUE=false` (`services.aiosell.queue`) pushes directly instead. Nothing else enqueues work.
+- Queue is configured (`QUEUE_CONNECTION=database`, `jobs`/`failed_jobs`/`job_batches` tables exist) and `composer dev` runs `queue:listen`. Production needs a running `queue:work` for the AioSell job.
 - **No scheduler** (`Schedule::` not used). Time-based transitions run lazily on read: e.g. `RoomCleaningAvailabilityService::expireOverdueWindows()` is invoked from `HousekeepingController::dailyCleaningIndex()`/nav counts and inside the service's metrics method.
 
 ## 18. Notifications

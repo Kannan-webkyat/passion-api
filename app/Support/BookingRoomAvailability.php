@@ -109,7 +109,7 @@ final class BookingRoomAvailability
         return false;
     }
 
-    private static function standardCheckOutTime(): string
+    public static function standardCheckOutTime(): string
     {
         $raw = trim((string) Setting::get('standard_check_out_time', '11:00'));
         try {

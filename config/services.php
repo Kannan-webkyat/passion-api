@@ -41,6 +41,8 @@ return [
 
     'aiosell' => [
         'base_url' => env('AIOSELL_API_URL', 'https://live.aiosell.com/api/v2/cm'),
+        // Stay-save inventory pushes go through the queue (needs `php artisan queue:work`). false = push after the response.
+        'queue' => (bool) env('AIOSELL_PUSH_QUEUE', true),
     ],
 
     'qz' => [

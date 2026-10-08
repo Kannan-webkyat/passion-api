@@ -6,10 +6,16 @@ use App\Models\AiosellIntegration;
 use App\Models\AiosellRatePlanMap;
 use App\Models\AiosellRoomMap;
 use App\Models\Booking;
+use App\Models\BookingSegment;
 use App\Models\RatePlan;
 use App\Models\Room;
+use App\Models\RoomStatusBlock;
 use App\Models\RoomType;
+use App\Jobs\PushAiosellInventory;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\App;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Pushes free-room counts and nightly prices to AioSell.
@@ -19,28 +25,117 @@ final class AiosellInventorySync
 {
     public const WINDOW_DAYS = 366;
 
+    private const PENDING_KEY = 'aiosell.pending_inventory_room_types';
+
+    private const INVENTORY_ERROR_PREFIX = 'Inventory: ';
+
     /**
      * @param  iterable<Booking>  $bookings
+     * @param  list<int>  $previousRoomIds  Rooms the stays held before the save, so a room-type move frees the old type too.
      */
-    public static function afterBookings(iterable $bookings): void
+    public static function afterBookings(iterable $bookings, array $previousRoomIds = []): void
     {
-        $typeIds = [];
+        $roomIds = $previousRoomIds;
         foreach ($bookings as $booking) {
-            $booking->loadMissing('room');
-            $typeId = (int) ($booking->room?->room_type_id ?? 0);
-            if ($typeId > 0) {
-                $typeIds[$typeId] = $typeId;
+            $roomIds[] = (int) $booking->room_id;
+            foreach (BookingSegment::query()->where('booking_id', $booking->id)->pluck('room_id') as $segmentRoomId) {
+                $roomIds[] = (int) $segmentRoomId;
             }
         }
-        self::pushInventoryForRoomTypes(array_values($typeIds));
+        self::afterRooms($roomIds);
     }
 
     public static function afterRoom(int $roomId): void
     {
-        $typeId = (int) (Room::query()->whereKey($roomId)->value('room_type_id') ?? 0);
-        if ($typeId > 0) {
-            self::pushInventoryForRoomTypes([$typeId]);
+        self::afterRooms([$roomId]);
+    }
+
+    /**
+     * Queues the room types for one inventory push after the response is sent, so the save does not wait on AioSell.
+     *
+     * @param  list<int>  $roomIds
+     */
+    public static function afterRooms(array $roomIds): void
+    {
+        $roomIds = array_values(array_unique(array_filter(array_map('intval', $roomIds))));
+        if ($roomIds === [] || ! AiosellClient::ready()) {
+            return;
         }
+        $typeIds = Room::withTrashed()
+            ->whereIn('id', $roomIds)
+            ->pluck('room_type_id')
+            ->map(fn ($id) => (int) $id)
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        if ($typeIds === []) {
+            return;
+        }
+
+        $app = app();
+        if (! $app->bound(self::PENDING_KEY)) {
+            $app->instance(self::PENDING_KEY, new \ArrayObject);
+            App::terminating(fn () => self::pushPending());
+        }
+        $pending = $app->make(self::PENDING_KEY);
+        foreach ($typeIds as $typeId) {
+            $pending[$typeId] = $typeId;
+        }
+    }
+
+    public static function pushPending(): void
+    {
+        $app = app();
+        if (! $app->bound(self::PENDING_KEY)) {
+            return;
+        }
+        $typeIds = array_values($app->make(self::PENDING_KEY)->getArrayCopy());
+        $app->forgetInstance(self::PENDING_KEY);
+        if ($typeIds === []) {
+            return;
+        }
+        if (! config('services.aiosell.queue')) {
+            self::pushInventoryForRoomTypes($typeIds);
+
+            return;
+        }
+        foreach ($typeIds as $typeId) {
+            PushAiosellInventory::dispatch((int) $typeId);
+        }
+    }
+
+    /**
+     * After a queued push succeeds, drop the inventory error unless another inventory push is still waiting to retry.
+     */
+    public static function clearErrorWhenQueueIsClear(): void
+    {
+        $integration = AiosellIntegration::current();
+        if (! str_starts_with((string) $integration->last_error, self::INVENTORY_ERROR_PREFIX)) {
+            return;
+        }
+        if (self::waitingInventoryJobs() > 0) {
+            return;
+        }
+        $integration->last_error = null;
+        $integration->inventory_dirty = false;
+        $integration->save();
+    }
+
+    /**
+     * Queued inventory pushes not yet picked up. Only the database queue can be read; other drivers report 0.
+     */
+    public static function waitingInventoryJobs(?int $olderThanSeconds = null): int
+    {
+        if (config('queue.default') !== 'database' || ! Schema::hasTable('jobs')) {
+            return 0;
+        }
+
+        return DB::table('jobs')
+            ->whereNull('reserved_at')
+            ->where('payload', 'like', '%PushAiosellInventory%')
+            ->when($olderThanSeconds !== null, fn ($q) => $q->where('available_at', '<', now()->getTimestamp() - $olderThanSeconds))
+            ->count();
     }
 
     /**
@@ -258,11 +353,83 @@ final class AiosellInventorySync
     }
 
     /**
+     * Same answer as availableCount() for every night of the window, from one segment read and one block read.
+     * Mirrors BookingRoomAvailability::isListedAsAvailable() for a midnight-to-midnight night: active segment overlap,
+     * an hourly stay starting the next morning before standard check-out, and hard blocks.
+     *
+     * @return array<string, int>  Night date => sellable rooms.
+     */
+    private static function nightlyAvailability(int $roomTypeId, Carbon $from): array
+    {
+        $windowStart = $from->copy()->startOfDay();
+        $windowEnd = $windowStart->copy()->addDays(self::WINDOW_DAYS);
+        $nights = [];
+        for ($i = 0; $i < self::WINDOW_DAYS; $i++) {
+            $nights[$windowStart->copy()->addDays($i)->toDateString()] = true;
+        }
+
+        $roomIds = Room::query()->where('room_type_id', $roomTypeId)->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $busy = [];
+        $markBusy = function (int $roomId, string $date) use (&$busy, $nights): void {
+            if (isset($nights[$date])) {
+                $busy[$date][$roomId] = true;
+            }
+        };
+
+        if ($roomIds !== []) {
+            $standardCheckOut = BookingRoomAvailability::standardCheckOutTime();
+            $segments = BookingSegment::query()
+                ->whereIn('room_id', $roomIds)
+                ->whereNotIn('status', BookingRoomAvailability::INACTIVE_SEGMENT_STATUSES)
+                ->where('check_in_at', '<', $windowEnd->copy()->addDay())
+                ->where('check_out_at', '>', $windowStart)
+                ->get(['room_id', 'check_in_at', 'check_out_at']);
+            foreach ($segments as $segment) {
+                $roomId = (int) $segment->room_id;
+                $checkIn = Carbon::parse($segment->check_in_at);
+                $checkOut = Carbon::parse($segment->check_out_at);
+                for ($day = $checkIn->copy()->startOfDay(); $day->lt($checkOut) && $day->lt($windowEnd); $day->addDay()) {
+                    $markBusy($roomId, $day->toDateString());
+                }
+                if ($checkIn->format('H:i:s') !== '00:00:00' && $checkIn->format('H:i') < $standardCheckOut) {
+                    $markBusy($roomId, $checkIn->copy()->subDay()->toDateString());
+                }
+            }
+
+            $blocks = RoomStatusBlock::query()
+                ->whereIn('room_id', $roomIds)
+                ->where('is_active', true)
+                ->whereIn('status', BookingRoomAvailability::HARD_BLOCK_STATUSES)
+                ->where('start_date', '<', $windowEnd->toDateString())
+                ->where('end_date', '>', $windowStart->toDateString())
+                ->get(['room_id', 'start_date', 'end_date']);
+            foreach ($blocks as $block) {
+                if ($block->start_date === null || $block->end_date === null) {
+                    continue;
+                }
+                $end = Carbon::parse($block->end_date)->startOfDay();
+                for ($day = Carbon::parse($block->start_date)->startOfDay(); $day->lt($end) && $day->lt($windowEnd); $day->addDay()) {
+                    $markBusy((int) $block->room_id, $day->toDateString());
+                }
+            }
+        }
+
+        $total = count($roomIds);
+        $out = [];
+        foreach (array_keys($nights) as $date) {
+            $out[$date] = $total - count($busy[$date] ?? []);
+        }
+
+        return $out;
+    }
+
+    /**
      * @return list<array{start: string, end: string, available: int}>
      */
     private static function availabilityRanges(int $roomTypeId): array
     {
         $today = Carbon::today();
+        $nightly = self::nightlyAvailability($roomTypeId, $today);
         $ranges = [];
         $start = null;
         $previous = null;
@@ -270,7 +437,7 @@ final class AiosellInventorySync
         for ($i = 0; $i < self::WINDOW_DAYS; $i++) {
             $night = $today->copy()->addDays($i);
             $date = $night->toDateString();
-            $available = self::availableCount($roomTypeId, $night);
+            $available = $nightly[$date];
             if ($start === null) {
                 $start = $previous = $date;
                 $count = $available;
@@ -346,7 +513,7 @@ final class AiosellInventorySync
             'updates' => $updates,
         ]);
         if (! $result['ok']) {
-            self::rememberError($result['message'] ?: 'Inventory push failed.', true);
+            self::rememberError(self::INVENTORY_ERROR_PREFIX.($result['message'] ?: 'Inventory push failed.'), true);
         }
 
         return ['ok' => $result['ok'], 'message' => $result['message'] ?: 'Inventory updated.'];

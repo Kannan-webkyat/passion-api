@@ -68,7 +68,7 @@ final class AiosellMapping
                 $row = AiosellRatePlanMap::query()->firstOrNew(['rateplan_code' => $rateCode]);
                 $row->room_code = $code;
                 $row->occupancy_letter = self::occupancyLetter($occupancy);
-                $row->meal_code = self::mealCode($meals);
+                $row->meal_code = self::mealCodeFromRateplan($rateCode) ?? self::mealCode($meals);
                 $row->rateplan_name = trim((string) ($plan['rateplan_name'] ?? '')) ?: $row->rateplan_name;
                 if ($row->room_type_id === null && $map->room_type_id) {
                     $row->room_type_id = $map->room_type_id;
@@ -125,6 +125,16 @@ final class AiosellMapping
             2 => 'MAP',
             default => 'AP',
         };
+    }
+
+    /**
+     * Rate plan codes follow `{room}-{occupancy}-{mealplan}`; AioSell's no_of_meals does not always agree with the suffix.
+     */
+    public static function mealCodeFromRateplan(string $rateplanCode): ?string
+    {
+        $suffix = strtoupper((string) substr((string) strrchr($rateplanCode, '-'), 1));
+
+        return in_array($suffix, ['EP', 'CP', 'MAP', 'AP'], true) ? $suffix : null;
     }
 
     public static function passionMeal(?string $code): ?string

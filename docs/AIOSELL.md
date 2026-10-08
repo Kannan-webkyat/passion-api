@@ -14,15 +14,15 @@ AioSell is a row on the hotel API list, with its own logo, Settings button, and 
 - **Load mapping** calls `GET /property_details/{hotelCode}?partnerId={pms}` and stores `aiosell_room_maps` and `aiosell_rate_plan_maps`, plus `connected_channels`.
 - Reservation webhook: `POST /api/aiosell/webhook`. Message webhook: `POST /api/aiosell/messages`. Both sit outside Sanctum and check Basic Auth with `hash_equals`.
 - **Push now** sends inventory and rates for 366 nights and clears the dirty flag.
-- **Catch up** calls Fetch Reservations and runs the same writer as the webhook.
+- **Catch up** calls Fetch Reservations and runs the same writer as the webhook. A reservation that cannot be written does not stop the rest. The reply is 422 with `applied`, a `failed` list (`channel`, `booking_id`, `message`), and a message naming the first failure.
 
-Meal map: `room_only` EP, `breakfast` CP, `half_board` MAP, `full_board` AP. Occupancy letters are `s`, `d`, `t`, `q`. Hourly plans are not pushed. A mapping row can store its own price. Otherwise single and double codes that share one Passion plan share that plan’s seasonal price (`SeasonalRoomPricing` on `base_price`).
+Meal map: `room_only` EP, `breakfast` CP, `half_board` MAP, `full_board` AP. Load mapping takes the meal from the rate plan code suffix (`-ep`, `-cp`, `-map`, `-ap`) and uses `no_of_meals` only when the code has no such suffix. Occupancy letters are `s`, `d`, `t`, `q`. Hourly plans are not pushed. A mapping row can store its own price. Otherwise single and double codes that share one Passion plan share that plan’s seasonal price (`SeasonalRoomPricing` on `base_price`).
 
 ## Inventory and rates
 
 | AioSell | When Passion calls it |
 |---|---|
-| `POST /update/{pms}` | After a stay or room-block save, and on Push now. Count is physical rooms of that type still sellable that night. |
+| `POST /update/{pms}` | After a stay or room-block save, a booking delete, a cleaning finish that puts the room on `maintenance`, and on Push now. Count is physical rooms of that type still sellable that night. A stay save pushes every room type the stay held before and after the save. |
 | `POST /update-rates/{pms}` | After a room-type save (base price, rate plans, seasonal prices), unless the save sends `push_rates: false`, and on Push now. |
 | Both, for all 366 nights | Saving the AioSell panel with mapping rows (room type, rate plan, price override, active), or switching the connection on. Skipped when credentials, partner id, or hotel code are missing. |
 | Inventory restrictions, same `/update/{pms}` with `rooms[].restrictions` and `toChannels` | Restrictions form with no rate plan |
@@ -40,18 +40,21 @@ On `/admin/roomTypes`, Save on an existing room type compares the nightly rate p
 
 A later rate push for that room type removes it from the list. A fully successful Push now clears the list. Changes to other fields, new room types, and saves while AioSell is off or the room type is unmapped save without the dialog. A request without `push_rates` pushes rates, as before.
 
-Stay and block saves that already pushed Doorloom also push AioSell through `HotelApiSync`: booking create, update, extend, early checkout, split, cancel, room transfer, room create/update/delete, room-type update, and room-status block store, update, and destroy. Each integration no-ops when it is off.
+Stay and block saves that already pushed Doorloom also push AioSell through `HotelApiSync`: booking create, update, extend, early checkout, split, cancel, room transfer, room create/update/delete, room-type update, and room-status block store, update, and destroy. AioSell alone is also pushed after `DELETE /bookings/{id}` and after housekeeping finishes a cleaning with a missing or broken asset, which puts the room on `maintenance`. Each integration no-ops when it is off.
+
+The inventory push after a stay save, booking delete, room-status block save, cleaning finish, or reservation webhook does not run inside the request. After the response is sent (`App::terminating`), Passion queues one `App\Jobs\PushAiosellInventory` job per room type touched in that request, and the queue worker (`php artisan queue:work`) sends it. A room type that already has a job waiting gets no second job; the waiting job reads the counts when it runs. A failed push is tried 5 times in all, 30 s, 1 min, 2 min and 5 min apart. Its error shows on the AioSell card with an `Inventory: ` prefix. A later successful queued push clears that error and the dirty flag when no other inventory push is waiting. When AioSell jobs have waited more than 10 minutes on the database queue, the card says the queue worker may be stopped (`queued_pushes_stalled`). With `AIOSELL_PUSH_QUEUE=false`, the same push runs directly after the response for all touched room types in one call, with no retry. Outbound calls give up connecting after 5 s and waiting after 25 s. The count for each type is read in one segment query and one block query for the 366 nights. Room-type saves, room saves, the panel save, and Push now still push before they answer, so their reply shows the result.
 
 ## Reservations
 
 `book`, `modify`, and `cancel` arrive on the reservation webhook. Success bodies are `Reservation Updated Successfully`, `Reservation Modified Successfully`, and `Reservation Cancelled Successfully`. Anything else is HTTP 409 with `success: false`, and nothing from that call is saved.
 
 - Room codes are room types. Passion locks rooms and assigns the lowest-numbered sellable room of that type. A multi-room payload is one Passion booking per room under one `booking_group_id`.
+- Each stay's `total_price` is its share of `amount.amountAfterTax`, weighted by that room's `sellRate` total. The last room takes the rounding remainder, so the stays add up to the OTA total. Without `amountAfterTax`, the stay keeps its `sellRate` total.
 - The same `channel` + `bookingId` on a second `book` returns success and does not create another stay.
 - `modify` overwrites guest, dates, rooms, and total. A checked-in stay is not moved when no free room fits. The webhook fails and the current stay stays.
 - `cancel` cancels a pending or confirmed stay. It does not charge a cancellation fee. An in-house stay is left as it is and the webhook fails.
 - `booking_source` is the OTA channel. `source_reference` is `bookingId`. A missing guest name is stored as Guest. `specialRequests` is appended to `notes`.
-- `pah: false` records `amount.amountAfterTax` through the payment ledger as `bank_transfer`, with notes naming the channel and booking id. `pah: true` stores the total for the desk to collect. Commission, TCS, and TDS stay on `aiosell_booking_links` and are not folio lines.
+- `pah: false` records each stay's share of `amount.amountAfterTax` on that stay through the payment ledger as `bank_transfer`, with notes naming the channel and booking id. A `modify` records only the increase on each stay. Cancelled stays get no payment. `pah: true` stores the total for the desk to collect. Commission, TCS, and TDS stay on `aiosell_booking_links` and are not folio lines.
 - Card fields are removed before the payload is handled. They are not stored.
 
 Booking.com and Goibibo / MakeMyTrip (`booking.com`, `gommt`) can be marked no-show from the booking detail. That calls `POST /marknoshow/{pms}` and appends an audit line on `notes`. Other channels do not show the action. Reading the thread needs `reservation-view` (or `reservation`, `reservation-edit`, `manage-settings`, or Admin). Reply and no-show need `reservation-edit`; other permissions and the Admin role alone get 403. The screen mutes both buttons without `reservation-edit` and asks for confirmation before sending a no-show.
@@ -60,4 +63,4 @@ Booking.com and Goibibo / MakeMyTrip (`booking.com`, `gommt`) can be marked no-s
 
 ## Not included
 
-AioSell’s PMS public API (leads, stay and invoice reads, check-in, and AioSell-as-PMS webhooks), the OTA API, dynamic pricing, and the sandbox tester. There is no queue and no scheduler.
+AioSell’s PMS public API (leads, stay and invoice reads, check-in, and AioSell-as-PMS webhooks), the OTA API, dynamic pricing, and the sandbox tester. There is no scheduler; only the stay-save inventory push uses the queue.

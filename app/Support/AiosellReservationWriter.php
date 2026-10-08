@@ -51,8 +51,9 @@ final class AiosellReservationWriter
         }
 
         if ($applied['bookings'] !== []) {
-            HotelApiSync::syncBookings($applied['bookings']);
+            HotelApiSync::syncBookings($applied['bookings'], $applied['previous_room_ids'] ?? []);
         }
+        unset($applied['previous_room_ids']);
 
         return $applied;
     }
@@ -86,7 +87,7 @@ final class AiosellReservationWriter
 
     /**
      * @param  array<string, mixed>  $payload
-     * @return array{ok: bool, message: string, bookings: list<Booking>}
+     * @return array{ok: bool, message: string, bookings: list<Booking>, previous_room_ids?: list<int>}
      */
     private static function modify(array $payload): array
     {
@@ -105,10 +106,14 @@ final class AiosellReservationWriter
             ];
         }
 
+        $previousRoomIds = [];
         foreach ($links as $link) {
             $stay = $link->passion_booking_id ? Booking::query()->find($link->passion_booking_id) : null;
             if ($stay && in_array($stay->status, ['checked_out', 'completed'], true)) {
                 throw new RuntimeException('This stay has already checked out.');
+            }
+            if ($stay) {
+                $previousRoomIds[] = (int) $stay->room_id;
             }
         }
 
@@ -127,12 +132,12 @@ final class AiosellReservationWriter
                 $stay = null;
             }
             if ($stay && $stay->status === 'checked_in') {
-                $bookings[] = self::rewriteCheckedIn($stay, $payload, $roomPayload, $link);
+                $bookings[] = self::rewriteCheckedIn($stay, $payload, $roomPayload, $index, $link);
                 $taken[] = (int) $stay->room_id;
                 continue;
             }
             if ($stay) {
-                $bookings[] = self::rewriteConfirmed($stay, $payload, $roomPayload, $link, $taken, $groupId);
+                $bookings[] = self::rewriteConfirmed($stay, $payload, $roomPayload, $index, $link, $taken, $groupId);
                 $taken[] = (int) $stay->fresh()->room_id;
                 continue;
             }
@@ -163,6 +168,7 @@ final class AiosellReservationWriter
             'ok' => true,
             'message' => 'Reservation Modified Successfully',
             'bookings' => $bookings,
+            'previous_room_ids' => $previousRoomIds,
         ];
     }
 
@@ -225,7 +231,7 @@ final class AiosellReservationWriter
         [$start, $end] = self::stayDates($payload);
         $bookings = [];
         foreach ($rooms as $index => $roomPayload) {
-            $placed = self::placeRoom($payload, $roomPayload, $start, $end, null, $taken);
+            $placed = self::placeRoom($payload, $roomPayload, (int) $index, $start, $end, null, $taken);
             $taken[] = $placed['room_id'];
             $booking = self::insertStay($payload, $roomPayload, $placed, $start, $end, $groupId, $index === array_key_first($rooms));
             AiosellBookingLink::query()->updateOrCreate(
@@ -246,10 +252,10 @@ final class AiosellReservationWriter
      * @param  array<string, mixed>  $roomPayload
      * @param  list<int>  $taken
      */
-    private static function rewriteConfirmed(Booking $stay, array $payload, array $roomPayload, AiosellBookingLink $link, array &$taken, ?int $groupId): Booking
+    private static function rewriteConfirmed(Booking $stay, array $payload, array $roomPayload, int $index, AiosellBookingLink $link, array &$taken, ?int $groupId): Booking
     {
         [$start, $end] = self::stayDates($payload);
-        $placed = self::placeRoom($payload, $roomPayload, $start, $end, $stay, $taken);
+        $placed = self::placeRoom($payload, $roomPayload, $index, $start, $end, $stay, $taken);
         self::fillStay($stay, $payload, $roomPayload, $placed, $start, $end, $groupId);
         $link->fill(self::linkAmounts($payload, $stay, $groupId));
         $link->save();
@@ -261,7 +267,7 @@ final class AiosellReservationWriter
      * @param  array<string, mixed>  $payload
      * @param  array<string, mixed>  $roomPayload
      */
-    private static function rewriteCheckedIn(Booking $stay, array $payload, array $roomPayload, AiosellBookingLink $link): Booking
+    private static function rewriteCheckedIn(Booking $stay, array $payload, array $roomPayload, int $index, AiosellBookingLink $link): Booking
     {
         [$start, $end] = self::stayDates($payload);
         $map = self::roomMap($roomPayload);
@@ -276,7 +282,7 @@ final class AiosellReservationWriter
         self::fillStay($stay, $payload, $roomPayload, [
             'room_id' => (int) $stay->room_id,
             'rate_plan_id' => $plan?->rate_plan_id,
-            'total' => self::roomTotal($payload, $roomPayload),
+            'total' => self::roomTotal($payload, $index),
         ], $start, $end, $stay->booking_group_id ? (int) $stay->booking_group_id : null);
         $link->fill(self::linkAmounts($payload, $stay, $stay->booking_group_id ? (int) $stay->booking_group_id : null));
         $link->save();
@@ -419,32 +425,36 @@ final class AiosellReservationWriter
         if ($bookings === [] || self::pah($payload)) {
             return;
         }
-        $target = round((float) data_get($payload, 'amount.amountAfterTax', 0), 2);
-        if ($target <= 0.004) {
-            return;
-        }
-        $first = $bookings[0]->fresh();
-        $current = round((float) ($first->deposit_amount ?? 0), 2);
-        $due = round($target - $current, 2);
-        if ($due <= 0.004) {
+        if (round((float) data_get($payload, 'amount.amountAfterTax', 0), 2) <= 0.004) {
             return;
         }
         $note = self::channel($payload).' '.self::otaId($payload);
-        if (BookingPaymentLedger::enabled()) {
-            BookingPaymentLedger::recordPayment($first, [
-                'amount' => $due,
-                'method' => 'bank_transfer',
-                'source' => 'aiosell',
-                'reference_no' => self::otaId($payload),
-                'notes' => $note,
-                'bill_total' => (float) ($first->total_price ?? $target),
-            ]);
-        } else {
-            $first->forceFill([
-                'deposit_amount' => $target,
-                'payment_method' => 'bank_transfer',
-                'payment_status' => 'paid',
-            ])->save();
+        foreach ($bookings as $booking) {
+            $stay = $booking->fresh();
+            if (! $stay || $stay->status === 'cancelled') {
+                continue;
+            }
+            $target = round((float) ($stay->total_price ?? 0), 2);
+            $due = round($target - round((float) ($stay->deposit_amount ?? 0), 2), 2);
+            if ($due <= 0.004) {
+                continue;
+            }
+            if (BookingPaymentLedger::enabled()) {
+                BookingPaymentLedger::recordPayment($stay, [
+                    'amount' => $due,
+                    'method' => 'bank_transfer',
+                    'source' => 'aiosell',
+                    'reference_no' => self::otaId($payload),
+                    'notes' => $note,
+                    'bill_total' => $target,
+                ]);
+            } else {
+                $stay->forceFill([
+                    'deposit_amount' => $target,
+                    'payment_method' => 'bank_transfer',
+                    'payment_status' => 'paid',
+                ])->save();
+            }
         }
     }
 
@@ -454,7 +464,7 @@ final class AiosellReservationWriter
      * @param  list<int>  $taken
      * @return array{room_id: int, rate_plan_id: int|null, total: float}
      */
-    private static function placeRoom(array $payload, array $roomPayload, Carbon $start, Carbon $end, ?Booking $keep, array $taken): array
+    private static function placeRoom(array $payload, array $roomPayload, int $index, Carbon $start, Carbon $end, ?Booking $keep, array $taken): array
     {
         $map = self::roomMap($roomPayload);
         $plan = self::rateMap($roomPayload);
@@ -465,7 +475,7 @@ final class AiosellReservationWriter
                 return [
                     'room_id' => (int) $keep->room_id,
                     'rate_plan_id' => $plan?->rate_plan_id,
-                    'total' => self::roomTotal($payload, $roomPayload),
+                    'total' => self::roomTotal($payload, $index),
                 ];
             }
         }
@@ -516,7 +526,7 @@ final class AiosellReservationWriter
         return [
             'room_id' => (int) $roomId,
             'rate_plan_id' => $plan?->rate_plan_id,
-            'total' => self::roomTotal($payload, $roomPayload),
+            'total' => self::roomTotal($payload, $index),
         ];
     }
 
@@ -587,25 +597,42 @@ final class AiosellReservationWriter
     }
 
     /**
+     * The room's share of amountAfterTax, weighted by its nightly sellRate total. The last room takes the rounding
+     * remainder so the shares add up to the OTA total.
+     *
      * @param  array<string, mixed>  $payload
-     * @param  array<string, mixed>  $roomPayload
      */
-    private static function roomTotal(array $payload, array $roomPayload): float
+    private static function roomTotal(array $payload, int $index): float
     {
-        $sum = 0.0;
-        foreach ($roomPayload['prices'] ?? [] as $price) {
-            if (is_array($price)) {
-                $sum += (float) ($price['sellRate'] ?? 0);
+        $sums = [];
+        foreach (self::rooms($payload) as $room) {
+            $sum = 0.0;
+            foreach ($room['prices'] ?? [] as $price) {
+                if (is_array($price)) {
+                    $sum += (float) ($price['sellRate'] ?? 0);
+                }
             }
+            $sums[] = round($sum, 2);
         }
-        $rooms = $payload['rooms'] ?? [];
-        $onlyOne = is_array($rooms) && count($rooms) === 1;
-        $afterTax = (float) data_get($payload, 'amount.amountAfterTax', 0);
-        if ($onlyOne && $afterTax > 0) {
-            return round($afterTax, 2);
+        $afterTax = round((float) data_get($payload, 'amount.amountAfterTax', 0), 2);
+        if ($afterTax <= 0) {
+            return $sums[$index] ?? 0.0;
         }
 
-        return round($sum, 2);
+        $count = count($sums);
+        $weight = array_sum($sums);
+        $given = 0.0;
+        foreach ($sums as $i => $sum) {
+            $share = $i === $count - 1
+                ? round($afterTax - $given, 2)
+                : ($weight > 0 ? round($afterTax * $sum / $weight, 2) : round($afterTax / $count, 2));
+            if ($i === $index) {
+                return $share;
+            }
+            $given += $share;
+        }
+
+        return 0.0;
     }
 
     /**

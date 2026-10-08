@@ -38,6 +38,7 @@ use App\Services\HousekeepingChecklistService;
 use App\Services\RoomCleaningAvailabilityService;
 use App\Support\BookingNumber;
 use App\Support\BookingSplitStayRoomMove;
+use App\Support\HotelApiSync;
 use App\Support\HousekeepingTurnoverCarryForward;
 use App\Support\CleaningServiceClassification;
 use App\Support\CheckoutInspectionInspector;
@@ -1759,7 +1760,9 @@ class HousekeepingController extends Controller
 
             HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
             RoomParStockUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
-            if (! $assetProblem) {
+            if ($assetProblem) {
+                HotelApiSync::afterRoomBlock((int) $roomStatusBlock->room_id);
+            } else {
                 PortalNotifications::recordRoomReady(
                     (int) $room->id,
                     $userId ? (int) $userId : null,

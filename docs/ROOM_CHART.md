@@ -153,7 +153,7 @@ From the panel, reception releases an occupied or dirty room to housekeeping wit
 
 ## Hotel APIs
 
-After a booking create, edit, change of check-in date, extend, early checkout, split, cancel or room transfer, and after any room block save, Passion updates Doorloom and AioSell. Each one does nothing while it is off. A failed push does not undo the Passion save. See `DOORLOOM.md` and `AIOSELL.md`.
+After a booking create, edit, change of check-in date, extend, early checkout, split, cancel or room transfer, and after any room block save, Passion updates Doorloom and AioSell. A booking delete updates AioSell. Each one does nothing while it is off. A failed push does not undo the Passion save. See `DOORLOOM.md` and `AIOSELL.md`.
 
 ## Not included
 

@@ -70,6 +70,7 @@ final class AiosellClient
             try {
                 $response = Http::withBasicAuth((string) $integration->username, (string) $integration->password)
                     ->acceptJson()
+                    ->connectTimeout(5)
                     ->timeout(25)
                     ->send(strtoupper($method), $url, array_filter([
                         'json' => $json,

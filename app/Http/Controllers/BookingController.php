@@ -2336,6 +2336,7 @@ class BookingController extends Controller
             ], 422);
         }
         unset($validated['force_room_change']);
+        $roomIdsBefore = $booking->segments()->pluck('room_id')->push($booking->room_id)->map(fn ($id) => (int) $id)->all();
 
         if (
             array_key_exists('status', $validated)
@@ -2924,7 +2925,7 @@ class BookingController extends Controller
             $booking->load(['room.roomType.tax', 'creator:id,name', 'bookingGroup']),
             $guestIdentityUploadMeta,
         );
-        $payload['doorloom'] = HotelApiSync::syncBooking($booking);
+        $payload['doorloom'] = HotelApiSync::syncBooking($booking, $roomIdsBefore);
 
         return response()->json($payload);
     }
@@ -5451,6 +5452,7 @@ class BookingController extends Controller
         $allRoomIds = $booking->segments()->pluck('room_id')->push($booking->room_id)->unique();
         Room::whereIn('id', $allRoomIds, 'and', false)->update(['status' => 'available']);
         Booking::destroy($booking->id);
+        HotelApiSync::afterRoomsFreed($allRoomIds->map(fn ($id) => (int) $id)->values()->all());
 
         return response()->json(null, 204);
     }
@@ -5575,6 +5577,7 @@ class BookingController extends Controller
             'from_room_id' => 'nullable|integer',
         ]);
 
+        $roomIdsBefore = $booking->segments()->pluck('room_id')->push($booking->room_id)->map(fn ($id) => (int) $id)->all();
         $result = BookingRoomTransferService::execute($booking, $request->all());
         if (! ($result['ok'] ?? false)) {
             return response()->json(['message' => $result['message'] ?? 'Room transfer failed.'], 422);
@@ -5582,7 +5585,7 @@ class BookingController extends Controller
 
         return response()->json([
             'booking' => $result['booking'],
-            'doorloom' => HotelApiSync::syncBooking($result['booking']),
+            'doorloom' => HotelApiSync::syncBooking($result['booking'], $roomIdsBefore),
             'transfer' => $result['transfer'],
             'transfers' => BookingRoomTransferService::historyPayload($result['booking']),
         ]);

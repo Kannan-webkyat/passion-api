@@ -188,6 +188,7 @@ class AiosellIntegrationController extends Controller
 
         $items = array_is_list($fetched['json']) ? $fetched['json'] : [];
         $applied = 0;
+        $failed = [];
         foreach ($items as $item) {
             if (! is_array($item)) {
                 continue;
@@ -198,9 +199,23 @@ class AiosellIntegrationController extends Controller
             }
             $result = AiosellReservationWriter::apply($item);
             if (! $result['ok']) {
-                return response()->json(['ok' => false, 'message' => $result['message'], 'applied' => $applied], 422);
+                $failed[] = [
+                    'channel' => (string) ($item['channel'] ?? ''),
+                    'booking_id' => (string) ($item['bookingId'] ?? ''),
+                    'message' => $result['message'],
+                ];
+
+                continue;
             }
             $applied++;
+        }
+
+        if ($failed !== []) {
+            $first = $failed[0];
+            $message = $applied.' written, '.count($failed).' not written. '
+                .trim($first['channel'].' '.$first['booking_id']).': '.$first['message'];
+
+            return response()->json(['ok' => false, 'message' => $message, 'applied' => $applied, 'failed' => $failed], 422);
         }
 
         return response()->json(['ok' => true, 'message' => 'Reservations fetched.', 'applied' => $applied]);
@@ -412,6 +427,8 @@ class AiosellIntegrationController extends Controller
             'hotel_code' => $integration->hotel_code,
             'last_error' => $integration->last_error,
             'inventory_dirty' => (bool) $integration->inventory_dirty,
+            'queued_pushes_stalled' => (bool) config('services.aiosell.queue')
+                && AiosellInventorySync::waitingInventoryJobs(600) > 0,
             'rates_pending_room_types' => RoomType::query()
                 ->whereIn('id', array_map('intval', $integration->rates_pending_room_type_ids ?? []))
                 ->orderBy('name')
