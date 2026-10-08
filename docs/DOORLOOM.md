@@ -44,9 +44,11 @@ The toggle saves `enabled` with `PUT /doorloom`. It is on while the connection i
 - **Catch up** reads [GET /events](https://doorloom.com/developers) from the last sequence and runs each event through the same adapter as the webhook.
 - **Full sync** calls [POST /sync](https://doorloom.com/developers). Doorloom allows one full sync every 24 hours. Passion does not schedule it.
 
-## Online calendar and the room chart
+## Doorloom calendar and the room chart
 
-The online calendar is at Reception → Online calendar, next to Rate Calendar. It is read-only: nightly price, free rooms, and stop-sell. It stays empty until Doorloom sends nights. `GET /doorloom/calendar` uses the same view permissions as Rate Calendar.
+The Doorloom calendar is at Reception → Doorloom calendar (`/reception/onlineCalendar`), next to Rate Calendar. It is read-only: nightly price, free rooms, and stop-sell. It stays empty until Doorloom sends nights. `GET /doorloom/calendar` uses the same view permissions as Rate Calendar.
+
+The side-menu item and the Rate Calendar header link show only while the Doorloom connection is on. They read `GET /doorloom/status` (any signed-in user; returns `enabled`). Turning Doorloom on or off in Settings refreshes the menu. The page itself stays reachable by URL. It shows Doorloom data only, never AioSell.
 
 On the room chart, a new overnight stay for a linked room type is refused when any night has stop-sell or zero free units. The walk-in price on the receipt does not change. The chart shows a short note when Doorloom’s free count is lower than the rooms on the chart.
 

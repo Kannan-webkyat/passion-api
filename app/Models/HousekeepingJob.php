@@ -24,7 +24,7 @@ class HousekeepingJob extends Model
 
     public function room()
     {
-        return $this->belongsTo(Room::class, 'room_id');
+        return $this->belongsTo(Room::class, 'room_id')->withTrashed();
     }
 
     public function lines()

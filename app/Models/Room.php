@@ -3,9 +3,15 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
+/**
+ * Deleting a room archives it (`deleted_at`). History models reach archived rooms through `withTrashed()` relations.
+ */
 class Room extends Model
 {
+    use SoftDeletes;
+
     protected $fillable = [
         'room_number',
         'room_type_id',

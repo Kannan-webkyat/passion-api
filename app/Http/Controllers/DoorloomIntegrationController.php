@@ -38,6 +38,15 @@ class DoorloomIntegrationController extends Controller
         abort(403, 'Unauthorized action.');
     }
 
+    public function status()
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('doorloom_integrations')) {
+            return response()->json(['enabled' => false]);
+        }
+
+        return response()->json(['enabled' => (bool) DoorloomIntegration::current()->enabled]);
+    }
+
     public function show()
     {
         $this->checkSettings();

@@ -4,6 +4,7 @@ namespace Tests\Feature\RoomChart;
 
 use App\Models\AiosellBookingLink;
 use App\Models\AiosellIntegration;
+use App\Models\AiosellRatePlanMap;
 use App\Models\AiosellRoomMap;
 use App\Models\Booking;
 use App\Models\BookingPayment;
@@ -82,6 +83,55 @@ class AiosellIntegrationTest extends RoomChartTestCase
         });
     }
 
+    public function test_room_type_saved_in_passion_only_holds_rates_until_push_now(): void
+    {
+        $this->connect();
+        $this->mapRatePlan();
+        $this->actingWith(['room-types-edit', 'manage-settings']);
+
+        $this->putJson('/api/room-types/'.$this->roomType->id, [
+            'capacity' => 4,
+            'rate_plans' => [[
+                'id' => $this->dayPlan->id,
+                'name' => $this->dayPlan->name,
+                'base_price' => 4500,
+            ]],
+            'push_rates' => false,
+        ])->assertOk();
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/update-rates/'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/update/sample-pms'));
+        $this->assertSame([$this->roomType->id], AiosellIntegration::current()->rates_pending_room_type_ids);
+        $this->getJson('/api/aiosell')->assertJsonPath('rates_pending_room_types.0.id', $this->roomType->id);
+
+        $this->postJson('/api/aiosell/push')->assertOk();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/update-rates/sample-pms'));
+        $this->assertNull(AiosellIntegration::current()->rates_pending_room_type_ids);
+    }
+
+    public function test_room_type_save_pushes_rates_by_default(): void
+    {
+        $this->connect();
+        $this->mapRatePlan();
+        $this->actingWith(['room-types-edit']);
+
+        $this->putJson('/api/room-types/'.$this->roomType->id, [
+            'capacity' => 4,
+            'rate_plans' => [[
+                'id' => $this->dayPlan->id,
+                'name' => $this->dayPlan->name,
+                'base_price' => 4500,
+            ]],
+        ])->assertOk();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/update-rates/sample-pms')
+            && $request['updates'][0]['rates'][0]['rate'] == 4500);
+        $this->getJson('/api/aiosell/status?room_type_id='.$this->roomType->id)
+            ->assertJsonPath('enabled', true)
+            ->assertJsonPath('room_type_mapped', true);
+    }
+
     public function test_cancel_cancels_the_linked_stay(): void
     {
         $this->connect();
@@ -126,6 +176,19 @@ class AiosellIntegrationTest extends RoomChartTestCase
             'room_type_id' => $this->roomType->id,
             'room_code' => 'deluxe',
             'room_name' => 'Deluxe',
+            'active' => true,
+        ]);
+    }
+
+    private function mapRatePlan(): void
+    {
+        AiosellRatePlanMap::query()->create([
+            'room_type_id' => $this->roomType->id,
+            'rate_plan_id' => $this->dayPlan->id,
+            'room_code' => 'deluxe',
+            'rateplan_code' => 'deluxe-d-ep',
+            'occupancy_letter' => 'd',
+            'meal_code' => 'EP',
             'active' => true,
         ]);
     }

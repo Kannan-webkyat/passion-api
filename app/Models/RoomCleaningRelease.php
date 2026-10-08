@@ -62,7 +62,7 @@ class RoomCleaningRelease extends Model
 
     public function room(): BelongsTo
     {
-        return $this->belongsTo(Room::class);
+        return $this->belongsTo(Room::class)->withTrashed();
     }
 
     public function booking(): BelongsTo

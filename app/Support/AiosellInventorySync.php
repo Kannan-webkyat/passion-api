@@ -53,6 +53,7 @@ final class AiosellInventorySync
         $rates = self::pushRatesForRoomTypes($typeIds);
         if ($inventory['ok'] && $rates['ok']) {
             self::rememberError(null, false, true);
+            self::forgetPendingRates([]);
         }
         if (! $inventory['ok']) {
             return $inventory;
@@ -134,6 +135,8 @@ final class AiosellInventorySync
         }
 
         if ($updates === []) {
+            self::forgetPendingRates($roomTypeIds);
+
             return ['ok' => true, 'message' => 'No rate plans are mapped.'];
         }
 
@@ -143,6 +146,8 @@ final class AiosellInventorySync
         ]);
         if (! $result['ok']) {
             self::rememberError($result['message'] ?: 'Rate push failed.', true);
+        } else {
+            self::forgetPendingRates($roomTypeIds);
         }
 
         return ['ok' => $result['ok'], 'message' => $result['message'] ?: 'Rates updated.'];
@@ -151,6 +156,41 @@ final class AiosellInventorySync
     public static function pushRatesForRoomType(int $roomTypeId): void
     {
         self::pushRatesForRoomTypes([$roomTypeId]);
+    }
+
+    /**
+     * Price saved in Passion only. Inventory still goes out; rates wait for the next rate push.
+     */
+    public static function holdRatesForRoomType(int $roomTypeId): void
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('aiosell_integrations')) {
+            return;
+        }
+        $integration = AiosellIntegration::current();
+        if (! $integration->enabled) {
+            return;
+        }
+        $pending = array_map('intval', $integration->rates_pending_room_type_ids ?? []);
+        if (! in_array($roomTypeId, $pending, true)) {
+            $pending[] = $roomTypeId;
+        }
+        $integration->rates_pending_room_type_ids = array_values($pending);
+        $integration->save();
+    }
+
+    /**
+     * @param  list<int>  $roomTypeIds  Empty clears every room type.
+     */
+    private static function forgetPendingRates(array $roomTypeIds): void
+    {
+        $integration = AiosellIntegration::current();
+        $pending = array_map('intval', $integration->rates_pending_room_type_ids ?? []);
+        if ($pending === []) {
+            return;
+        }
+        $left = $roomTypeIds === [] ? [] : array_values(array_diff($pending, array_map('intval', $roomTypeIds)));
+        $integration->rates_pending_room_type_ids = $left === [] ? null : $left;
+        $integration->save();
     }
 
     /**

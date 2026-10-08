@@ -57,7 +57,7 @@ Editing controllers, routes, Support/Service classes or broadcast events.
 - Fire broadcasts with the timing the module already uses (deferred helper for HK/folio events,
   immediate for POS outlet updates). Reuse `dispatchIfEnabled()` where the event has it.
 - Where a method needs a specific response for a DB error, catch the `QueryException` locally
-  (`RoomTypeController::destroy()`); otherwise the global handler returns a generic 422.
+  (`DepartmentController::destroy()`); otherwise the global handler returns a generic 422.
 - Follow the where-clause style of the surrounding method (the explicit 4-arg
   `where('col', '=', $v, 'and')` and short `where('col', $v)` both exist).
 
@@ -76,4 +76,4 @@ Editing controllers, routes, Support/Service classes or broadcast events.
 - Service exception → 422: `GrnController` (`catch (\RuntimeException $e)`),
   `RoomCleaningReleaseController::store()` (`catch (InvalidArgumentException $e)`).
 - Manual transaction style: `HousekeepingController::finish()`.
-- FK-protected delete → 409: `RoomTypeController::destroy()` (`errorInfo[1] == 1451`).
+- FK-protected delete → 409: `DepartmentController::destroy()` (`errorInfo[1] == 1451`).

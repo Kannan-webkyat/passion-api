@@ -58,6 +58,29 @@ class AiosellIntegrationController extends Controller
         abort(403, 'Unauthorized action.');
     }
 
+    public function status(Request $request)
+    {
+        $validated = $request->validate([
+            'room_type_id' => 'nullable|integer',
+        ]);
+        if (! \Illuminate\Support\Facades\Schema::hasTable('aiosell_integrations')) {
+            return response()->json(['enabled' => false, 'ready' => false, 'room_type_mapped' => false]);
+        }
+        $integration = AiosellIntegration::current();
+        $roomTypeId = (int) ($validated['room_type_id'] ?? 0);
+        $mapped = $roomTypeId > 0 && AiosellRatePlanMap::query()
+            ->where('active', true)
+            ->where('room_type_id', $roomTypeId)
+            ->whereNotNull('rate_plan_id')
+            ->exists();
+
+        return response()->json([
+            'enabled' => (bool) $integration->enabled,
+            'ready' => $integration->ready(),
+            'room_type_mapped' => $mapped,
+        ]);
+    }
+
     public function show()
     {
         $this->checkSettings();
@@ -87,6 +110,7 @@ class AiosellIntegrationController extends Controller
         ]);
 
         $integration = AiosellIntegration::current();
+        $wasEnabled = (bool) $integration->enabled;
         if (array_key_exists('enabled', $validated)) {
             $integration->enabled = (bool) $validated['enabled'];
         }
@@ -121,7 +145,15 @@ class AiosellIntegrationController extends Controller
             ]);
         }
 
-        return response()->json($this->payload($integration->fresh()));
+        $integration = $integration->fresh();
+        $mappingSaved = isset($validated['room_maps']) || isset($validated['rate_plan_maps']);
+        $turnedOn = ! $wasEnabled && (bool) $integration->enabled;
+        if (($mappingSaved || $turnedOn) && $integration->ready()) {
+            AiosellInventorySync::pushNow();
+            $integration = $integration->fresh();
+        }
+
+        return response()->json($this->payload($integration));
     }
 
     public function loadMapping()
@@ -377,12 +409,17 @@ class AiosellIntegrationController extends Controller
     {
         return [
             'enabled' => (bool) $integration->enabled,
+            'username' => (string) $integration->username,
             'username_set' => trim((string) $integration->username) !== '',
             'password_set' => trim((string) $integration->password) !== '',
             'partner_id' => $integration->partner_id,
             'hotel_code' => $integration->hotel_code,
             'last_error' => $integration->last_error,
             'inventory_dirty' => (bool) $integration->inventory_dirty,
+            'rates_pending_room_types' => RoomType::query()
+                ->whereIn('id', array_map('intval', $integration->rates_pending_room_type_ids ?? []))
+                ->orderBy('name')
+                ->get(['id', 'name']),
             'connected_channels' => $integration->connected_channels ?? [],
             'ready' => $integration->ready(),
             'webhook_url' => rtrim((string) config('app.url'), '/').'/api/aiosell/webhook',

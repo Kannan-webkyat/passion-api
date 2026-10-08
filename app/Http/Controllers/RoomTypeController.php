@@ -23,6 +23,9 @@ class RoomTypeController extends Controller
         ]);
 
         $query = RoomType::with(['tax', 'ratePlans', 'seasons']);
+        if ($request->boolean('archived')) {
+            return $query->onlyTrashed()->orderByDesc('deleted_at')->get();
+        }
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
@@ -208,7 +211,10 @@ class RoomTypeController extends Controller
             'rate_plans.*.grace_minutes' => 'nullable|integer|min:0',
             'rate_plans.*.overtime_step_minutes' => 'nullable|integer|min:1',
             'rate_plans.*.overtime_hour_price' => 'nullable|numeric|min:0',
+            'push_rates' => 'nullable|boolean',
         ]);
+        $pushRates = $request->boolean('push_rates', true);
+        unset($validated['push_rates']);
 
         // Merge with existing values to handle partial updates
         $merged = array_merge([
@@ -292,7 +298,7 @@ class RoomTypeController extends Controller
         }
 
         $fresh = $roomType->fresh()->load(['tax', 'ratePlans', 'seasons']);
-        \App\Support\HotelApiSync::afterRoomType($fresh);
+        \App\Support\HotelApiSync::afterRoomType($fresh, $pushRates);
 
         return response()->json($fresh);
     }
@@ -300,15 +306,27 @@ class RoomTypeController extends Controller
     public function destroy(RoomType $roomType)
     {
         $this->authorizePermissions(['room-types-delete']);
-        try {
-            $roomType->delete();
 
-            return response()->json(null, 204);
-        } catch (\Illuminate\Database\QueryException $e) {
-            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
-                return response()->json(['message' => 'Cannot delete room type as it has existing rooms assigned to it.'], 409);
-            }
-            throw $e;
+        // rooms.room_type_id still points here after archiving, so the type must be empty first.
+        if ($roomType->rooms()->exists()) {
+            return response()->json(['message' => 'Cannot archive room type as it has existing rooms assigned to it. Move or delete those rooms first.'], 409);
         }
+
+        $roomType->delete();
+
+        return response()->json(null, 204);
+    }
+
+    public function restore(RoomType $roomType)
+    {
+        $this->authorizePermissions(['room-types-delete']);
+
+        if (! $roomType->trashed()) {
+            return response()->json(['message' => 'Room type is not archived.'], 422);
+        }
+
+        $roomType->restore();
+
+        return response()->json($roomType->fresh()->load(['tax', 'ratePlans', 'seasons']));
     }
 }

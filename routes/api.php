@@ -68,6 +68,8 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('notifications/{notification}/read', [PortalNotificationController::class, 'markRead']);
 
     // Room Types
+    Route::post('room-types/{roomType}/restore', [RoomTypeController::class, 'restore'])->withTrashed();
+    Route::post('rooms/{room}/restore', [RoomController::class, 'restore'])->withTrashed();
     Route::apiResource('room-types', RoomTypeController::class);
 
     // Rooms
@@ -225,6 +227,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('settings/bom-deduction', [SettingController::class, 'bomDeduction']);
     Route::put('settings/bom-deduction', [SettingController::class, 'updateBomDeduction']);
 
+    Route::get('doorloom/status', [DoorloomIntegrationController::class, 'status']);
     Route::get('doorloom', [DoorloomIntegrationController::class, 'show']);
     Route::put('doorloom', [DoorloomIntegrationController::class, 'update']);
     Route::post('doorloom/listings', [DoorloomIntegrationController::class, 'pushListings']);
@@ -232,6 +235,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('doorloom/sync', [DoorloomIntegrationController::class, 'fullSync']);
     Route::get('doorloom/calendar', [DoorloomIntegrationController::class, 'calendar']);
 
+    Route::get('aiosell/status', [AiosellIntegrationController::class, 'status']);
     Route::get('aiosell', [AiosellIntegrationController::class, 'show']);
     Route::put('aiosell', [AiosellIntegrationController::class, 'update']);
     Route::post('aiosell/mapping', [AiosellIntegrationController::class, 'loadMapping']);

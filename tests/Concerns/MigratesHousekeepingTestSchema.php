@@ -79,6 +79,12 @@ trait MigratesHousekeepingTestSchema
             });
         }
 
+        if (Schema::hasTable('room_types') && ! Schema::hasColumn('room_types', 'deleted_at')) {
+            Schema::table('room_types', function (Blueprint $table) {
+                $table->softDeletes();
+            });
+        }
+
         if (! Schema::hasTable('rooms')) {
             Schema::create('rooms', function (Blueprint $table) {
                 $table->id();
@@ -88,6 +94,12 @@ trait MigratesHousekeepingTestSchema
                 $table->string('floor')->nullable();
                 $table->boolean('is_active')->default(true);
                 $table->timestamps();
+            });
+        }
+
+        if (Schema::hasTable('rooms') && ! Schema::hasColumn('rooms', 'deleted_at')) {
+            Schema::table('rooms', function (Blueprint $table) {
+                $table->softDeletes();
             });
         }
 

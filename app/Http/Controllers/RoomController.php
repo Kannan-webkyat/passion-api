@@ -4,10 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\AuthorizesSpatiePermissions;
 use App\Models\InventoryLocation;
+use App\Models\BookingSegment;
 use App\Models\Room;
+use App\Models\RoomStatusBlock;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 class RoomController extends Controller
 {
@@ -24,6 +27,9 @@ class RoomController extends Controller
         ]);
 
         $query = Room::with(['roomType', 'connectedRoom', 'parTemplate']);
+        if ($request->boolean('archived')) {
+            return response()->json($query->onlyTrashed()->orderByDesc('deleted_at')->get());
+        }
         if (! $request->boolean('include_inactive')) {
             $query->where('is_active', true);
         }
@@ -34,9 +40,12 @@ class RoomController extends Controller
     public function store(Request $request)
     {
         $this->authorizePermissions(['rooms-create']);
+        if ($archived = $this->archivedRoomResponse($request->input('room_number'))) {
+            return $archived;
+        }
         $validated = $request->validate([
             'room_number' => 'required|string|unique:rooms,room_number',
-            'room_type_id' => 'required|exists:room_types,id',
+            'room_type_id' => ['required', Rule::exists('room_types', 'id')->whereNull('deleted_at')],
             'is_active' => 'nullable|boolean',
             'status' => 'required|in:available,occupied,maintenance,dirty,cleaning',
             'floor' => 'nullable|string',
@@ -45,7 +54,7 @@ class RoomController extends Controller
             'intercom_extension' => 'nullable|string|max:50',
             'view_type' => 'nullable|string|in:standard,garden_view,sea_view,pool_view',
             'is_smoking_allowed' => 'nullable|boolean',
-            'connected_room_id' => 'nullable|exists:rooms,id',
+            'connected_room_id' => ['nullable', Rule::exists('rooms', 'id')->whereNull('deleted_at')],
             'internal_notes' => 'nullable|string',
             'notes' => 'nullable|string',
         ]);
@@ -74,9 +83,12 @@ class RoomController extends Controller
     public function update(Request $request, Room $room)
     {
         $this->authorizePermissions(['rooms-edit']);
+        if ($archived = $this->archivedRoomResponse($request->input('room_number'), (int) $room->id)) {
+            return $archived;
+        }
         $validated = $request->validate([
             'room_number' => 'string|unique:rooms,room_number,' . $room->id,
-            'room_type_id' => 'exists:room_types,id',
+            'room_type_id' => [Rule::exists('room_types', 'id')->whereNull('deleted_at')],
             'is_active' => 'nullable|boolean',
             'status' => 'in:available,occupied,maintenance,dirty,cleaning',
             'floor' => 'nullable|string',
@@ -85,7 +97,7 @@ class RoomController extends Controller
             'intercom_extension' => 'nullable|string|max:50',
             'view_type' => 'nullable|string|in:standard,garden_view,sea_view,pool_view',
             'is_smoking_allowed' => 'nullable|boolean',
-            'connected_room_id' => 'nullable|exists:rooms,id',
+            'connected_room_id' => ['nullable', Rule::exists('rooms', 'id')->whereNull('deleted_at')],
             'internal_notes' => 'nullable|string',
             'notes' => 'nullable|string',
         ]);
@@ -102,20 +114,69 @@ class RoomController extends Controller
     public function destroy(Room $room)
     {
         $this->authorizePermissions(['rooms-delete']);
-        $type = $room->roomType()->first();
-        try {
-            Room::destroy($room->id);
-            if ($type) {
-                \App\Support\HotelApiSync::afterRoomType($type);
-            }
 
-            return response()->json(null, 204);
-        } catch (\Illuminate\Database\QueryException $e) {
-            if ($e->errorInfo[1] == 1451 || $e->getCode() == '23000') {
-                return response()->json(['message' => 'Cannot delete room as it has historical bookings or active transactions.'], 409);
-            }
-            throw $e;
+        $hasStay = BookingSegment::where('room_id', '=', $room->id, 'and')
+            ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
+            ->where('check_out_at', '>', now(), 'and')
+            ->exists();
+        if ($hasStay) {
+            return response()->json(['message' => "Cannot archive Room #{$room->room_number} while it has a current or upcoming stay. Move or cancel that stay first."], 409);
         }
+
+        $type = $room->roomType()->first();
+
+        DB::transaction(function () use ($room) {
+            RoomStatusBlock::where('room_id', '=', $room->id, 'and')
+                ->where('is_active', '=', true, 'and')
+                ->update(['is_active' => false]);
+            Room::where('connected_room_id', '=', $room->id, 'and')->update(['connected_room_id' => null]);
+            $room->connected_room_id = null;
+            $room->save();
+            $room->delete();
+        });
+
+        if ($type) {
+            \App\Support\HotelApiSync::afterRoomType($type);
+        }
+        \App\Events\HousekeepingStateUpdated::dispatchIfEnabled([(int) $room->id], 'room_archived');
+
+        return response()->json(null, 204);
+    }
+
+    public function restore(Room $room)
+    {
+        $this->authorizePermissions(['rooms-delete']);
+
+        if (! $room->trashed()) {
+            return response()->json(['message' => 'Room is not archived.'], 422);
+        }
+
+        $type = $room->roomType()->first();
+        if (! $type) {
+            return response()->json(['message' => "Room #{$room->room_number} belongs to an archived room type. Restore the room type first."], 422);
+        }
+
+        $room->restore();
+        \App\Support\HotelApiSync::afterRoomType($type);
+        \App\Events\HousekeepingStateUpdated::dispatchIfEnabled([(int) $room->id], 'room_restored');
+
+        return response()->json($room->fresh()->load(['roomType', 'connectedRoom', 'parTemplate']));
+    }
+
+    private function archivedRoomResponse(mixed $roomNumber, ?int $exceptId = null): ?\Illuminate\Http\JsonResponse
+    {
+        if (! is_string($roomNumber) || trim($roomNumber) === '') {
+            return null;
+        }
+
+        $archived = Room::onlyTrashed()
+            ->where('room_number', '=', $roomNumber, 'and')
+            ->when($exceptId, fn ($q) => $q->where('id', '!=', $exceptId, 'and'))
+            ->exists();
+
+        return $archived
+            ? response()->json(['message' => "Room #{$roomNumber} is archived. Restore it from Archived rooms instead of adding it again."], 422)
+            : null;
     }
 
     /**

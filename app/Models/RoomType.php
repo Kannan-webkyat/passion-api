@@ -3,9 +3,15 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
+/**
+ * Deleting a room type archives it (`deleted_at`); archived types drop out of every default query.
+ */
 class RoomType extends Model
 {
+    use SoftDeletes;
+
     /**
      * API/clients expect `seasonal_prices`; the relation is `seasons`.
      * @see RoomTypeSeason

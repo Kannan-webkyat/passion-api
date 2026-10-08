@@ -14,6 +14,7 @@ class AiosellIntegration extends Model
         'hotel_code',
         'last_error',
         'inventory_dirty',
+        'rates_pending_room_type_ids',
         'connected_channels',
     ];
 
@@ -22,6 +23,7 @@ class AiosellIntegration extends Model
         'username' => 'encrypted',
         'password' => 'encrypted',
         'inventory_dirty' => 'boolean',
+        'rates_pending_room_type_ids' => 'array',
         'connected_channels' => 'array',
     ];
 

@@ -476,6 +476,16 @@ trait MigratesRoomChartTestSchema
                 $table->unsignedBigInteger('doorloom_property_id')->nullable()->unique();
             });
         }
+        if (Schema::hasTable('room_types') && ! Schema::hasColumn('room_types', 'deleted_at')) {
+            Schema::table('room_types', function (Blueprint $table) {
+                $table->softDeletes();
+            });
+        }
+        if (Schema::hasTable('rooms') && ! Schema::hasColumn('rooms', 'deleted_at')) {
+            Schema::table('rooms', function (Blueprint $table) {
+                $table->softDeletes();
+            });
+        }
         if (Schema::hasTable('rooms') && ! Schema::hasColumn('rooms', 'doorloom_inventory_id')) {
             Schema::table('rooms', function (Blueprint $table) {
                 $table->unsignedBigInteger('doorloom_inventory_id')->nullable()->unique();
@@ -562,6 +572,7 @@ trait MigratesRoomChartTestSchema
                 $table->string('hotel_code')->nullable();
                 $table->text('last_error')->nullable();
                 $table->boolean('inventory_dirty')->default(false);
+                $table->json('rates_pending_room_type_ids')->nullable();
                 $table->json('connected_channels')->nullable();
                 $table->timestamps();
             });

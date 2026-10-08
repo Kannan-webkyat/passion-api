@@ -33,7 +33,7 @@ class BookingSegment extends Model
 
     public function room()
     {
-        return $this->belongsTo(Room::class);
+        return $this->belongsTo(Room::class)->withTrashed();
     }
 
     public function ratePlan()

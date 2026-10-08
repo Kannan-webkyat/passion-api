@@ -10,7 +10,7 @@ Settings → Integrations, for someone who can `manage-settings` (the Admin role
 
 AioSell is a row on the hotel API list, with its own logo, Settings button, and enable toggle. `PUT /aiosell` saves `enabled`. Credentials, mapping, webhooks, restrictions, and the multiplier stay on the settings panel either way.
 
-- Username and password are encrypted. The page shows whether each one is saved and never shows them again.
+- Username and password are encrypted. The page shows the saved username. The password is never shown again; the box shows dots when one is saved, and leaving it blank keeps it.
 - **Load mapping** calls `GET /property_details/{hotelCode}?partnerId={pms}` and stores `aiosell_room_maps` and `aiosell_rate_plan_maps`, plus `connected_channels`.
 - Reservation webhook: `POST /api/aiosell/webhook`. Message webhook: `POST /api/aiosell/messages`. Both sit outside Sanctum and check Basic Auth with `hash_equals`.
 - **Push now** sends inventory and rates for 366 nights and clears the dirty flag.
@@ -23,11 +23,22 @@ Meal map: `room_only` EP, `breakfast` CP, `half_board` MAP, `full_board` AP. Occ
 | AioSell | When Passion calls it |
 |---|---|
 | `POST /update/{pms}` | After a stay or room-block save, and on Push now. Count is physical rooms of that type still sellable that night. |
-| `POST /update-rates/{pms}` | After a room-type save, and on Push now. |
+| `POST /update-rates/{pms}` | After a room-type save (base price, rate plans, seasonal prices), unless the save sends `push_rates: false`, and on Push now. |
+| Both, for all 366 nights | Saving the AioSell panel with mapping rows (room type, rate plan, price override, active), or switching the connection on. Skipped when credentials, partner id, or hotel code are missing. |
 | Inventory restrictions, same `/update/{pms}` with `rooms[].restrictions` and `toChannels` | Restrictions form with no rate plan |
 | Rate restrictions, same `/update-rates/{pms}` | Restrictions form with a rate plan |
 | `POST /channel_multiplier/{pms}` | Multiplier form. `channels` cannot be empty. `1` leaves rates unchanged. |
 | `POST /data/{pms}` `type=reservation` | Catch up |
+
+### Price confirmation on Room Types
+
+On `/admin/roomTypes`, Save on an existing room type compares the nightly rate plans and seasonal prices with the loaded values. When a price changed, the screen calls `GET /aiosell/status?room_type_id=` (any signed-in user; returns `enabled`, `ready`, `room_type_mapped`). When AioSell is on and the room type has an active rate-plan mapping, a dialog lists the changes and offers:
+
+- **Save and update online**: `PUT /room-types/{id}` with `push_rates: true`. Inventory and rates are pushed.
+- **Save in Passion only**: `push_rates: false`. Inventory is still pushed. The room type id is added to `aiosell_integrations.rates_pending_room_type_ids`, and the AioSell card lists it as "Prices changed in Passion but not online".
+- **Cancel**: nothing is saved.
+
+A later rate push for that room type removes it from the list. A fully successful Push now clears the list. Changes to other fields, new room types, and saves while AioSell is off or the room type is unmapped save without the dialog. A request without `push_rates` pushes rates, as before.
 
 Stay and block saves that already pushed Doorloom also push AioSell through `HotelApiSync`: booking create, update, extend, early checkout, split, cancel, room transfer, room create/update/delete, room-type update, and room-status block store, update, and destroy. Each integration no-ops when it is off.
 

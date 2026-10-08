@@ -34,11 +34,15 @@ final class HotelApiSync
         return self::syncBookings([$booking]);
     }
 
-    public static function afterRoomType(RoomType $roomType): void
+    public static function afterRoomType(RoomType $roomType, bool $pushRates = true): void
     {
         DoorloomStaySync::updateListingIfLinked($roomType);
         AiosellInventorySync::pushInventoryForRoomTypes([(int) $roomType->id]);
-        AiosellInventorySync::pushRatesForRoomType((int) $roomType->id);
+        if ($pushRates) {
+            AiosellInventorySync::pushRatesForRoomType((int) $roomType->id);
+        } else {
+            AiosellInventorySync::holdRatesForRoomType((int) $roomType->id);
+        }
     }
 
     public static function afterRoomBlock(int $roomId): void
