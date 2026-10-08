@@ -54,7 +54,7 @@ Stay and block saves that already pushed Doorloom also push AioSell through `Hot
 - `pah: false` records `amount.amountAfterTax` through the payment ledger as `bank_transfer`, with notes naming the channel and booking id. `pah: true` stores the total for the desk to collect. Commission, TCS, and TDS stay on `aiosell_booking_links` and are not folio lines.
 - Card fields are removed before the payload is handled. They are not stored.
 
-Booking.com and Goibibo / MakeMyTrip (`booking.com`, `gommt`) can be marked no-show from the booking detail. That calls `POST /marknoshow/{pms}` and appends an audit line on `notes`. Other channels do not show the action. Reading the thread needs `reservation-view` (or `reservation`, `reservation-edit`, `manage-settings`, or Admin). Reply and no-show need `reservation-edit` (or `reservation`, `manage-settings`, or Admin).
+Booking.com and Goibibo / MakeMyTrip (`booking.com`, `gommt`) can be marked no-show from the booking detail. That calls `POST /marknoshow/{pms}` and appends an audit line on `notes`. Other channels do not show the action. Reading the thread needs `reservation-view` (or `reservation`, `reservation-edit`, `manage-settings`, or Admin). Reply and no-show need `reservation-edit`; other permissions and the Admin role alone get 403. The screen mutes both buttons without `reservation-edit` and asks for confirmation before sending a no-show.
 
 `POST /api/aiosell/messages` stores `aiosell_messages` by `message_id`. A repeat `message_id` is ignored. The booking detail shows the thread and sends `POST /message-reply/{pms}`. Booking.com also sends `booking_id`. Guest name, phone, and email from that payload are not written to logs.
 

@@ -28,7 +28,7 @@ description: Changes room folio billing and payments in passion-api — BookingP
 - Existing direct scalar writes (keep them; don't add new ones):
   `BookingController::store()` zeroes `deposit_amount` before seeding the ledger;
   `cancelReservation()` writes `payment_status` (+ deposit/refund scalars when the ledger is disabled);
-  `update()` passes a patched `payment_status` through unless a bill hint is present.
+  `update()` never takes `payment_status` from the request; it re-derives it when `total_price` changes.
 - `enabled()` ⇔ `Schema::hasTable('booking_payments')`; callers branch on it (`storePayment()` returns 503 when disabled).
 - Methods: `BookingPaymentLedger::METHODS` = `cash, card, upi, bank_transfer`.
   Sources: `booking_create, deposit, checkout, manual, legacy_patch, cancellation`.
@@ -41,9 +41,12 @@ description: Changes room folio billing and payments in passion-api — BookingP
   (laundry, checkout inspection and POS room charge all defer this event; POS *outlet* broadcasts are immediate).
   `LaundryRequestController::postToRoom()` guards with `Schema::hasColumn('booking_extra_charges', 'description')`.
 - **Bill total**: `effectiveBookingGrand()` = room stay + folio extras − `checkout_discount_amount`;
-  payment endpoints accept optional `bill_total`, defaulting to `round($this->effectiveBookingGrand($booking), 2)`.
+  `storePayment` / `voidPayment` accept `bill_total` but ignore it and always pass
+  `round($this->effectiveBookingGrand($booking), 2)` to the ledger.
 - **Journals**: room revenue is recognized only at checkout by `BookingCheckoutPoster::post()` inside the
-  checkout transaction; deposits are not journaled at receipt. `JournalPostingService::post()` is idempotent
+  checkout transaction (group scope: `postGroupDeparture()` from the pooled group cash); deposits are not
+  journaled at receipt. A refund after checkout posts `BookingRefundPoster` for the part beyond unbooked
+  overpayment. `JournalPostingService::post()` is idempotent
   per `(source_type, source_id)` and balanced; `JournalPostingException` → 422 globally.
   POS/inventory use `LedgerBackedTransaction::run(mutate, postMutate, postJournal, journalRequired)` (fail-closed)
   for settle / amend / paid void; POS refund uses a plain `DB::transaction` with `PosRefundPoster::post()`.
@@ -90,7 +93,7 @@ description: Changes room folio billing and payments in passion-api — BookingP
 ## 8. Verification checklist
 - [ ] New booking money movements go through `BookingPaymentLedger`; no new direct scalar writes;
       existing ones (`store()`, `cancelReservation()`, `update()`) unchanged unless asked
-- [ ] New code does not delete or edit `booking_payments` rows (`destroy()` cascade is existing behavior)
+- [ ] New code does not delete or edit `booking_payments` rows (`destroy()` refuses bookings with payments)
 - [ ] Folio charge writes `booking_extra_charges` + `extra_charges` and broadcasts `BookingChargesUpdated`
 - [ ] Journals posted in the same transaction as the state change; idempotent source key
 - [ ] Bill-total change reviewed across checkout, payments, invoice and poster

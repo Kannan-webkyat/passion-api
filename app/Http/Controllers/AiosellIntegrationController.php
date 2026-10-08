@@ -44,18 +44,14 @@ class AiosellIntegrationController extends Controller
         abort(403, 'Unauthorized action.');
     }
 
+    /** Same rule as BookingController::allowReservationEdit(): guest messages and no-shows change the stay. */
     private function canEditReservation(): void
     {
         $user = Auth::user();
-        if ($user && (
-            $user->hasRole('Admin')
-            || $user->can('reservation-edit')
-            || $user->can('reservation')
-            || $user->can('manage-settings')
-        )) {
+        if ($user && $user->can('reservation-edit')) {
             return;
         }
-        abort(403, 'Unauthorized action.');
+        abort(403, 'You do not have permission to perform this action.');
     }
 
     public function status(Request $request)

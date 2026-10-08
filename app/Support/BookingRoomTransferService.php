@@ -24,7 +24,7 @@ final class BookingRoomTransferService
     public static function preview(Booking $booking, array $input): array
     {
         $parsed = self::validateInput($input);
-        $ctx = self::buildContext($booking, $parsed);
+        $ctx = self::buildContext($booking, $parsed, false);
         if (! $ctx['ok']) {
             return $ctx;
         }
@@ -48,7 +48,23 @@ final class BookingRoomTransferService
 
         $preview = self::pricingPreview($ctx);
 
-        return DB::transaction(function () use ($booking, $ctx, $preview, $parsed) {
+        $lockRoomIds = [(int) $ctx['from_room']->id, (int) $ctx['to_room']->id];
+
+        return BookingRoomAvailability::withRoomLocks($lockRoomIds, function () use ($booking, $ctx, $preview, $parsed) {
+            $locked = Booking::query()->whereKey($booking->id)->lockForUpdate()->firstOrFail();
+            $segmentNow = BookingSegment::query()->whereKey($ctx['active_segment']->id)->lockForUpdate()->first();
+            if ($locked->status !== $booking->status
+                || (int) $locked->room_id !== (int) $booking->room_id
+                || abs((float) $locked->total_price - (float) $booking->total_price) > 0.004
+                || ! $segmentNow
+                || (int) $segmentNow->room_id !== (int) $ctx['active_segment']->room_id
+                || $segmentNow->status !== $ctx['active_segment']->status) {
+                return ['ok' => false, 'message' => 'This reservation was just changed by another action. Reload it and try again.'];
+            }
+            if (! self::isRoomAvailable((int) $ctx['to_room']->id, $ctx['transfer_at'], $ctx['segment_end'], (int) $booking->id)) {
+                return ['ok' => false, 'message' => 'Selected room is not available for the remaining stay dates.'];
+            }
+
             $result = self::applyTransfer($ctx, $preview);
             $transfer = self::recordTransfer($booking, $ctx, $preview, $result);
             self::appendAuditNote($booking, $ctx, $preview, $transfer);
@@ -56,7 +72,7 @@ final class BookingRoomTransferService
 
             $booking->refresh()->load([
                 'room.roomType.tax',
-                'creator',
+                'creator:id,name',
                 'bookingGroup',
                 'segments.room.roomType',
                 'roomTransfers.fromRoom',
@@ -132,7 +148,7 @@ final class BookingRoomTransferService
     /**
      * @return array<string, mixed>
      */
-    private static function buildContext(Booking $booking, array $parsed): array
+    private static function buildContext(Booking $booking, array $parsed, bool $persistBaseline = true): array
     {
         if (! in_array($booking->status, ['confirmed', 'checked_in'], true)) {
             return ['ok' => false, 'message' => 'Room transfer is only allowed for confirmed or checked-in bookings.'];
@@ -145,7 +161,7 @@ final class BookingRoomTransferService
 
         $booking->loadMissing(['segments.room.roomType', 'room.roomType']);
         if ($booking->segments->isEmpty()) {
-            BookingSegment::create([
+            $baseline = new BookingSegment([
                 'booking_id' => $booking->id,
                 'room_id' => $booking->room_id,
                 'check_in' => $booking->check_in,
@@ -159,7 +175,13 @@ final class BookingRoomTransferService
                 'total_price' => $booking->total_price,
                 'status' => $booking->status === 'checked_in' ? 'checked_in' : 'confirmed',
             ]);
-            $booking->load('segments.room.roomType');
+            if ($persistBaseline) {
+                $baseline->save();
+                $booking->load('segments.room.roomType');
+            } else {
+                $baseline->setRelation('room', $booking->room);
+                $booking->setRelation('segments', new \Illuminate\Database\Eloquent\Collection([$baseline]));
+            }
         }
         if ($parsed['from_room_id'] > 0) {
             $resolved = self::resolveSegmentInRoom($booking, $parsed['from_room_id']);
@@ -356,7 +378,7 @@ final class BookingRoomTransferService
             ];
         }
 
-        $elapsedShare = self::elapsedFraction($segment, $transferAt);
+        $elapsedShare = self::elapsedFraction($segment, $transferAt, (string) ($booking->booking_unit ?? 'day'));
         $oldSegmentFull = (float) ($segment->total_price ?? 0);
         $closedSegmentPrice = round($oldSegmentFull * $elapsedShare, 2);
         $remainingFromOld = round($oldSegmentFull - $closedSegmentPrice, 2);
@@ -385,10 +407,20 @@ final class BookingRoomTransferService
         ];
     }
 
-    private static function elapsedFraction(BookingSegment $segment, Carbon $transferAt): float
+    /**
+     * Share of the segment the old room keeps. Day stays split by whole nights (the transfer night belongs to
+     * the new room, which is priced from the transfer date); hourly stays split by minutes.
+     */
+    private static function elapsedFraction(BookingSegment $segment, Carbon $transferAt, string $bookingUnit = 'day'): float
     {
         $ci = Carbon::parse($segment->check_in_at ?? $segment->check_in);
         $co = Carbon::parse($segment->check_out_at ?? $segment->check_out);
+        if ($bookingUnit !== 'hour_package') {
+            $totalNights = max(1, (int) $ci->copy()->startOfDay()->diffInDays($co->copy()->startOfDay()));
+            $elapsedNights = max(0, min($totalNights, (int) $ci->copy()->startOfDay()->diffInDays($transferAt->copy()->startOfDay(), false)));
+
+            return $elapsedNights / $totalNights;
+        }
         $totalMinutes = max(1, $ci->diffInMinutes($co));
         $elapsed = max(0, min($totalMinutes, $ci->diffInMinutes($transferAt)));
 

@@ -435,12 +435,12 @@ class RoomChartReservationCreateTest extends RoomChartTestCase
             ->save();
         $this->makeBooking($room, $this->day(3), $this->day(4), ['first_name' => 'New', 'phone' => '9000011111']);
 
-        $this->getJson('/api/bookings/guest-search?phone=11111')
+        $this->getJson('/api/bookings/guest-search?phone=0011111')
             ->assertOk()
             ->assertJsonPath('first_name', 'New');
 
-        $this->getJson('/api/bookings/guest-search?phone=12')->assertStatus(422);
-        $this->getJson('/api/bookings/guest-search?phone=55555')->assertNotFound();
+        $this->getJson('/api/bookings/guest-search?phone=11111')->assertStatus(422);
+        $this->getJson('/api/bookings/guest-search?phone=5555555')->assertNotFound();
     }
 
     public function test_duplicate_room_in_a_group_is_rejected_without_a_booking(): void

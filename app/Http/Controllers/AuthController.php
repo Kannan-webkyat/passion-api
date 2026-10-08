@@ -6,11 +6,20 @@ use App\Models\LoginAttempt;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Validation\ValidationException;
 use Spatie\Permission\PermissionRegistrar;
 
 class AuthController extends Controller
 {
+    private const LOGIN_MAX_PER_ACCOUNT = 5;
+
+    private const LOGIN_ACCOUNT_DECAY_SECONDS = 300;
+
+    private const LOGIN_MAX_PER_IP = 30;
+
+    private const LOGIN_IP_DECAY_SECONDS = 60;
+
     public function login(Request $request)
     {
         $request->validate([
@@ -19,11 +28,26 @@ class AuthController extends Controller
             'device_name' => 'required',
         ]);
 
+        $email = strtolower(trim((string) $request->email));
+        $limits = [
+            'login:'.$email.'|'.$request->ip() => [self::LOGIN_MAX_PER_ACCOUNT, self::LOGIN_ACCOUNT_DECAY_SECONDS],
+            'login-ip:'.$request->ip() => [self::LOGIN_MAX_PER_IP, self::LOGIN_IP_DECAY_SECONDS],
+        ];
+        foreach ($limits as $key => [$max]) {
+            if (RateLimiter::tooManyAttempts($key, $max)) {
+                $seconds = RateLimiter::availableIn($key);
+
+                return response()->json([
+                    'message' => "Too many login attempts. Try again in {$seconds} seconds.",
+                ], 429)->header('Retry-After', (string) $seconds);
+            }
+        }
+
         $user = User::where('email', $request->email)->first();
         $successful = $user && Hash::check($request->password, $user->password);
 
         LoginAttempt::create([
-            'email' => strtolower(trim((string) $request->email)),
+            'email' => $email,
             'successful' => $successful && (bool) ($user->is_active ?? true),
             'ip_address' => $request->ip(),
             'user_agent' => substr((string) $request->userAgent(), 0, 500),
@@ -31,6 +55,10 @@ class AuthController extends Controller
         ]);
 
         if (! $successful) {
+            foreach ($limits as $key => [, $decay]) {
+                RateLimiter::hit($key, $decay);
+            }
+
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials are incorrect.'],
             ]);
@@ -41,6 +69,8 @@ class AuthController extends Controller
                 'email' => ['This account has been deactivated. Contact an administrator.'],
             ]);
         }
+
+        RateLimiter::clear('login:'.$email.'|'.$request->ip());
 
         $token = $user->createToken($request->device_name)->plainTextToken;
 

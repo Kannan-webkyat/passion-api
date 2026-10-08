@@ -68,6 +68,40 @@ class GuestIdentityImageServiceTest extends TestCase
         $this->assertFalse($result['compressed']);
     }
 
+    public function test_extension_comes_from_real_image_type_not_data_url(): void
+    {
+        if (! function_exists('imagecreatetruecolor')) {
+            $this->markTestSkipped('GD extension required.');
+        }
+
+        $dataUrl = 'data:image/webp;base64,'.base64_encode($this->makePngBinary(20, 20));
+        $result = (new GuestIdentityImageService)->storeDataUrl($dataUrl, 0);
+
+        $this->assertStringEndsWith('.png', (string) $result['path']);
+    }
+
+    public function test_rejects_oversized_upload(): void
+    {
+        if (! function_exists('imagecreatetruecolor')) {
+            $this->markTestSkipped('GD extension required.');
+        }
+        config(['guest_identity.max_upload_bytes' => 10]);
+
+        $this->expectException(\InvalidArgumentException::class);
+        (new GuestIdentityImageService)->storeDataUrl('data:image/png;base64,'.base64_encode($this->makePngBinary(20, 20)), 0);
+    }
+
+    public function test_managed_path_rejects_traversal_and_urls(): void
+    {
+        $service = new GuestIdentityImageService;
+
+        $this->assertTrue($service->isManagedPath('identities/guest_id_abc_0.jpg'));
+        $this->assertFalse($service->isManagedPath('identities/../.env'));
+        $this->assertFalse($service->isManagedPath('https://evil.test/x.jpg'));
+        $this->assertFalse($service->isManagedPath('other/guest_id_abc_0.jpg'));
+        $this->assertNull($service->signedUrl('identities/../.env'));
+    }
+
     private function makePngBinary(int $width, int $height): string
     {
         $img = imagecreatetruecolor($width, $height);

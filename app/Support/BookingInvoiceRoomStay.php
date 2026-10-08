@@ -84,11 +84,24 @@ final class BookingInvoiceRoomStay
         ];
     }
 
-    /** Fee the latest "[Early CI: …] Fee: ₹X" audit line added to extra_charges (0 when cleared or free). */
+    /** Fee the latest "[Early CI: …]" audit line added to extra_charges (0 when cleared or free). */
     private static function earlyCheckInFeeFromAuditNotes(Booking $booking): float
     {
-        foreach (array_reverse(preg_split('/\R/', (string) $booking->notes) ?: []) as $line) {
+        return self::earlyCheckInFolioFeeFromNotes((string) $booking->notes);
+    }
+
+    /**
+     * "Added to folio: ₹X" when part of the fee was already in the room total at create;
+     * older lines without it added the whole "Fee: ₹X".
+     */
+    public static function earlyCheckInFolioFeeFromNotes(string $notes): float
+    {
+        foreach (array_reverse(preg_split('/\R/', $notes) ?: []) as $line) {
             if (str_starts_with($line, '[Early CI:')) {
+                if (preg_match('/Added to folio: ₹([0-9]+(?:\.[0-9]+)?)/u', $line, $m)) {
+                    return (float) $m[1];
+                }
+
                 return preg_match('/Fee: ₹([0-9]+(?:\.[0-9]+)?)/u', $line, $m) ? (float) $m[1] : 0.0;
             }
         }
@@ -279,31 +292,44 @@ final class BookingInvoiceRoomStay
             return 0.0;
         }
 
-        $typeRaw = strtolower((string) ($roomType->early_check_in_type ?? 'flat_fee'));
-        $type = match (true) {
-            in_array($typeRaw, ['hour', 'per_hour'], true) => 'per_hour',
-            in_array($typeRaw, ['minute', 'per_minute'], true) => 'per_minute',
-            in_array($typeRaw, ['flat', 'flat_fee'], true) => 'flat_fee',
-            default => $typeRaw,
-        };
-
         $deltaMinutes = $policyCheckInMin - $etaMin;
         $bufferMins = (int) ($roomType->early_check_in_buffer_minutes ?? 0);
         $billableMins = max(0, $deltaMinutes - $bufferMins);
-        if ($billableMins <= 0) {
+
+        return self::timeFeeAmount($roomType->early_check_in_type, $fee, $billableMins, self::nightlyRateForFees($booking));
+    }
+
+    /**
+     * Early check-in / late checkout policy fee for minutes past the buffer.
+     * `percentage` is a share of the nightly room rate; unknown types charge the flat fee.
+     */
+    public static function timeFeeAmount(?string $typeRaw, float $fee, int $billableMins, float $nightlyPreTax): float
+    {
+        if ($fee <= 0.004 || $billableMins <= 0) {
             return 0.0;
         }
 
-        if ($type === 'per_hour') {
-            $billableHours = (int) ceil($billableMins / 60);
+        $type = strtolower((string) ($typeRaw ?? 'flat_fee'));
 
-            return round($billableHours * $fee, 2);
-        }
-        if ($type === 'per_minute') {
-            return round($billableMins * $fee, 2);
+        return round(match (true) {
+            in_array($type, ['hour', 'per_hour'], true) => ceil($billableMins / 60) * $fee,
+            in_array($type, ['minute', 'per_minute'], true) => $billableMins * $fee,
+            $type === 'percentage' => $nightlyPreTax * $fee / 100,
+            default => $fee,
+        }, 2);
+    }
+
+    /** Pre-tax nightly rate a `percentage` fee applies to: the booking's rate plan, else stored total per night. */
+    public static function nightlyRateForFees(Booking $booking): float
+    {
+        $planPrice = $booking->rate_plan_id ? (float) (RatePlan::query()->whereKey($booking->rate_plan_id)->value('base_price') ?? 0) : 0.0;
+        if ($planPrice > 0.004) {
+            return $planPrice;
         }
 
-        return round($fee, 2);
+        $nights = max(1, (int) Carbon::parse($booking->check_in)->startOfDay()->diffInDays(Carbon::parse($booking->check_out)->startOfDay()));
+
+        return round((float) ($booking->total_price ?? 0) / $nights, 2);
     }
 
     /**
@@ -331,30 +357,10 @@ final class BookingInvoiceRoomStay
             return 0.0;
         }
 
-        $typeRaw = strtolower((string) ($roomType->late_check_out_type ?? 'flat_fee'));
-        $type = match (true) {
-            in_array($typeRaw, ['hour', 'per_hour'], true) => 'per_hour',
-            in_array($typeRaw, ['minute', 'per_minute'], true) => 'per_minute',
-            in_array($typeRaw, ['flat', 'flat_fee'], true) => 'flat_fee',
-            default => $typeRaw,
-        };
-
         $deltaMinutes = $lcoMin - $policyCheckOutMin;
         $bufferMins = (int) ($roomType->late_check_out_buffer_minutes ?? 0);
         $billableMins = max(0, $deltaMinutes - $bufferMins);
-        if ($billableMins <= 0) {
-            return 0.0;
-        }
 
-        if ($type === 'per_hour') {
-            $billableHours = (int) ceil($billableMins / 60);
-
-            return round($billableHours * $fee, 2);
-        }
-        if ($type === 'per_minute') {
-            return round($billableMins * $fee, 2);
-        }
-
-        return round($fee, 2);
+        return self::timeFeeAmount($roomType->late_check_out_type, $fee, $billableMins, self::nightlyRateForFees($booking));
     }
 }

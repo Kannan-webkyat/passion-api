@@ -101,8 +101,18 @@ class Booking extends Model
         return "{$this->first_name} {$this->last_name}";
     }
 
+    /** Signed display URLs, index-aligned with guest_identities (files live on a private disk). */
+    public function getGuestIdentityUrlsAttribute(): array
+    {
+        if (! array_key_exists('guest_identities', $this->attributes)) {
+            return [];
+        }
+
+        return app(\App\Services\GuestIdentityImageService::class)->signedUrls($this->guest_identities);
+    }
+
     // Appended attributes
-    protected $appends = ['guest_name'];
+    protected $appends = ['guest_name', 'guest_identity_urls'];
 
     protected $casts = [
         'child_ages' => 'array',

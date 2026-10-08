@@ -292,7 +292,7 @@ final class BookingCancellationPolicy
             $effectiveFee = min($effectiveFee, $stayTotal);
         }
 
-        $deposit = max(0.0, round((float) ($booking->deposit_amount ?? 0), 2));
+        $deposit = max(0.0, round((float) ($booking->deposit_amount ?? 0) - (float) ($booking->refund_amount ?? 0), 2));
         $additionalCollected = max(0.0, round($additionalCollected, 2));
         $depositForSettle = round($deposit + $additionalCollected, 2);
 

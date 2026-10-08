@@ -6,6 +6,7 @@ use App\Models\BookingSegment;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\RoomType;
+use App\Models\Setting;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -51,7 +52,71 @@ final class BookingRoomAvailability
             $q->where('booking_id', '!=', $excludeBookingId);
         }
 
-        return $q->exists();
+        return $q->exists() || self::hasDepartureMorningOverlap($roomId, $checkInAt, $checkOutAt, $excludeBookingId);
+    }
+
+    /**
+     * Day stays store check-out as midnight, but the guest keeps the room until the standard check-out time
+     * (or their late checkout) on the departure day. An hourly window that day cannot start before then,
+     * and a new day stay cannot depart into an hourly stay that starts before standard check-out.
+     */
+    private static function hasDepartureMorningOverlap(int $roomId, Carbon $checkInAt, Carbon $checkOutAt, ?int $excludeBookingId): bool
+    {
+        $isMidnight = static fn (Carbon $dt): bool => $dt->format('H:i:s') === '00:00:00';
+
+        $active = static function () use ($roomId, $excludeBookingId) {
+            $q = BookingSegment::query()
+                ->where('room_id', $roomId)
+                ->whereNotIn('status', self::INACTIVE_SEGMENT_STATUSES);
+            if ($excludeBookingId) {
+                $q->where('booking_id', '!=', $excludeBookingId);
+            }
+
+            return $q;
+        };
+
+        if (! $isMidnight($checkInAt)) {
+            $dayStart = $checkInAt->copy()->startOfDay();
+            $departing = $active()->with('booking:id,check_out,late_checkout_time')
+                ->where('check_out_at', $dayStart)
+                ->where('check_in_at', '<', $dayStart)
+                ->get();
+            foreach ($departing as $segment) {
+                $standardCheckOut ??= self::standardCheckOutTime();
+                $late = $segment->booking
+                    && Carbon::parse($segment->booking->check_out)->toDateString() === $dayStart->toDateString()
+                    && $segment->booking->late_checkout_time
+                    ? substr((string) $segment->booking->late_checkout_time, 0, 5)
+                    : null;
+                $leavesAt = max($standardCheckOut, $late ?? $standardCheckOut);
+                if ($checkInAt->format('H:i') < $leavesAt) {
+                    return true;
+                }
+            }
+        }
+
+        if ($isMidnight($checkInAt) && $isMidnight($checkOutAt) && $checkOutAt->gt($checkInAt)) {
+            $departureDay = $checkOutAt->copy()->startOfDay();
+            $firstHourly = $active()
+                ->where('check_in_at', '>', $departureDay)
+                ->where('check_in_at', '<', $departureDay->copy()->addDay())
+                ->min('check_in_at');
+
+            return $firstHourly !== null
+                && Carbon::parse($firstHourly)->format('H:i') < self::standardCheckOutTime();
+        }
+
+        return false;
+    }
+
+    private static function standardCheckOutTime(): string
+    {
+        $raw = trim((string) Setting::get('standard_check_out_time', '11:00'));
+        try {
+            return Carbon::parse($raw !== '' ? $raw : '11:00')->format('H:i');
+        } catch (\Throwable) {
+            return '11:00';
+        }
     }
 
     /**

@@ -9,6 +9,7 @@ use App\Http\Controllers\ComboController;
 use App\Http\Controllers\DayClosingController;
 use App\Http\Controllers\DepartmentController;
 use App\Http\Controllers\GrnController;
+use App\Http\Controllers\GuestIdentityFileController;
 use App\Http\Controllers\DietaryTypeController;
 use App\Http\Controllers\HousekeepingChecklistController;
 use App\Http\Controllers\HousekeepingController;
@@ -58,6 +59,10 @@ Route::post('/login', [AuthController::class, 'login']);
 Route::post('/doorloom/webhook', [DoorloomWebhookController::class, 'store']);
 Route::post('/aiosell/webhook', [AiosellWebhookController::class, 'reservation']);
 Route::post('/aiosell/messages', [AiosellWebhookController::class, 'message']);
+// Signed, short-lived links issued in booking JSON (`guest_identity_urls`); <img> cannot send the bearer token.
+Route::get('/guest-identity-files/{path}', [GuestIdentityFileController::class, 'show'])
+    ->where('path', '.*')
+    ->name('guest-identity.file');
 
 Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::get('/me', [AuthController::class, 'me']);

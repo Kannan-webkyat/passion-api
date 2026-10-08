@@ -25,8 +25,8 @@ checkout journals or housekeeping state.
   `end_date` is exclusive. Used by `BookingController::store()` / `update()`.
 - Other paths carry **their own** availability variants (keep them as they are unless asked):
   `getAvailableRooms()` (same constants, Eloquent `whereDoesntHave`), `extendReservation()` /
-  `extendHourlyReservation()` (segment overlap → 409 with `conflict`, plus `on_hold` block → 422),
-  `BookingRoomTransferService::isRoomAvailable()` (any active block rejects), `splitStay()` (no check).
+  `extendHourlyReservation()` (segment overlap → 409 with `conflict`, plus `on_hold`/`maintenance` block → 422),
+  `BookingRoomTransferService::isRoomAvailable()` (any active block rejects), `splitStay()` (`lockAndAssertSellable`).
 - **Time**: `BookingController::parseHotelDateTime()` converts to `config('app.timezone')`
   (Asia/Kolkata); day stays normalize `check_in_at`/`check_out_at` to midnight; DATE + DATETIME columns kept aligned.
 - **Status transitions**: check-in / check-out are `PATCH /bookings/{id}` with `status`; cancel is
@@ -36,7 +36,8 @@ checkout journals or housekeeping state.
   pre-arrival swap (`confirmed`, before arrival) updates the existing segment's room/price in place;
   otherwise the active segment is closed as `checked_out` at the transfer time and a new segment is
   created. `applyHousekeeping()` (source room `dirty` + dirty block) runs only for `checked_in` bookings.
-- **Checkout** atomically updates the booking and calls `BookingCheckoutPoster::post()` inside one
+- **Checkout** atomically updates the booking and calls `BookingCheckoutPoster::post()` (group scope:
+  `postGroupDeparture()`) inside one
   `DB::transaction`; journals are idempotent per `(source_type, source_id)` in `JournalPostingService::post()`.
 - **Payments** are recorded through `BookingPaymentLedger`: append-only rows, soft voids, `METHODS`
   `cash, card, upi, bank_transfer`, `source` tags (`booking_create, deposit, checkout, manual,
@@ -45,8 +46,8 @@ checkout journals or housekeeping state.
   - `store()`: `forceFill(['deposit_amount' => 0])` right before seeding the ledger with `source => 'booking_create'`.
   - `cancelReservation()`: writes `payment_status` (and `cancellation_fee_amount`); writes
     `deposit_amount/refund_amount/refund_method/payment_method` itself only when the ledger is disabled.
-  - `update()`: converts patched `deposit_amount`/`refund_amount` into `legacy_patch` ledger rows and
-    unsets them, but passes a patched `payment_status` through unless a bill hint is present.
+  - `update()`: converts a patched `deposit_amount` increase / check-out `refund_amount` into ledger rows
+    (`postPatchLedgerEntries()`) and unsets them; `payment_status` is never taken from the request.
   - When `BookingPaymentLedger::enabled()` is false, callers fall back to scalar writes or 503 (`storePayment()`).
 - **Folio charges**: increment `bookings.extra_charges` and/or create `booking_extra_charges` with
   `source` (`inspection`, `laundry`); POS `room_charge` settles into `extra_charges`; broadcast `BookingChargesUpdated`.
@@ -68,13 +69,11 @@ checkout journals or housekeeping state.
 
 ## Things Cursor must NOT do
 - Do not compute availability from `rooms.status`.
-- Do not delete or edit individual `booking_payments` rows in new code; void instead. (Existing:
-  `destroy()` hard-deletes the booking and the FK cascade removes its payments.)
+- Do not delete or edit individual `booking_payments` rows in new code; void instead. (`destroy()`
+  refuses bookings that have payments.)
 - Do not add a `/check-in` or `/check-out` endpoint or allow `status=cancelled` via PATCH.
 - Do not journal deposits at receipt or change what `BookingCheckoutPoster` posts without being asked.
-- Do not "fix" known gaps (`splitStay` lacks availability/transaction, post-transaction side effects in
-  `update()`, hard-delete in `destroy()`, client-supplied single-room day `total_price`) as a side change —
-  raise them instead.
+- Do not "fix" known gaps (post-transaction side effects in `update()`) as a side change — raise them instead.
 
 ## Important examples from the existing codebase
 - `BookingController::update()` check-in/out guards and post-commit segment/room/HK sync.

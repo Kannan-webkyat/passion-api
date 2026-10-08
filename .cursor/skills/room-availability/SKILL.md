@@ -13,17 +13,18 @@ description: Uses or changes room availability / sellability rules in passion-ap
 ## 2. Required investigation before coding
 1. Read `app/Support/BookingRoomAvailability.php` fully (≈260 lines).
 2. Read every availability variant you may affect:
-   - `BookingController::store()` (pre-check + `withRoomLocks` re-check), `update()` (date change, no lock)
+   - `BookingController::store()` (pre-check + `withRoomLocks` re-check), `update()` (date/room change, `withRoomLocks` re-check)
    - `BookingController::getAvailableRooms()` (Eloquent re-implementation with the class constants)
-   - `BookingController::extendReservation()` / `extendHourlyReservation()` (own segment overlap → 409, `on_hold` → 422)
+   - `BookingController::extendReservation()` / `extendHourlyReservation()` (own segment overlap → 409, `on_hold`/`maintenance` → 422)
    - `BookingRoomTransferService::isRoomAvailable()` (segments + **any** active block)
-   - `BookingController::splitStay()` (no check)
+   - `BookingController::splitStay()` (`lockAndAssertSellable` in a transaction)
    - `update()` check-in guard (active `dirty`/`cleaning` block today → 422)
 3. Read `tests/Unit/Support/BookingRoomAvailabilityTest.php`.
 4. Check `rooms.status` / `room_status_blocks.status` ENUMs in migrations if statuses change.
 
 ## 3. Existing project patterns to follow
-- Occupancy comes from `booking_segments` (datetime overlap `check_in_at < end AND check_out_at > start`),
+- Occupancy comes from `booking_segments` (datetime overlap `check_in_at < end AND check_out_at > start`,
+  plus the departure-morning rule in `hasDepartureMorningOverlap()` between day and hourly windows),
   excluding `INACTIVE_SEGMENT_STATUSES` = `cancelled, checked_out, completed`, optionally excluding one booking.
 - Blocks from active `room_status_blocks` with date overlap `start_date < endExclusive AND end_date > startDate`
   (`end_date` exclusive; `dateEndExclusiveFromDateTime()`: midnight checkout = same date, else next day).

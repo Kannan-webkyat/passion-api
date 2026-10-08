@@ -5,9 +5,17 @@ namespace App\Services;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Str;
 
 class GuestIdentityImageService
 {
+    private const IMAGE_EXTENSIONS = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
+
     /**
      * @return array{
      *     path: string|null,
@@ -23,7 +31,7 @@ class GuestIdentityImageService
 
         return [
             'path' => $trimmed !== '' ? $trimmed : null,
-            'url' => $trimmed !== '' ? Storage::disk($this->disk())->url($trimmed) : null,
+            'url' => $trimmed !== '' ? $this->signedUrl($trimmed) : null,
             'compressed' => false,
             'original_bytes' => 0,
             'stored_bytes' => 0,
@@ -42,6 +50,8 @@ class GuestIdentityImageService
     public function storeUploadedFile(UploadedFile $file, int $index): array
     {
         $originalBytes = (int) $file->getSize();
+        $this->assertWithinSizeLimit($originalBytes);
+
         $mime = (string) $file->getMimeType();
         $allowed = config('guest_identity.allowed_mime_types', []);
 
@@ -49,21 +59,23 @@ class GuestIdentityImageService
             throw new \InvalidArgumentException('Unsupported identity document type.');
         }
 
-        if (str_starts_with($mime, 'image/')) {
-            $binary = (string) file_get_contents($file->getRealPath());
+        $binary = (string) file_get_contents($file->getRealPath());
 
-            return $this->storeImageBinary($binary, $index, $originalBytes, $this->extensionForMime($mime));
+        if (str_starts_with($mime, 'image/')) {
+            return $this->storeImageBinary($binary, $index, $originalBytes);
         }
 
-        // PDF and other allowed non-image types: store as-is (no server-side PDF compression).
-        $ext = $file->getClientOriginalExtension() ?: 'bin';
-        $fileName = $this->buildFileName($index, $ext, false);
-        $path = $this->directory().'/'.$fileName;
-        Storage::disk($this->disk())->putFileAs($this->directory(), $file, $fileName);
+        if ($mime !== 'application/pdf' || ! str_starts_with($binary, '%PDF-')) {
+            throw new \InvalidArgumentException('Unsupported identity document type.');
+        }
+
+        // PDF: store as-is (no server-side PDF compression).
+        $path = $this->directory().'/'.$this->buildFileName($index, 'pdf', false);
+        Storage::disk($this->disk())->put($path, $binary);
 
         return [
             'path' => $path,
-            'url' => Storage::disk($this->disk())->url($path),
+            'url' => $this->signedUrl($path),
             'compressed' => false,
             'original_bytes' => $originalBytes,
             'stored_bytes' => $originalBytes,
@@ -81,21 +93,71 @@ class GuestIdentityImageService
      */
     public function storeDataUrl(string $dataUrl, int $index): array
     {
-        if (! str_starts_with($dataUrl, 'data:image')) {
-            throw new \InvalidArgumentException('Identity payload must be an image data URL.');
+        if (! preg_match('#^data:image/(jpeg|jpg|png|webp);base64,#i', $dataUrl, $matches)) {
+            throw new \InvalidArgumentException('Identity image must be a JPEG, PNG or WebP data URL.');
         }
 
-        if (! preg_match('#^data:image/(\w+);base64,#i', $dataUrl, $matches)) {
-            throw new \InvalidArgumentException('Invalid image data URL.');
-        }
-
-        $format = strtolower($matches[1] === 'jpeg' ? 'jpg' : $matches[1]);
-        $binary = base64_decode((string) preg_replace('#^data:image/\w+;base64,#i', '', $dataUrl), true);
-        if ($binary === false) {
+        $binary = base64_decode(substr($dataUrl, strlen($matches[0])), true);
+        if ($binary === false || $binary === '') {
             throw new \InvalidArgumentException('Could not decode identity image.');
         }
 
-        return $this->storeImageBinary($binary, $index, strlen($binary), $format);
+        $this->assertWithinSizeLimit(strlen($binary));
+
+        return $this->storeImageBinary($binary, $index, strlen($binary));
+    }
+
+    /**
+     * True when the path points inside the identity directory (no traversal, no URLs).
+     */
+    public function isManagedPath(string $path): bool
+    {
+        $path = trim($path);
+        $prefix = $this->directory().'/';
+
+        return str_starts_with($path, $prefix)
+            && ! str_contains($path, '..')
+            && ! str_contains($path, '\\')
+            && preg_match('#^[A-Za-z0-9_\-/]+\.[A-Za-z0-9]+$#', $path) === 1;
+    }
+
+    public function signedUrl(?string $path): ?string
+    {
+        if ($path === null || trim($path) === '' || ! $this->isManagedPath($path)) {
+            return null;
+        }
+
+        $ttl = max(1, (int) config('guest_identity.url_ttl_minutes', 720));
+
+        return url(URL::temporarySignedRoute(
+            'guest-identity.file',
+            now()->addMinutes($ttl),
+            ['path' => trim($path)],
+            false,
+        ));
+    }
+
+    /**
+     * Signed display URLs aligned by index with the stored paths (null where empty).
+     *
+     * @param  array<int, mixed>|null  $paths
+     * @return array<int, string|null>
+     */
+    public function signedUrls(?array $paths): array
+    {
+        if (! is_array($paths)) {
+            return [];
+        }
+
+        return array_map(
+            fn ($p) => is_string($p) ? $this->signedUrl($p) : null,
+            array_values($paths),
+        );
+    }
+
+    public function disk(): string
+    {
+        return (string) config('guest_identity.disk', 'local');
     }
 
     /**
@@ -107,8 +169,14 @@ class GuestIdentityImageService
      *     stored_bytes: int,
      * }
      */
-    private function storeImageBinary(string $binary, int $index, int $originalBytes, string $sourceFormat): array
+    private function storeImageBinary(string $binary, int $index, int $originalBytes): array
     {
+        $info = @getimagesizefromstring($binary);
+        $mime = is_array($info) ? (string) ($info['mime'] ?? '') : '';
+        if (! isset(self::IMAGE_EXTENSIONS[$mime])) {
+            throw new \InvalidArgumentException('Identity image must be a valid JPEG, PNG or WebP file.');
+        }
+
         $threshold = (int) config('guest_identity.large_threshold_bytes', 5 * 1024 * 1024);
         $storedBinary = $binary;
         $compressed = false;
@@ -121,20 +189,28 @@ class GuestIdentityImageService
             }
         }
 
-        $suffix = $compressed ? '_compressed' : '';
-        $ext = $compressed ? 'jpg' : ($sourceFormat === 'jpeg' ? 'jpg' : $sourceFormat);
-        $fileName = $this->buildFileName($index, $ext, $compressed);
-        $path = $this->directory().'/'.$fileName;
+        $ext = $compressed ? 'jpg' : self::IMAGE_EXTENSIONS[$mime];
+        $path = $this->directory().'/'.$this->buildFileName($index, $ext, $compressed);
 
         Storage::disk($this->disk())->put($path, $storedBinary);
 
         return [
             'path' => $path,
-            'url' => Storage::disk($this->disk())->url($path),
+            'url' => $this->signedUrl($path),
             'compressed' => $compressed,
             'original_bytes' => $originalBytes,
             'stored_bytes' => strlen($storedBinary),
         ];
+    }
+
+    private function assertWithinSizeLimit(int $bytes): void
+    {
+        $max = (int) config('guest_identity.max_upload_bytes', 8 * 1024 * 1024);
+        if ($max > 0 && $bytes > $max) {
+            throw new \InvalidArgumentException(
+                'Identity document is too large (max '.round($max / 1024 / 1024, 1).' MB).'
+            );
+        }
     }
 
     private function compressImageBinary(string $binary): ?string
@@ -188,22 +264,7 @@ class GuestIdentityImageService
     {
         $suffix = $compressed ? '_compressed' : '';
 
-        return 'guest_id_'.time().'_'.$index.$suffix.'.'.ltrim($extension, '.');
-    }
-
-    private function extensionForMime(string $mime): string
-    {
-        return match ($mime) {
-            'image/png' => 'png',
-            'image/webp' => 'webp',
-            'image/gif' => 'gif',
-            default => 'jpg',
-        };
-    }
-
-    private function disk(): string
-    {
-        return (string) config('guest_identity.disk', 'public');
+        return 'guest_id_'.Str::random(40).'_'.$index.$suffix.'.'.ltrim($extension, '.');
     }
 
     private function directory(): string

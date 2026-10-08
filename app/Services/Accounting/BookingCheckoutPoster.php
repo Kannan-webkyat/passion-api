@@ -3,7 +3,10 @@
 namespace App\Services\Accounting;
 
 use App\Models\Booking;
+use App\Models\BookingPayment;
+use App\Models\ChartOfAccount;
 use App\Models\JournalEntry;
+use App\Models\JournalLine;
 use App\Support\BookingInvoiceRoomStay;
 use App\Support\BookingNumber;
 use App\Support\BookingPaymentLedger;
@@ -26,7 +29,11 @@ final class BookingCheckoutPoster
         private readonly JournalPostingService $journal,
     ) {}
 
-    public function post(Booking $booking, ?int $postedBy = null): ?JournalEntry
+    /**
+     * @param  float|null  $cashAvailable  group checkout: share of the group's pooled cash for this room
+     * @param  array<string, float>|null  $methodMix  tender split to apply that share by
+     */
+    public function post(Booking $booking, ?int $postedBy = null, ?float $cashAvailable = null, ?array $methodMix = null): ?JournalEntry
     {
         if (! Schema::hasTable('journal_entries')) {
             return null;
@@ -44,9 +51,13 @@ final class BookingCheckoutPoster
 
         [$roomNet, $cgst, $sgst] = $this->splitRoomTaxInclusive($booking, $roomInclusive);
 
-        $paid = round((float) ($booking->deposit_amount ?? 0), 2);
-        $refunded = round((float) ($booking->refund_amount ?? 0), 2);
-        $retained = round(max(0.0, $paid - $refunded), 2);
+        if ($cashAvailable !== null) {
+            $retained = round(max(0.0, $cashAvailable), 2);
+        } else {
+            $paid = round((float) ($booking->deposit_amount ?? 0), 2);
+            $refunded = round((float) ($booking->refund_amount ?? 0), 2);
+            $retained = round(max(0.0, $paid - $refunded), 2);
+        }
 
         // Apply only what covers the bill; overpayment stays on the booking until refunded.
         $appliedCash = round(min($retained, $grand), 2);
@@ -55,7 +66,7 @@ final class BookingCheckoutPoster
         $lines = [];
 
         // Prefer ledger split by tender method when available.
-        $byMethod = BookingPaymentLedger::netByMethod($booking);
+        $byMethod = $methodMix ?? BookingPaymentLedger::netByMethod($booking);
         if ($byMethod !== [] && $appliedCash > 0.004) {
             $methodTotal = array_sum($byMethod);
             $allocated = 0.0;
@@ -143,7 +154,77 @@ final class BookingCheckoutPoster
         );
     }
 
-    private function netGrand(Booking $booking): float
+    /**
+     * Checkout journals for group rooms leaving together. Payments are pooled on the group, so each room
+     * draws on what the group has paid minus the cash earlier group checkouts already booked, instead of
+     * only its own deposit (which left the paying room overpaid and the others in folio AR).
+     *
+     * @param  iterable<Booking>  $departing
+     */
+    public function postGroupDeparture(int $groupId, iterable $departing, ?int $postedBy = null): void
+    {
+        if (! Schema::hasTable('journal_entries')) {
+            return;
+        }
+
+        $members = Booking::query()
+            ->where('booking_group_id', $groupId)
+            ->where('status', '!=', 'cancelled')
+            ->get();
+        $memberIds = $members->pluck('id')->map(fn ($id) => (int) $id)->all();
+
+        $mix = [];
+        $groupNet = 0.0;
+        foreach ($members as $member) {
+            $groupNet += BookingPaymentLedger::totals($member)['net'];
+            foreach (BookingPaymentLedger::netByMethod($member) as $method => $amount) {
+                $mix[$method] = round(($mix[$method] ?? 0) + (float) $amount, 2);
+            }
+        }
+        $mix = array_filter($mix, fn ($amount) => $amount > 0.004);
+        $pool = round(max(0.0, $groupNet - self::bookedCash($memberIds)), 2);
+
+        foreach ($departing as $booking) {
+            $booking->loadMissing(['room.roomType.tax']);
+            $share = round(min($pool, $this->netGrand($booking)), 2);
+            $this->post($booking, $postedBy, $share, $mix !== [] ? $mix : null);
+            $pool = round(max(0.0, $pool - $share), 2);
+        }
+    }
+
+    /**
+     * Tender cash already in the books for these bookings: checkout debits minus refund journal credits.
+     *
+     * @param  list<int>  $bookingIds
+     */
+    public static function bookedCash(array $bookingIds): float
+    {
+        if ($bookingIds === [] || ! Schema::hasTable('journal_entries')) {
+            return 0.0;
+        }
+
+        $tenderAccountIds = ChartOfAccount::query()
+            ->whereIn('code', [AccountCodes::CASH, AccountCodes::BANK_CARD, AccountCodes::BANK_UPI])
+            ->pluck('id');
+
+        $sum = static fn (string $sourceType, array $sourceIds, string $side): float => (float) JournalLine::query()
+            ->join('journal_entries', 'journal_entries.id', '=', 'journal_lines.journal_entry_id')
+            ->where('journal_entries.status', JournalEntry::STATUS_POSTED)
+            ->where('journal_entries.source_type', $sourceType)
+            ->whereIn('journal_entries.source_id', $sourceIds)
+            ->whereIn('journal_lines.account_id', $tenderAccountIds)
+            ->sum("journal_lines.{$side}");
+
+        $refundIds = BookingPayment::query()->whereIn('booking_id', $bookingIds)->pluck('id')->all();
+
+        return round(
+            $sum('booking_checkout', $bookingIds, 'debit')
+            - ($refundIds === [] ? 0.0 : $sum(BookingRefundPoster::SOURCE_TYPE, $refundIds, 'credit')),
+            2
+        );
+    }
+
+    public function netGrand(Booking $booking): float
     {
         $gross = BookingInvoiceRoomStay::summarizeForInvoice($booking)['gross_before_checkout_discount'];
         $discount = max(0.0, (float) ($booking->checkout_discount_amount ?? 0));
@@ -156,7 +237,7 @@ final class BookingCheckoutPoster
      *
      * @return array{0: float, 1: float, 2: float} roomNet, cgst, sgst
      */
-    private function splitRoomTaxInclusive(Booking $booking, float $roomInclusive): array
+    public function splitRoomTaxInclusive(Booking $booking, float $roomInclusive): array
     {
         $taxRate = (float) ($booking->room?->roomType?->tax?->rate ?? 0);
         if ($roomInclusive <= 0 || $taxRate <= 0.004) {

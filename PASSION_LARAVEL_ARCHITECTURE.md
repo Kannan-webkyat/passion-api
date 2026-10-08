@@ -147,7 +147,7 @@ Also at root: `debug_coffee.php`, `debug_consumption.php`, `fix_plan.md`, `passi
   6. Success → `{ token, user (with departments, restaurants), permissions: [names], roles: [names] }`.
 - `GET /api/me` flushes the Spatie permission cache (`PermissionRegistrar::forgetCachedPermissions()`), unsets loaded role/permission relations, returns the same shape minus `token`.
 - `POST /api/logout` deletes the current token only.
-- `config/sanctum.php`: `expiration => null` (tokens never expire), `guard => ['web']`, stateful domains from env. CORS (`config/cors.php`) whitelists localhost:3000 and `*.passions.in`, `supports_credentials: true`.
+- `config/sanctum.php`: `expiration` = 7 days (`SANCTUM_TOKEN_EXPIRATION` minutes, default 10080), `guard => ['web']`, stateful domains from env. CORS (`config/cors.php`) whitelists localhost:3000 and `*.passions.in`, `supports_credentials: true`.
 - `EnsureUserIsActive` middleware (alias `active`) runs on every authenticated request: if `is_active` is false it **deletes the current token** and returns `403 {"message":"Your account has been deactivated."}`.
 - `bootstrap/app.php`: `redirectGuestsTo(fn () => null)` so unauthenticated API calls return 401 JSON instead of redirecting.
 - User deactivation (`UserController::deactivateUser`) sets `is_active=false` and deletes **all** tokens.
@@ -274,7 +274,7 @@ Models without a corresponding use: `App\Models\Role`, `App\Models\Permission` (
 | Static policy / config readers | `InventoryAuthorization`, `BomDeductionConfig`, `BomEnforcementConfig`, `InventoryCostingConfig`, `KgstBarTotPolicy`, `TaxCreditPolicy`, `GrnFrozenCostPolicy`, `LiquorTaxValidator`, `LiquorItemClassifier`, `CessSlabResolver`, `ProcurementCostTerminology`, `BusinessDateService` | `final class`, `public static` only; config values read from `Setting` |
 | Presenter | `GrnApiPresenter`, `GrnItemCostSnapshot` | static |
 | Broadcast helper | `PosOutletBroadcast` | static |
-| Accounting (`Services/Accounting`) | `JournalPostingService`, `LedgerBackedTransaction`, `LedgerPostingGuard`, `AccountCodes`, posters: `BookingCheckoutPoster`, `PosSettlePoster`, `PosRefundPoster`, `GrnApprovePoster`, `InventoryCogsPoster`, `InventoryAdjustmentPoster`, `InventoryConsumptionPoster`, `ProductionPoster`, `VendorPaymentPoster`, `PosCogsBusinessDateResolver`, `TrialBalanceService` | `final class`, posters take `JournalPostingService` via constructor; `post()` / `postStrict()` / `isJournalRequired()` |
+| Accounting (`Services/Accounting`) | `JournalPostingService`, `LedgerBackedTransaction`, `LedgerPostingGuard`, `AccountCodes`, posters: `BookingCheckoutPoster`, `BookingRefundPoster`, `PosSettlePoster`, `PosRefundPoster`, `GrnApprovePoster`, `InventoryCogsPoster`, `InventoryAdjustmentPoster`, `InventoryConsumptionPoster`, `ProductionPoster`, `VendorPaymentPoster`, `PosCogsBusinessDateResolver`, `TrialBalanceService` | `final class`, posters take `JournalPostingService` via constructor; `post()` / `postStrict()` / `isJournalRequired()` |
 
 Notes:
 - No service interfaces/contracts; nothing bound in `AppServiceProvider`. Autowiring only.
@@ -364,7 +364,7 @@ Status codes seen: 200 (default), 201 (create), 204 (`response()->json(null, 204
 - Custom: `EnsureUserIsActive` (alias `active`) — see §5.
 - Aliases registered but unused on routes: `role`, `permission`, `role_or_permission` (Spatie).
 - Route middleware used: only `auth:sanctum` + `active` on the whole API group, and on broadcasting auth.
-- No throttling on `/login` beyond framework defaults (no `throttle:` specified). No CORS customization beyond `config/cors.php`.
+- `/login` is rate limited inside `AuthController::login()` with `RateLimiter`: 5 failed attempts per email + IP per 5 minutes, 30 per IP per minute → 429 `{message}` with `Retry-After`. A successful login clears the email + IP counter. No CORS customization beyond `config/cors.php`.
 
 ## 21. Database structure and migrations
 
@@ -475,7 +475,7 @@ No activity-log package. `AdminDashboardController::auditEventCount24h()` approx
 | QZ Tray (silent receipt printing) | `QzSignController` signs request strings with `openssl_sign(SHA512)` using `config('services.qz.private_key_path')`; serves certificate from `services.qz.certificate_path`. Behind auth. |
 | DomPDF | Reservation invoice/voucher (`resources/views/bookings/*`), day-closing and POS report PDFs (`resources/views/reports/*`) |
 | PhpSpreadsheet | XLSX exports (excise bar report, POS reports) |
-| File storage | `GuestIdentityImageService` stores guest ID images/PDFs on disk `config('guest_identity.disk')` (default `public`, dir `identities`), compresses large images (GD, max dimension/JPEG quality from config); restaurant logos and receipt logo via `Storage` |
+| File storage | `GuestIdentityImageService` stores guest ID images/PDFs on the private disk `config('guest_identity.disk')` (default `local`, dir `identities`, random names, type checked from content), compresses large images (GD, max dimension/JPEG quality from config) and issues signed `guest-identity.file` URLs (`GuestIdentityFileController`); restaurant logos and receipt logo via `Storage` |
 | Statutory (Kerala / India) | In-house logic only: `KeralaComplianceService` (GSTR-1 / KVAT summaries + CSV export), `KgstBarTotPolicy`, `BarTurnoverTaxService`, `LiquorTaxValidator`, `CessSlabResolver`, `BevcoPoTaxCorrection` |
 | Doorloom Brand Integration API (v2026-09) | `App\Support\DoorloomClient` calls `config('services.doorloom.base_url')` only when an API key is saved and the integration is enabled. Public `POST /api/doorloom/webhook` verifies `X-Doorloom-Signature` and `DoorloomAdapter` writes the online calendar. Walk-in `rate_plans` are not updated from Doorloom. See `docs/DOORLOOM.md`. |
 | Other HTTP APIs | No payment gateway, SMS, or email provider client |
@@ -516,41 +516,43 @@ All in `BookingController` unless noted.
 4. Breakfast counts ≤ guest counts (manual 422 with `errors`).
 5. Pre-check each room: `BookingRoomAvailability::assertSellable()` (converted to 422 `{message}`).
 6. Group: create `BookingGroup` first (outside any transaction).
-7. Guest ID images: `GuestIdentityImageService::storeDataUrl()/storeUploadedFile()/storeExistingPath()`.
+7. Guest ID images: `GuestIdentityImageService::storeDataUrl()/storeUploadedFile()` (new uploads only; stored paths are refused on create).
 8. Per room: apply per-room occupancy overrides (`room_occupancy[roomId]`), `assertCapacity()`, compute total:
    - `hour_package`: `computeHourlyPackageTotal()` (package price, seasonal adjustment, extra beds once, overtime by step/grace, tax added).
-   - Day stay, multi-room: server recomputes per-room total via `SeasonalRoomPricing::sumDayRoomRentWithSeasons()` and `room_rates_include_gst` setting.
-   - Day stay, single room: **client-supplied `total_price` is stored**.
+   - Day stay (single or multi-room): `roomDayTotal()` recomputes each room's total via `SeasonalRoomPricing::sumDayRoomRentWithSeasons()`, meals, early-arrival fee and `room_rates_include_gst`; the client `total_price` is ignored. Each day room needs a nightly rate plan of its own room type (422 otherwise).
+   - `status` accepts only `pending|confirmed|checked_in`; `payment_status` is not accepted and is derived from the opening deposit. `room_occupancy.*` is validated; an empty `room_ids` falls back to `room_id`.
 9. Prepend `[Reservation created: …]` audit line to `notes`; derive `early_checkin_time` from `estimated_arrival_time` vs `standard_check_in_time`.
 10. `BookingRoomAvailability::withRoomLocks([roomId], fn)` → `DB::transaction` + `lockForUpdate` on room row → re-`assertSellable` → `Booking::create` + one `BookingSegment::create` → if `checked_in`, `Room.status=occupied`.
 11. If ledger enabled and `deposit_amount > 0`: zero scalar, then `BookingPaymentLedger::recordPayment(source: 'booking_create')`.
 12. Response: group → array of bookings (201); single → booking array + optional `guest_identity_upload_meta` (201).
 
 **Update — `PATCH /bookings/{id}` (`update`)** handles edits, check-in and check-out:
-- Room change for confirmed/checked-in bookings is rejected unless `force_room_change` (directs to room transfer endpoint).
-- `status=cancelled` rejected (must use `/cancel`).
+- Room change for confirmed/checked-in bookings is rejected unless `force_room_change` (directs to room transfer endpoint); a multi-segment stay always gets 422.
+- `status=cancelled` rejected (must use `/cancel`). Other status changes follow `STATUS_TRANSITIONS` (`pending↔confirmed`, `pending|confirmed→checked_in`, `checked_in→checked_out`); `checked_out`/`cancelled` cannot be reopened; resending the current status is a no-op.
+- `FIELDS_FROZEN_AFTER_CLOSE` (room, dates, counts, rate plan, group, money) → 422 on `checked_out`/`cancelled` bookings.
+- `total_price` and `payment_status` are not accepted. A change to adults, children, child ages, extra beds or rate plan reprices via `repricedTotalForGuestChange()`: stored total + (price of new mix − price of old mix), using `roomDayTotal()` for day stays and `computeHourlyPackageTotal()` for hourly. `payment_status` is then re-derived from deposit − refund vs `effectiveBookingGrand()`.
 - Checkout discount only while `checked_in`, ≤ gross, reason ≥ 3 chars.
-- Deposit/refund patches become ledger postings (`legacy_patch` / `checkout` source), then removed from the scalar update.
+- Deposit increases / check-out refunds become ledger postings (`legacy_patch` / `checkout` source) via `postPatchLedgerEntries()`, then removed from the scalar update. A deposit decrease → 422 (void instead); a refund outside check-out → 422; a check-out refund above (received − bill) → 422.
 - `appendAuditNotesForBookingUpdate()` writes diff lines to `notes`.
-- Date/occupancy changes re-run `assertSellable(excludeBookingId)` and `assertCapacity()`.
-- `DB::transaction { $booking->update(); if new checkout: BookingCheckoutPoster::post() }`.
+- Date, room and occupancy changes re-run `assertCapacity()`; date/room changes re-run `assertSellable(excludeBookingId)` inside `withRoomLocks()`.
+- One transaction (room-locked when dates/room change) { `assertSellable`, ledger postings, audit notes, `$booking->update()`, if new checkout: `BookingCheckoutPoster::post()` }.
 - After the transaction (not inside it): segment sync (0 → create baseline, 1 → mirror booking, N → status fan-out), room status sync, housekeeping blocks, broadcast.
 
 **Other reservation endpoints**
 - `POST /booking-groups` — group master only.
-- `GET /bookings/guest-search?phone=` — returns latest booking's guest profile (no separate guest table).
-- `POST /bookings/{id}/early-checkin` / `late-checkout` — fee from room type (`per_hour` / `per_minute` / flat) with buffer minutes; adds to `extra_charges`; audit note.
-- `POST /bookings/{id}/extend`, `extend-hours` (+ `preview-extend-hours`), `early-checkout` (+ `preview-early-checkout`).
-- `POST /bookings/{id}/split-stay` — ends last segment at current checkout, creates a new segment in another room, adds segment price to `total_price` (no availability assertion or transaction in this method).
-- `POST /bookings/{id}/room-transfer` (+ preview, list) — `BookingRoomTransferService::execute()` in `DB::transaction`, records `BookingRoomTransfer`, rate mode `keep_existing|apply_new_category`, creates dirty block on source room, broadcasts. Returns `['ok' => bool, ...]` arrays instead of throwing.
-- `POST /bookings/{id}/cancel` (+ `preview-cancellation`) — only `pending|confirmed`; `BookingCancellationPolicy::preview()` (settings `cancellation_free_hours_before`, `cancellation_fee_type none|percent|first_night|fixed`, `cancellation_fee_value`) → requires `confirm_balance_waived` if fee > deposit, refund method if refund due → `DB::transaction` { ledger payment/refund with `source='cancellation'`, booking → `cancelled` + fee fields, segments cancelled, rooms `available`, overlapping `on_hold` blocks deactivated } → broadcast.
-- `DELETE /bookings/{id}` — sets rooms `available` then hard-deletes the booking (no status check).
+- `GET /bookings/guest-search?phone=` — at least 7 digits; returns latest booking's guest profile without ID documents (no separate guest table).
+- `POST /bookings/{id}/early-checkin` / `late-checkout` — fee from room type (`per_hour` / `per_minute` / flat / `percentage` of the plan's nightly price, via `BookingInvoiceRoomStay::timeFeeAmount()`) with buffer minutes; early CI uses the first segment's room type, late CO the last; adds to `extra_charges` (early CI only the part not already in the create total, recorded as "Added to folio: ₹X"); audit note.
+- `POST /bookings/{id}/extend`, `extend-hours` (+ `preview-extend-hours`), `early-checkout` (+ `preview-early-checkout`) — each write runs in one transaction behind `lockBookingForChange()` (booking row lock; 422 when status, room, dates, early/late time or money changed since load); extend and extend-hours also re-check overlap under `withRoomLocks()`. `update()`, `cancelReservation()`, `changeCheckIn()`, `earlyCheckin()` and `lateCheckout()` use the same lock.
+- `POST /bookings/{id}/split-stay` — ends last segment at current checkout, creates a new segment in another room, adds segment price (`computeDayStayChargesForRange()`: seasons, extra beds, meals, GST setting) to `total_price`; runs in a transaction with `BookingRoomAvailability::lockAndAssertSellable()` for the new room.
+- `POST /bookings/{id}/room-transfer` (+ preview, list) — `BookingRoomTransferService::execute()` in `BookingRoomAvailability::withRoomLocks([from, to])` (booking + segment row locks, stale check, availability re-checked), records `BookingRoomTransfer`, rate mode `keep_existing|apply_new_category`, creates dirty block on source room, broadcasts. Returns `['ok' => bool, ...]` arrays instead of throwing.
+- `POST /bookings/{id}/cancel` (+ `preview-cancellation`) — only `pending|confirmed`; `BookingCancellationPolicy::preview()` (settings `cancellation_free_hours_before`, `cancellation_fee_type none|percent|first_night|fixed`, `cancellation_fee_value`) → settles against `deposit_amount − refund_amount`; requires `confirm_balance_waived` if fee > that, refund method if refund due → `DB::transaction` { ledger payment/refund with `source='cancellation'`, booking → `cancelled` + fee fields, segments cancelled, rooms `available`, overlapping `on_hold` blocks deactivated } → broadcast.
+- `DELETE /bookings/{id}` — only `pending|confirmed` bookings with no deposit and no `booking_payments` rows (else 422); sets rooms `available` then hard-deletes the booking.
 - `GET /bookings/{id}/voucher` / `billing` — DomPDF via `ReservationInvoiceViewData`.
 
 ## 33. Room availability logic
 
 Central rules: `app/Support/BookingRoomAvailability.php` (static, `final`):
-- **Occupancy** = overlap on `booking_segments` by datetime: `check_in_at < :end AND check_out_at > :start`, excluding segment statuses `cancelled, checked_out, completed`, optionally excluding one booking.
+- **Occupancy** = overlap on `booking_segments` by datetime: `check_in_at < :end AND check_out_at > :start`, excluding segment statuses `cancelled, checked_out, completed`, optionally excluding one booking. `hasSegmentOverlap()` also treats a day stay (midnight `check_out_at`) as holding the room until `standard_check_out_time` (or the booking's `late_checkout_time`) on the departure day when the other window is hourly (non-midnight); `getAvailableRooms()` does not apply this extra rule.
 - **Hard blocks** (`maintenance`, `on_hold`) in active `room_status_blocks` with date overlap (`start_date < endExclusive AND end_date > startDate`, `end_date` exclusive) → never sellable.
 - **Check-in-only blocks** (`dirty`, `cleaning`) → sellable for future stays, but block `status=checked_in`.
 - `dateEndExclusiveFromDateTime()`: midnight checkout ⇒ same date exclusive; otherwise next day.
@@ -562,7 +564,8 @@ Central rules: `app/Support/BookingRoomAvailability.php` (static, `final`):
 Where it is applied:
 - `store()` (pre-check + locked re-check), `update()` (on date change, without lock), `getAvailableRooms()` (**re-implements** the same rules as an Eloquent `whereDoesntHave('segments')` / `whereDoesntHave('statusBlocks')` query using the class constants), room transfer service.
 - `update()` check-in path separately queries active `dirty`/`cleaning` blocks for today.
-- `chart()` returns rooms with `statusBlocks` (active + inactive `inspected` with snapshot), `cleaningReleases` and `segments` overlapping a date range (default 14 days) — availability rendering is done client-side.
+- `chart()` returns rooms with `statusBlocks` (active + inactive `inspected` with snapshot), `cleaningReleases` and `segments` overlapping a date range (default 14 days, at most `CHART_MAX_DAYS` = 62; `end` before `start` → 422) — availability rendering is done client-side.
+- `getAvailableRooms()` parses `check_in` / `check_out` with `parseHotelDateTime()` and finally drops rooms where `BookingRoomAvailability::hasSegmentOverlap()` is true (departure-morning rule included).
 - `summary()` computes occupied/reserved/maintenance/dirty/cleaning/available counts for a date.
 - `Room.status` is a denormalized "current" status updated imperatively by booking/HK actions; availability checks use segments + blocks, not `Room.status`.
 
@@ -575,14 +578,14 @@ Where it is applied:
 4. No daily-cleaning seeding at check-in (done at cleaning release).
 - `POST /bookings/{id}/early-checkin` only records time/fee; it does not change status.
 
-**Pre-checkout inspection** (`POST /bookings/{id}/request-inspection`): booking must be `checked_in` and today must be each active segment's checkout day; deactivates prior pending/HK blocks, creates `pending_inspection` `RoomStatusBlock` per segment with `inspection_snapshot {booking_id, room_id, segment_id}`, sets `Room.status=pending_inspection`, broadcasts. HK then runs checkout inspection (§36) which can post charges to the folio.
+**Pre-checkout inspection** (`POST /bookings/{id}/request-inspection`): booking must be `checked_in` and today must be each active segment's checkout day; deactivates prior pending/HK blocks, creates `pending_inspection` `RoomStatusBlock` per segment with `inspection_snapshot {booking_id, room_id, segment_id}`, sets `Room.status=pending_inspection` and appends a `[Checkout inspection requested …]` note, all in one transaction under `lockBookingForChange()`; then broadcasts. HK then runs checkout inspection (§36) which can post charges to the folio.
 
 **Check-out** (via `PATCH /bookings/{id}` with `status=checked_out`):
 1. Refund amount requires `refund_method`.
 2. Paid check: `payment_status=paid`, else compare `deposit_amount` vs `max(effectiveBookingGrand, total_price)`; group bookings check pooled group balance (default `checkout_scope=group`) or per-room (`checkout_scope=room`). Fail → 422 "Checkout not allowed until payment is fully paid".
 3. If checkout date is in the future → truncate `check_out` to today, `check_out_at` to tomorrow 00:00, add `[Early CO: …]` note.
 4. Refund delta → `BookingPaymentLedger::recordRefund(source: 'checkout', allow_closed: true)`.
-5. `DB::transaction { booking->update(); BookingCheckoutPoster::post() }` — journal: Dr tender accounts (split by ledger `netByMethod`) / Dr Folio AR shortfall; Cr Folio AR (POS room charges already recognized), Cr Room Revenue, Cr Output CGST/SGST (tax extracted from inclusive amount). Idempotent per `booking_checkout` + booking id.
+5. `DB::transaction { booking->update(); BookingCheckoutPoster::post() }` — journal: Dr tender accounts (split by ledger `netByMethod`) / Dr Folio AR shortfall; Cr Folio AR (POS room charges already recognized), Cr Room Revenue, Cr Output CGST/SGST (tax extracted from inclusive amount). Idempotent per `booking_checkout` + booking id. Group scope uses `postGroupDeparture()`: each departing room's tender debit comes from the group pool (group net collected − `BookingCheckoutPoster::bookedCash()` of earlier group journals), split by the group's combined `netByMethod`.
 6. Segments → `checked_out`; rooms → `dirty`; per segment: deactivate `inspected`/`pending_inspection` blocks and overlapping `dirty`/`cleaning` blocks, then create a one-day `dirty` block on the checkout date (`note: 'Auto: checkout'`) if none remains; broadcast `booking_checkout`.
 
 `POST /bookings/{id}/early-checkout` (+ preview) is a separate path for recomputing charges when leaving early.
@@ -602,11 +605,12 @@ Where it is applied:
 - `recordPayment` / `recordRefund` / `recordAdjustment` / `recordSplitPayments` (tenders in one transaction) / `voidPayment`.
 - Methods whitelist: `cash, card, upi, bank_transfer`. Sources: `booking_create`, `deposit`, `checkout`, `manual`, `legacy_patch`, `cancellation`.
 - Guards: no payments on cancelled bookings; no *payments* after checkout (refunds allowed with `allow_closed`).
-- After each write `syncScalars()` recomputes `bookings.deposit_amount`, `refund_amount`, `payment_method`, `payment_status` from active rows (+ optional `bill_total`).
+- `record()` / `voidPayment()` lock the booking row (`lockForUpdate`) and check status inside the transaction; `voidPayment()` re-reads the payment row locked.
+- After each write `syncScalars()` recomputes `bookings.deposit_amount`, `refund_amount`, `payment_method`, `payment_status` from active rows (+ optional `bill_total`; `storePayment` / `voidPayment` always pass the server's `effectiveBookingGrand()`, never the client value).
 - Voids are soft (`voided_at`, `voided_by`, `void_reason`) and blocked after checkout/cancellation.
 - Endpoints: `GET/POST /bookings/{id}/payments`, `POST /bookings/{id}/payments/{payment}/void`.
 
-**Accounting linkage**: room revenue is recognized only at checkout (`BookingCheckoutPoster`); booking deposits themselves are **not** journaled at receipt time. POS settle posts sales/AR (`PosSettlePoster`) via `LedgerBackedTransaction` (fail-closed: journal failure rolls back the settle).
+**Accounting linkage**: room revenue is recognized only at checkout (`BookingCheckoutPoster`); booking deposits themselves are **not** journaled at receipt time. A refund recorded after checkout (`storePayment`) posts `BookingRefundPoster` (`booking_refund` + payment id) in the same transaction for the part beyond unbooked overpayment: Dr Room Revenue / Output CGST/SGST, Cr tender. POS settle posts sales/AR (`PosSettlePoster`) via `LedgerBackedTransaction` (fail-closed: journal failure rolls back the settle).
 
 **Invoice/voucher**: `ReservationInvoiceViewData` builds view data from settings (`invoice_*`, bank details, SAC codes, `invoice_prefix`), `MoneyToWords`; rendered by DomPDF from `resources/views/bookings/*.blade.php`.
 
@@ -708,7 +712,7 @@ Per-module variants of step 5:
 - `BookingRoomAvailability::withRoomLocks()` for booking creation.
 - `JournalPostingService::post()` opens its own nested transaction and is idempotent per source.
 - Broadcasts deferred to `App::terminating()` so they never run inside the transaction.
-- Some multi-step writes are intentionally *not* fully wrapped (e.g. `BookingController::update` segment/room/HK sync after the transaction; `store()` group creation before per-room transactions; `splitStay`).
+- Some multi-step writes are intentionally *not* fully wrapped (e.g. `BookingController::update` segment/room/HK sync after the transaction; `store()` group creation before per-room transactions).
 
 **Error handling patterns**: see §19.
 
@@ -777,19 +781,19 @@ These are behaviors other code, the frontend, or accounting integrity depend on.
 3. **Status values outside the DB ENUMs** — code references `completed` (segments) and `refunded` / item-level statuses on POS; confirm whether ENUMs were altered to include them or those values are never persisted.
 4. **Frontend reliance on specific response shapes** for endpoints that return bare models (key sets change when eager loads change). Not verified against `passion/` frontend.
 5. **Whether the `update()` post-transaction side effects** (segment sync, room status, HK blocks) ever run partially in production (they are outside the transaction) — no evidence gathered either way.
-6. **`splitStay` behavior** — does not call `BookingRoomAvailability::assertSellable` for the new room nor use a transaction; confirm whether availability is guaranteed elsewhere (e.g. frontend) or this is accepted.
-7. **`DELETE /bookings/{id}`** hard-deletes regardless of status; confirm whether this endpoint is used by the frontend.
-8. **Single-room day booking price is client-supplied** (`total_price` from request) while multi-room is recomputed server-side; confirm this is intentional.
+6. **`splitStay` behavior** — resolved: the new room is checked with `lockAndAssertSellable()` inside a transaction.
+7. **`DELETE /bookings/{id}`** — resolved: only `pending|confirmed` bookings without payments; the frontend does not call it.
+8. **Single-room day booking price** — resolved: every day-stay room is priced server-side at create.
 9. **Booking deposits are not journaled at receipt time**, only at checkout (`BookingCheckoutPoster`), and cancellation fees/forfeits are not journaled — confirm accounting expectation.
 10. **Queue usage** — `queue:listen` runs in dev but no jobs exist; confirm nothing external (e.g. Reverb, mail) relies on the worker in production.
 11. **Scheduled tasks** — none defined; confirm no server cron runs artisan commands (window expiry and similar transitions are done lazily on read).
 12. **`app/Models/Role.php` / `Permission.php`** — appear dead; confirm no dynamic/string references (e.g. IDE helper or seeders run elsewhere).
 13. **`outlets` and `stock_returns` tables** — no models or code references found; confirm they are unused.
 14. **`BookingController::syncDailyCleaningOnCheckIn()`** — unused private method; confirm it is intentionally retired.
-15. **Throttling on `/api/login`** — no explicit `throttle:` middleware; confirm whether rate limiting exists at proxy level.
-16. **Sanctum tokens never expire** (`expiration => null`); confirm operational expectation.
+15. **Throttling on `/api/login`** — resolved: `RateLimiter` in `AuthController::login()`.
+16. **Sanctum token lifetime** — resolved: 7 days. Expired rows stay until `php artisan sanctum:prune-expired --hours=24` is run (there is no scheduler).
 17. **Test suite health** — tests were not executed during this analysis; accounting tests self-skip without tables; unknown pass rate.
 18. **Root-level `debug_*.php`, `fix_plan.md`, `passion_db`, `scripts/*`** — purpose and whether they are deployed.
 19. **Uncommitted change** in `database/migrations/2026_09_22_085400_add_pos_mini_dash_permission.php` (present in working tree at analysis time) — confirm intended final content before deploy.
-20. **Guest identity file storage** on `public` disk — confirm whether ID documents are web-accessible via `storage:link` in production.
+20. **Guest identity file storage** — resolved: files are on the private disk and served only through signed URLs; files saved earlier move with `php artisan guest-identities:move-to-private`.
 21. **Timezone assumptions** — code mixes `Carbon::today()` (app TZ) with client-supplied datetimes and `toDateString()` slices; correctness across DST-free IST is assumed but not verified for UTC-supplied inputs on all endpoints.

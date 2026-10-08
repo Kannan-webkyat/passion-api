@@ -27,16 +27,32 @@ return [
         'image/jpeg',
         'image/png',
         'image/webp',
-        'image/gif',
         'application/pdf',
     ],
 
     /*
     |--------------------------------------------------------------------------
+    | Upload size limit
+    |--------------------------------------------------------------------------
+    | Maximum decoded size of one identity document.
+    */
+    'max_upload_bytes' => (int) env('GUEST_IDENTITY_MAX_UPLOAD_BYTES', 8 * 1024 * 1024),
+
+    /*
+    |--------------------------------------------------------------------------
     | Storage disk / directory
     |--------------------------------------------------------------------------
+    | Must be a private disk: files are only reachable through signed
+    | /api/guest-identity-files URLs (see url_ttl_minutes).
     */
-    'disk' => env('GUEST_IDENTITY_DISK', 'public'),
+    'disk' => env('GUEST_IDENTITY_DISK', 'local'),
     'directory' => env('GUEST_IDENTITY_DIRECTORY', 'identities'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Signed URL lifetime (minutes)
+    |--------------------------------------------------------------------------
+    */
+    'url_ttl_minutes' => (int) env('GUEST_IDENTITY_URL_TTL_MINUTES', 720),
 
 ];

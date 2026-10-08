@@ -14,7 +14,7 @@ permission registry consistent with the frontend's permission gating.
 Adding/changing endpoints, permission checks, roles/permissions, auth/user code or broadcast channels.
 
 ## Existing project convention
-- Auth: Sanctum Bearer tokens (`expiration => null`). `EnsureUserIsActive` (alias `active`) deletes the
+- Auth: Sanctum Bearer tokens (7-day `expiration`); `/login` rate limited in `AuthController::login()`. `EnsureUserIsActive` (alias `active`) deletes the
   current token and returns 403 for inactive users. `UserController::deactivateUser` deletes all tokens.
 - Spatie guard is always `web`. No Policies, Gates, `$this->authorize()` or route `permission:` middleware.
 - Authorization is **imperative, at the top of the action method**, in one of three styles. The style
@@ -47,8 +47,8 @@ Adding/changing endpoints, permission checks, roles/permissions, auth/user code 
 - HK assignment needs `housekeeping-assignable` (cleaning) or `housekeeping-checkout-inspection-assign`
   (pending checkout inspection), and the assignee must be an active user in an active `is_housekeeping` department
   (`assertCanAssignHousekeepingStaff()`, `assertCanAssignCheckoutInspection()`, `housekeepingAssignableStaff()`).
-- Guest ID images are stored on `config('guest_identity.disk')` (default `public`) and returned as paths /
-  public URLs in booking responses (see 30-api-contract).
+- Guest ID images are stored on the private disk `config('guest_identity.disk')` (default `local`) and returned
+  as paths plus signed `guest_identity_urls` in booking responses (see 30-api-contract).
 
 ## Required behavior
 - New action method: call the **same helper the surrounding methods of that controller use**, at the top.

@@ -165,20 +165,6 @@ final class BookingPaymentLedger
             throw ValidationException::withMessages(['method' => 'Invalid payment method.']);
         }
 
-        if (in_array($booking->status, ['cancelled', 'checked_out'], true)
-            && ($attrs['source'] ?? '') !== 'cancellation'
-            && ($attrs['allow_closed'] ?? false) !== true
-        ) {
-            // Allow refunds at checkout finalize (status still checked_in when recording),
-            // and cancellation source while status may already be flipping.
-            if ($booking->status === 'cancelled' && ($attrs['source'] ?? '') !== 'cancellation') {
-                throw ValidationException::withMessages(['booking' => 'Cannot post payments on a cancelled reservation.']);
-            }
-            if ($booking->status === 'checked_out' && $type === BookingPayment::TYPE_PAYMENT) {
-                throw ValidationException::withMessages(['booking' => 'Cannot collect payments after check-out.']);
-            }
-        }
-
         $paidAt = $attrs['paid_at'] ?? now();
         if (! $paidAt instanceof Carbon) {
             $paidAt = Carbon::parse((string) $paidAt);
@@ -189,6 +175,23 @@ final class BookingPaymentLedger
             : null;
 
         return DB::transaction(function () use ($booking, $type, $attrs, $amount, $method, $paidAt, $billTotal) {
+            // Serialises postings per booking so concurrent requests see each other's rows (refund cap, status).
+            $status = (string) (Booking::query()->whereKey($booking->id)->lockForUpdate()->value('status') ?? $booking->status);
+
+            if (in_array($status, ['cancelled', 'checked_out'], true)
+                && ($attrs['source'] ?? '') !== 'cancellation'
+                && ($attrs['allow_closed'] ?? false) !== true
+            ) {
+                // Allow refunds at checkout finalize (status still checked_in when recording),
+                // and cancellation source while status may already be flipping.
+                if ($status === 'cancelled') {
+                    throw ValidationException::withMessages(['booking' => 'Cannot post payments on a cancelled reservation.']);
+                }
+                if ($status === 'checked_out' && $type === BookingPayment::TYPE_PAYMENT) {
+                    throw ValidationException::withMessages(['booking' => 'Cannot collect payments after check-out.']);
+                }
+            }
+
             if ($type === BookingPayment::TYPE_REFUND) {
                 $netCollected = self::totals($booking)['net'];
                 if ($amount > $netCollected + 0.004) {
@@ -226,11 +229,16 @@ final class BookingPaymentLedger
         ?string $reason = null,
         ?float $billTotal = null,
     ): BookingPayment {
-        if ($payment->voided_at) {
-            throw ValidationException::withMessages(['payment' => 'This payment is already voided.']);
-        }
-
         return DB::transaction(function () use ($payment, $reason, $billTotal) {
+            $status = (string) Booking::query()->whereKey($payment->booking_id)->lockForUpdate()->value('status');
+            if (in_array($status, ['checked_out', 'cancelled'], true)) {
+                throw ValidationException::withMessages(['payment' => 'Cannot void payments after check-out or cancellation.']);
+            }
+            $payment = BookingPayment::query()->whereKey($payment->id)->lockForUpdate()->firstOrFail();
+            if ($payment->voided_at) {
+                throw ValidationException::withMessages(['payment' => 'This payment is already voided.']);
+            }
+
             $payment->update([
                 'voided_at' => now(),
                 'voided_by' => Auth::id(),

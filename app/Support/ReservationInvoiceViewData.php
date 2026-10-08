@@ -27,7 +27,7 @@ final class ReservationInvoiceViewData
      */
     public static function build(Booking $booking, bool $shareGroupPayments = true): array
     {
-        $booking->loadMissing(['room.roomType.tax', 'creator', 'bookingGroup']);
+        $booking->loadMissing(['room.roomType.tax', 'creator:id,name', 'bookingGroup']);
 
         $fmt = static fn(float $n): string => number_format(round($n, 2), 2, '.', '');
 

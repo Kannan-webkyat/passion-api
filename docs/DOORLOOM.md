@@ -79,7 +79,7 @@ An event is applied only when its sequence is higher than the cursor for that Do
 
 Create calls send an `Idempotency-Key`. The same key is reused only for the same body.
 
-Stay push runs after a successful save for create, guest or price edit, extend, early checkout, cancel, split stay, and room transfer. Hourly stays and room types with no Doorloom id are skipped.
+Stay push runs after a successful save for create, guest or price edit, change of check-in date, extend, early checkout, cancel, split stay, and room transfer. Hourly stays and room types with no Doorloom id are skipped.
 
 ## What a 409 means at the desk
 

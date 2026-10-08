@@ -47,7 +47,8 @@ return [
     |
     */
 
-    'expiration' => null,
+    // 7 days. Expired rows stay in personal_access_tokens until `php artisan sanctum:prune-expired --hours=24`.
+    'expiration' => (int) env('SANCTUM_TOKEN_EXPIRATION', 60 * 24 * 7),
 
     /*
     |--------------------------------------------------------------------------
