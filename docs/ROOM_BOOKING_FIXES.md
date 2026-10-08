@@ -1,212 +1,212 @@
 # Room Booking — Bug & Security Fixes (Phase 0–9)
 
-Room booking section (backend `passion-api` + frontend `passion`) മുഴുവൻ review ചെയ്ത് കണ്ടെത്തിയ bugs-ഉം security issues-ഉം 10 phases-ൽ ആയി ശരിയാക്കിയതിന്റെ രേഖയാണ് ഇത്.
+This is the record of the bugs and security issues found in a full review of the room booking section (backend `passion-api` and frontend `passion`), and how they were fixed across 10 phases.
 
-- **Screen:** Room Chart (`/reception/roomChart`), Bookings list (`/reception/bookings`).
-- **Feature doc (ഇപ്പോഴത്തെ behaviour):** `docs/ROOM_CHART.md`. ഈ file "എന്ത് മാറി" എന്ന് മാത്രം പറയുന്നു.
-- **മനഃപൂർവം മാറ്റാത്തത്:** Login page-ലെ demo-admin hint (`passion/src/app/login/page.tsx`), seeder-ലെ admin password (`DatabaseSeeder.php`).
-- **Tests:** Phase 0-ൽ 406 → അവസാനം **490 pass** (84 പുതിയ tests). Frontend: `tsc` clean, പുതിയ ESLint problems ഇല്ല.
-- **Browser manual test ചെയ്തിട്ടില്ല.** Deploy-ന് മുമ്പ് താഴെയുള്ള checklist നോക്കുക.
+- **Screens:** Room Chart (`/reception/roomChart`) and the Bookings list (`/reception/bookings`).
+- **Feature doc (current behaviour):** `docs/ROOM_CHART.md`. This file only records what changed.
+- **Intentionally left unchanged:** the demo-admin hint on the login page (`passion/src/app/login/page.tsx`) and the admin password in the seeder (`DatabaseSeeder.php`).
+- **Tests:** 406 tests at Phase 0; **490 passing** at the end (84 new tests). Frontend: `tsc` is clean and there are no new ESLint problems.
+- **No manual browser testing was done.** Go through the checklist below before deploying.
 
 ---
 
-## ഒറ്റനോട്ടത്തിൽ
+## At a glance
 
-| Phase | വിഷയം | Repo | പുതിയ tests |
+| Phase | Topic | Repo | New tests |
 |---|---|---|---|
-| 0 | Baseline (നിലവിലെ tests, type-check) | രണ്ടും | — |
-| 1 | Guest ID documents security | രണ്ടും | 10 |
-| 2 | Login rate limit, token expiry, security headers | രണ്ടും | 3 |
-| 3 | Guest data exposure, Aiosell permission | രണ്ടും | 4 |
-| 4 | Status rules, server pricing, payment integrity | API | 14 |
-| 5 | Row locks, transactions (double click / രണ്ട് desk) | API | 7 |
+| 0 | Baseline (existing tests, type-check) | Both | — |
+| 1 | Guest ID document security | Both | 10 |
+| 2 | Login rate limit, token expiry, security headers | Both | 3 |
+| 3 | Guest data exposure, AioSell permission | Both | 4 |
+| 4 | Status rules, server-side pricing, payment integrity | API | 14 |
+| 5 | Row locks and transactions (double clicks, two desks at once) | API | 7 |
 | 6 | Pricing fixes (extend, early checkout, transfer, fees) | API | 11 |
 | 7 | Doorloom sync, refund journal, group journal, hourly overlap | API | 5 |
-| 8 | Frontend fixes + PATCH server repricing | രണ്ടും | 2 |
-| 9 | ചെറിയ backend fixes (timezone, locks, `bill_total`…) | API | 8 |
+| 8 | Frontend fixes + server-side repricing on PATCH | Both | 2 |
+| 9 | Minor backend fixes (timezone, locks, `bill_total`, …) | API | 8 |
 
 ---
 
-## Deploy checklist (ചെയ്യേണ്ടവ)
+## Deploy checklist
 
-1. **പഴയ ID images private disk-ലേക്ക് മാറ്റുക** (ഇല്ലെങ്കിൽ പഴയ images screen-ൽ കാണില്ല):
+1. **Move old ID images to the private disk** (otherwise old images will not show on screen):
    ```bash
-   php artisan guest-identities:move-to-private --dry-run   # എണ്ണം മാത്രം
+   php artisan guest-identities:move-to-private --dry-run   # count only
    php artisan guest-identities:move-to-private
    ```
-2. **`.env`:** `GUEST_IDENTITY_DISK=public` ഉണ്ടെങ്കിൽ remove ചെയ്യുക (default `local` = private).
-3. **Frontend build:** `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_REVERB_*` എന്നിവ `next build` സമയത്ത് set ആയിരിക്കണം. ഇല്ലെങ്കിൽ CSP API calls block ചെയ്യും.
-4. **Expired tokens cleanup:** scheduler ഇല്ല. Server cron-ൽ ചേർക്കുക: `php artisan sanctum:prune-expired --hours=24`.
-5. **Permissions:** Aiosell reply / no-show ചെയ്യുന്ന staff-ന്റെ role-ൽ `reservation-edit` ഉണ്ടെന്ന് ഉറപ്പാക്കുക.
-6. **Rate plans:** ഓരോ room type-നും ഒരു nightly (day) rate plan വേണം. ഇല്ലെങ്കിൽ day booking 422 തരും.
-7. **Users ഒരിക്കൽ വീണ്ടും login ചെയ്യേണ്ടിവരും:** 7 ദിവസത്തിൽ പഴയ tokens deploy-ഓടെ expire ആകും.
-8. **Real MySQL-ൽ ഒരിക്കൽ നോക്കുക:** ഒരു checkout-ഉം ഒരു post-checkout refund-ഉം ചെയ്ത് trial balance.
-9. **Browser-ൽ ഒരിക്കൽ നോക്കുക:** booking create, guest edit, ID photo, deposit, checkout, cancel, transfer, request inspection, PDF download, QZ Tray print, Reverb live update. CSP block ആണെങ്കിൽ console-ൽ "Content Security Policy" error കാണും.
+2. **`.env`:** remove `GUEST_IDENTITY_DISK=public` if it is set (the default `local` disk is private).
+3. **Frontend build:** `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_REVERB_*` must be set at `next build` time. Otherwise the CSP blocks API calls.
+4. **Expired token cleanup:** there is no scheduler. Add this to the server cron: `php artisan sanctum:prune-expired --hours=24`.
+5. **Permissions:** make sure the roles of staff who reply to AioSell bookings or mark no-shows have `reservation-edit`.
+6. **Rate plans:** every room type needs a nightly (day) rate plan. Without one, a day booking returns 422.
+7. **Users will need to log in again once:** tokens older than 7 days expire on deploy.
+8. **Check once on real MySQL:** do one checkout and one post-checkout refund, then check the trial balance.
+9. **Check once in the browser:** booking create, guest edit, ID photo, deposit, checkout, cancel, transfer, request inspection, PDF download, QZ Tray print, Reverb live update. If the CSP blocks something, the console shows a "Content Security Policy" error.
 
-## Front desk അറിയേണ്ട behaviour മാറ്റങ്ങൾ
+## Behaviour changes the front desk should know
 
-- വീണ്ടും വരുന്ന guest-ന്റെ **ID photo phone search വഴി auto-fill ആകില്ല**. ഓരോ stay-ക്കും പുതിയ photo എടുക്കണം. Name, email, GSTIN പഴയതുപോലെ fill ആകും.
-- Phone search-ന് **കുറഞ്ഞത് 7 അക്കം** വേണം.
-- 5 മിനിറ്റിൽ 5 തവണ password തെറ്റിയാൽ **login കുറച്ചുനേരം block** ആകും.
-- **Checked-out / cancelled booking വീണ്ടും തുറക്കാൻ പറ്റില്ല.**
-- **Deposit കുറയ്ക്കാൻ** payments panel-ൽ **void** ചെയ്യണം. Void-ന് മുമ്പ് confirmation വരും.
-- രണ്ടുപേർ ഒരേ booking ഒരേസമയം മാറ്റിയാൽ രണ്ടാമത്തെയാൾക്ക് *"This reservation was just changed by another action. Reload it and try again."* എന്ന് കാണും. Reload ചെയ്ത് വീണ്ടും ചെയ്യുക.
-- Nightly guest പോകുന്ന ദിവസം **standard check-out time (default 11:00) വരെ** ആ room-ൽ hourly booking എടുക്കാൻ പറ്റില്ല.
-- Aiosell **"Mark no-show"**-ന് confirmation ഉണ്ട്, `reservation-edit` വേണം.
+- A returning guest's **ID photo no longer auto-fills from phone search**. Take a new photo for each stay. Name, email and GSTIN still fill in as before.
+- Phone search needs **at least 7 digits**.
+- After 5 wrong passwords in 5 minutes, **login is blocked for a short while**.
+- **A checked-out or cancelled booking cannot be reopened.**
+- **To reduce a deposit**, **void** the payment in the payments panel. A confirmation appears before the void.
+- If two people change the same booking at the same time, the second one sees *"This reservation was just changed by another action. Reload it and try again."* Reload and try again.
+- On the day a nightly guest leaves, an hourly booking for that room **cannot start before the standard check-out time (default 11:00)**.
+- AioSell **"Mark no-show"** asks for confirmation and needs `reservation-edit`.
 
 ---
 
 ## Phase 0 — Baseline
 
-മാറ്റങ്ങൾ തുടങ്ങുന്നതിന് മുമ്പ് നിലവിലെ booking tests (`tests/Feature/RoomChart`, `tests/Unit/Support`), `npx tsc --noEmit` എന്നിവ run ചെയ്തു. ആദ്യം മുതലേ fail ആകുന്നവ ഏതൊക്കെയെന്ന് അറിയാനായിരുന്നു ഇത്. Code മാറ്റം ഇല്ല.
+Before any change, the existing booking tests (`tests/Feature/RoomChart`, `tests/Unit/Support`) and `npx tsc --noEmit` were run to see what already failed. No code changes.
 
-## Phase 1 — Guest ID documents security
+## Phase 1 — Guest ID document security
 
-**പ്രശ്നം:** ID images (Aadhaar ഉൾപ്പെടെ) public `/storage`-ൽ ആയിരുന്നു. File type ശരിയായി check ചെയ്തിരുന്നില്ല. Guest search-ൽ `%%%%` അയച്ചാൽ ഏതെങ്കിലും ഒരു guest-ന്റെ ID കിട്ടുമായിരുന്നു.
+**Problem:** ID images (including Aadhaar) were stored in the public `/storage`. The file type was not checked properly. Sending `%%%%` to guest search could return some guest's ID.
 
-**മാറ്റം:**
-- **Private storage:** ID images private disk-ൽ, `identities/` folder-ൽ, random file name-ഓടെ save ചെയ്യുന്നു.
-- **File check:** server file-ന്റെ contents നോക്കിയാണ് type check ചെയ്യുന്നത്. JPEG / PNG / WebP മാത്രം, ഒരു file പരമാവധി 8 MB, ഒരു booking-ൽ പരമാവധി 20 എണ്ണം. Extension server തന്നെ തീരുമാനിക്കും.
-- **Signed link:** booking JSON-ൽ പുതിയ `guest_identity_urls` field ഉണ്ട്. ഓരോ link-ഉം 12 മണിക്കൂർ മാത്രം valid. Endpoint: `GET /api/guest-identity-files/{path}`.
-- **ID reuse block:** മറ്റൊരു booking-ന്റെ ID path ഉപയോഗിക്കാൻ പറ്റില്ല.
-- **Guest search:** കുറഞ്ഞത് 7 അക്കം, `%` / `_` escape ചെയ്യുന്നു. Result-ൽ ID documents വരില്ല.
-- **Cleanup:** booking save fail ആയാൽ ആ request-ൽ എഴുതിയ ID files delete ചെയ്യും.
+**Changes:**
+- **Private storage:** ID images are saved on the private disk, in the `identities/` folder, with random file names.
+- **File check:** the server checks the type from the file's contents. JPEG / PNG / WebP only, at most 8 MB per file and 20 per booking. The server chooses the extension.
+- **Signed links:** the booking JSON has a new `guest_identity_urls` field. Each link is valid for 12 hours only. Endpoint: `GET /api/guest-identity-files/{path}`.
+- **No reuse:** another booking's ID path cannot be used.
+- **Guest search:** at least 7 digits; `%` and `_` are escaped. Results do not include ID documents.
+- **Cleanup:** if the booking save fails, ID files written by that request are deleted.
 - **Migration command:** `guest-identities:move-to-private`.
 
-**Files:** `GuestIdentityImageService.php`, `GuestIdentityFileController.php` (പുതിയത്), `BookingController.php`, `config/guest_identity.php`, `routes/api.php`, `routes/console.php`. Frontend: `src/lib/guestIdentityUrl.ts`, Room Chart, Bookings `GuestsTab.tsx`.
+**Files:** `GuestIdentityImageService.php`, `GuestIdentityFileController.php` (new), `BookingController.php`, `config/guest_identity.php`, `routes/api.php`, `routes/console.php`. Frontend: `src/lib/guestIdentityUrl.ts`, Room Chart, Bookings `GuestsTab.tsx`.
 **Tests:** `GuestIdentitySecurityTest.php`, `GuestIdentityImageServiceTest.php`.
 
-## Phase 2 — Login & browser security
+## Phase 2 — Login and browser security
 
 - **Login rate limit** (`AuthController::login()`):
-  - ഒരേ email + IP-ൽ നിന്ന് 5 മിനിറ്റിൽ 5 തവണ തെറ്റിയാൽ block, 429 തരും.
-  - ഒരു IP-ൽ നിന്ന് മിനിറ്റിൽ 30 തെറ്റായ attempts കഴിഞ്ഞാലും block.
-  - ശരിയായ login counter reset ചെയ്യും.
-- **Token expiry:** 7 ദിവസം (`config/sanctum.php`, `SANCTUM_TOKEN_EXPIRATION`). Expire ആയാൽ 401 തരും, user login page-ലേക്ക് പോകും.
-- **Security headers** (`passion/next.config.ts`): Content-Security-Policy, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy` (camera ഈ site-ന് മാത്രം).
+  - 5 wrong attempts from the same email + IP within 5 minutes are blocked with 429.
+  - More than 30 wrong attempts per minute from one IP are also blocked.
+  - A correct login resets the counter.
+- **Token expiry:** 7 days (`config/sanctum.php`, `SANCTUM_TOKEN_EXPIRATION`). An expired token returns 401 and the user is sent to the login page.
+- **Security headers** (`passion/next.config.ts`): Content-Security-Policy, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy` (camera allowed for this site only).
 
 **Tests:** `AuthLoginSecurityTest.php`.
 
-## Phase 3 — Guest data exposure, Aiosell permission
+## Phase 3 — Guest data exposure, AioSell permission
 
-- **Room Chart data:** `view-rooms` മാത്രമുള്ള user-ന് (`reservation-view` ഇല്ലാത്തവർക്ക്) `GET /bookings/chart` ചുരുക്കം മാത്രം തരും: name, booking number, status, dates, head counts. Phone, email, ID, money, notes വരില്ല.
-- **Creator:** booking detail, invoice, transfer എന്നിവയിൽ `creator`-ന്റെ `id`, `name` മാത്രം.
-- **Aiosell reply / no-show:** `reservation-edit` നിർബന്ധം (ഇല്ലെങ്കിൽ 403). Screen-ൽ (`AiosellStayPanel.tsx`) permission ഇല്ലെങ്കിൽ buttons muted ആണ്. No-show-ന് confirmation dialog-ഉം double-submit guard-ഉം ഉണ്ട്.
+- **Room Chart data:** users with only `view-rooms` (no `reservation-view`) get a trimmed booking from `GET /bookings/chart`: name, booking number, status, dates and head counts. No phone, email, ID, money or notes.
+- **Creator:** booking detail, invoice and transfer responses return only the `creator`'s `id` and `name`.
+- **AioSell reply / no-show:** `reservation-edit` is required (otherwise 403). On screen (`AiosellStayPanel.tsx`) the buttons are muted without the permission. No-show has a confirmation dialog and a double-submit guard.
 
 **Tests:** `BookingDataExposureTest.php`.
 
-## Phase 4 — Status rules, server pricing, payment integrity
+## Phase 4 — Status rules, server-side pricing, payment integrity
 
 **Create (`POST /bookings`):**
-- Status ആയി `pending`, `confirmed`, `checked_in` മാത്രം accept ചെയ്യും.
-- Single-room day booking-ന്റെ `total_price`-ഉം server കണക്കാക്കും (rate plan, seasons, extra beds, meals, early-arrival fee, GST). Client total എടുക്കില്ല.
-- `payment_status` server opening deposit നോക്കി set ചെയ്യും.
-- Day booking-ന് room type-ന്റെ nightly rate plan നിർബന്ധം.
-- `room_occupancy` validate ചെയ്യും. `room_ids: []` അയച്ചാൽ crash ആകില്ല.
+- Only `pending`, `confirmed` and `checked_in` are accepted as status.
+- The server also computes `total_price` for single-room day bookings (rate plan, seasons, extra beds, meals, early-arrival fee, GST). The client total is ignored.
+- The server sets `payment_status` from the opening deposit.
+- A day booking requires a nightly rate plan on the room type.
+- `room_occupancy` is validated. Sending `room_ids: []` no longer crashes.
 
 **Edit (`PATCH /bookings/{id}`):**
-- **Status transitions:** `pending ↔ confirmed`, `pending/confirmed → checked_in`, `checked_in → checked_out` മാത്രം. Reopen block. ഇതേ status വീണ്ടും അയച്ചാൽ ഒന്നും നടക്കില്ല.
-- **Close ചെയ്ത booking:** room, dates, counts, rate plan, group, money fields മാറ്റാൻ പറ്റില്ല. Contact, GST, notes, ID മാറ്റാം.
-- **Deposit:** കുറയ്ക്കാൻ പറ്റില്ല (void ഉപയോഗിക്കണം).
-- **Refund:** check-out-ന്റെ കൂടെ മാത്രം, overpayment-ൽ കൂടരുത്.
-- **Room മാറ്റം:** room lock എടുത്ത് availability check ചെയ്യും. Multi-room stay ആണെങ്കിൽ Room Transfer ഉപയോഗിക്കണം.
-- **ഒറ്റ transaction:** availability, ledger, save, checkout journal എല്ലാം ഒരുമിച്ച്. മുമ്പ് payment ആദ്യം എഴുതിയിട്ടായിരുന്നു check.
+- **Status transitions:** only `pending ↔ confirmed`, `pending/confirmed → checked_in` and `checked_in → checked_out`. Reopening is blocked. Sending the same status again does nothing.
+- **Closed bookings:** room, dates, counts, rate plan, group and money fields cannot change. Contact, GST, notes and ID can.
+- **Deposit:** cannot be reduced (use void).
+- **Refund:** only together with check-out, and not more than the overpayment.
+- **Room change:** checked for availability under a room lock. Multi-room stays must use Room Transfer.
+- **One transaction:** availability, ledger, save and checkout journal all happen together. Previously the payment was written before the checks.
 
-**Delete:** payment ഇല്ലാത്ത `pending`/`confirmed` booking മാത്രം delete ചെയ്യാം.
+**Delete:** only `pending`/`confirmed` bookings with no payment can be deleted.
 
 **Tests:** `BookingStatusMoneyIntegrityTest.php`.
 
-## Phase 5 — Row locks & transactions
+## Phase 5 — Row locks and transactions
 
-ഓരോ action-ഉം save ചെയ്യുന്നതിന് തൊട്ടുമുമ്പ് booking row lock ചെയ്യും (`lockForUpdate`). Screen load ചെയ്തശേഷം status, room, dates, early/late time, money എന്നിവയിൽ ഏതെങ്കിലും മാറിയിട്ടുണ്ടെങ്കിൽ action refuse ചെയ്യും.
+Every action locks the booking row (`lockForUpdate`) just before saving. If the status, room, dates, early/late time or money changed after the screen was loaded, the action is refused.
 
-- **Payment / refund / void** (`BookingPaymentLedger`): refund limit കടക്കില്ല. Closed booking-ലേക്ക് payment പോകില്ല. ഒരേ payment രണ്ടുവട്ടം void ആകില്ല.
-- **Cancel, check-out, PATCH, change check-in date:** row lock ചേർത്തു.
-- **Extend (nights / hours), early checkout:** ഒറ്റ transaction ആക്കി. Room lock എടുത്ത ശേഷം availability വീണ്ടും check ചെയ്യും.
-- **Early check-in / late checkout fee:** atomic ആക്കി. Fee നഷ്ടപ്പെടില്ല, രണ്ടുവട്ടം ചേരില്ല.
-- **Room transfer:** രണ്ട് rooms-ഉം booking-ഉം segment-ഉം lock ചെയ്യും. Availability lock-നുള്ളിൽ check ചെയ്യും.
+- **Payment / refund / void** (`BookingPaymentLedger`): refunds cannot exceed the limit, payments cannot go to a closed booking, and the same payment cannot be voided twice.
+- **Cancel, check-out, PATCH, change check-in date:** row lock added.
+- **Extend (nights / hours), early checkout:** made a single transaction. Availability is re-checked after taking the room lock.
+- **Early check-in / late checkout fee:** made atomic. The fee is never lost or added twice.
+- **Room transfer:** locks both rooms, the booking and the segment. Availability is checked inside the lock.
 
 **Tests:** `BookingConcurrencyTest.php`.
 
 ## Phase 6 — Pricing fixes
 
-- **Extend nights, split stay:** rate plan + seasons + extra beds + meals + GST വെച്ച് price കണക്കാക്കും. `room_rates_include_gst` on ആണെങ്കിൽ GST വീണ്ടും കൂട്ടില്ല. Hourly booking-ന് Extend nights ഇല്ല.
-- **Early checkout:** booked rate നിലനിൽക്കും. ഉദാ: ₹6000-ന്റെ 4-night stay 2 nights ആക്കിയാൽ ₹3000.
-- **Room transfer (`apply_new_category`):** nights അനുസരിച്ച് split ചെയ്യും. മുമ്പ് മിനിറ്റ് കണക്കിന് split ചെയ്തിരുന്നതുകൊണ്ട് ~0.67 night അധികം charge ആയിരുന്നു.
-- **Early check-in fee രണ്ടുവട്ടം ചേരുന്നത്:** create-ൽ arrival time കൊടുത്തിട്ടുണ്ടെങ്കിൽ, പിന്നീട് early check-in ചെയ്യുമ്പോൾ difference മാത്രം folio-യിൽ ചേർക്കും.
-- **`percentage` fee type:** rate plan-ന്റെ nightly price-ന്റെ percentage (മുമ്പ് flat ആയി charge ചെയ്തിരുന്നു).
-- **Late checkout:** last room-ന്റെ fee policy. Early check-in first room-ന്റേത്.
-- **Cancellation:** net deposit (`deposit − refund`) വെച്ചാണ് settlement.
-- **Extend hours:** cancelled / checked-out booking-ൽ, അല്ലെങ്കിൽ room on hold / maintenance ആണെങ്കിൽ 422.
+- **Extend nights, split stay:** priced from rate plan + seasons + extra beds + meals + GST. When `room_rates_include_gst` is on, GST is not added again. Hourly bookings cannot use Extend nights.
+- **Early checkout:** the booked rate is kept. Example: a ₹6000 4-night stay shortened to 2 nights becomes ₹3000.
+- **Room transfer (`apply_new_category`):** split by nights. It used to split by minutes, which overcharged about 0.67 night.
+- **Early check-in fee added twice:** if an arrival time was given at create, a later early check-in adds only the difference to the folio.
+- **`percentage` fee type:** a percentage of the rate plan's nightly price (it used to be charged as a flat amount).
+- **Late checkout:** uses the last room's fee policy. Early check-in uses the first room's.
+- **Cancellation:** settled on the net deposit (`deposit − refund`).
+- **Extend hours:** returns 422 for cancelled / checked-out bookings, or when the room is on hold / under maintenance.
 - **Helpers:** `BookingInvoiceRoomStay::timeFeeAmount()`, `nightlyRateForFees()`, `earlyCheckInFolioFeeFromNotes()`.
 
 **Tests:** `BookingStayPricingTest.php`.
 
-## Phase 7 — Integrations & accounting
+## Phase 7 — Integrations and accounting
 
-- **Change check-in date:** save കഴിഞ്ഞാൽ Doorloom-ഉം AioSell-ഉം sync ചെയ്യും.
-- **Checkout-നു ശേഷമുള്ള refund journal** (`BookingRefundPoster`, പുതിയത്, source `booking_refund`):
-  - Overpayment മാത്രം തിരിച്ചുകൊടുക്കുമ്പോൾ journal ഇല്ല.
-  - അതിനു മുകളിലുള്ള ഭാഗം Room Revenue + CGST/SGST reverse ചെയ്ത് tender account credit ചെയ്യും.
-- **Group checkout journal:** ഓരോ departing room-ഉം group-ന്റെ pooled payment-ൽ നിന്ന് എടുക്കും (`BookingCheckoutPoster::postGroupDeparture()`). മുമ്പ് payment ഇല്ലാത്ത rooms Folio AR open ആയി post ആയിരുന്നു.
-- **Hourly vs nightly overlap** (`BookingRoomAvailability`): nightly guest-ന്റെ departure ദിവസം standard check-out (അല്ലെങ്കിൽ late checkout) time വരെ hourly booking block ചെയ്യും. തിരിച്ചും ഇതേ rule. Back-to-back nightly bookings-നെ ഇത് ബാധിക്കില്ല.
+- **Change check-in date:** syncs to Doorloom and AioSell after saving.
+- **Post-checkout refund journal** (`BookingRefundPoster`, new, source `booking_refund`):
+  - Refunding only the overpayment posts no journal.
+  - Any part above that reverses Room Revenue + CGST/SGST and credits the tender account.
+- **Group checkout journal:** each departing room draws from the group's pooled payment (`BookingCheckoutPoster::postGroupDeparture()`). Previously rooms without their own payment were posted as open Folio AR.
+- **Hourly vs nightly overlap** (`BookingRoomAvailability`): on a nightly guest's departure day, hourly bookings are blocked until the standard check-out (or late checkout) time. The same rule applies the other way round. Back-to-back nightly bookings are not affected.
 
 **Tests:** `BookingIntegrationsAccountingTest.php`.
 
-## Phase 8 — Frontend fixes (+ ഒരു backend മാറ്റം)
+## Phase 8 — Frontend fixes (+ one backend change)
 
 **Backend:**
-- `PATCH /bookings/{id}` client അയക്കുന്ന `total_price` ignore ചെയ്യും.
-- Guests, extra beds, rate plan മാറുമ്പോൾ server total കണക്കാക്കും: stored total + (പുതിയ mix-ന്റെ വില − പഴയതിന്റെ വില). ഇതാണ് `repricedTotalForGuestChange()`.
-- Negotiated rate, extension, transfer എന്നിവ total-ൽ അതേപടി നിൽക്കും.
+- `PATCH /bookings/{id}` ignores the `total_price` sent by the client.
+- When guests, extra beds or the rate plan change, the server computes the total: stored total + (new mix price − old mix price). This is `repricedTotalForGuestChange()`.
+- Negotiated rates, extensions and transfers already in the total stay as they are.
 
 **Frontend (Room Chart):**
 - **Double-submit guard:** Add deposit, checkout payment, Extend hours.
 - **Payment void:** confirmation dialog (`BookingPaymentsPanel.tsx`).
-- **Checkout:** preview-ലെ `refund_amount_after` അയക്കും.
-- **Extend preview:** server-ന്റെ `preview-extend` തുക മാത്രം കാണിക്കും (browser estimate-ഉം UTC bug-ഉം മാറ്റി).
-- **Create, guest edit:** `total_price`, `payment_status` അയക്കുന്നില്ല.
-- **Chart:** stale response guard, load fail ആയാൽ toast.
-- **Camera:** page വിട്ടാൽ off ആകും.
-- **Rounding:** deposit amounts, `bill_total` paise-ലേക്ക് round ചെയ്യും.
-- **Cancel dialog:** inputs മാറുമ്പോൾ preview auto-refresh ആകും. Preview വരുന്നതുവരെ Cancel button disabled.
-- **Corrupt `user_data`:** crash ആകില്ല, login-ലേക്ക് പോകും (`layout.tsx`, `portalAuth.ts`).
-- **Suspense:** Room Chart page-ന് boundary ചേർത്തു.
+- **Checkout:** sends `refund_amount_after` from the preview.
+- **Extend preview:** shows only the amount from the server's `preview-extend` (the browser estimate and its UTC bug were removed).
+- **Create, guest edit:** no longer send `total_price` or `payment_status`.
+- **Chart:** stale response guard, and a toast when loading fails.
+- **Camera:** turns off when leaving the page.
+- **Rounding:** deposit amounts and `bill_total` are rounded to paise.
+- **Cancel dialog:** the preview refreshes automatically when inputs change. The Cancel button stays disabled until the preview arrives.
+- **Corrupt `user_data`:** no crash; the user is sent to login (`layout.tsx`, `portalAuth.ts`).
+- **Suspense:** boundary added around the Room Chart page.
 
-## Phase 9 — ചെറിയ backend fixes
+## Phase 9 — Minor backend fixes
 
-- **Chart range:** പരമാവധി 62 days. `end < start` ആണെങ്കിൽ 422.
-- **Walk-in (create as `checked_in`):** arrival day hotel time-ൽ നോക്കും.
-- **Available rooms:** UTC times hotel time-ലേക്ക് മാറ്റും. Create-ലെ അതേ overlap rule ഇവിടെയും (departure-morning ഉൾപ്പെടെ).
-- **Group checkout:** departing rooms എല്ലാം id order-ൽ lock ചെയ്യും. Deadlock ഇല്ല.
-- **Edit fail ആയാൽ** പുതിയ ID uploads delete ചെയ്യും.
-- **`bill_total`:** payment, void endpoints client value ignore ചെയ്യും. `payment_status` server bill വെച്ച് set ചെയ്യും.
-- **Request inspection:** blocks, room status, Activity line എല്ലാം ഒറ്റ transaction-ൽ, row lock-ഓടെ.
-- **Transfer preview:** read-only ആക്കി (മുമ്പ് പഴയ bookings-ൽ ഒരു segment DB-യിൽ എഴുതുമായിരുന്നു).
+- **Chart range:** at most 62 days. `end < start` returns 422.
+- **Walk-in (create as `checked_in`):** the arrival day is checked in hotel time.
+- **Available rooms:** UTC times are converted to hotel time. Uses the same overlap rule as create (including the departure-morning rule).
+- **Group checkout:** locks all departing rooms in id order, so no deadlocks.
+- **Failed edit:** new ID uploads are deleted.
+- **`bill_total`:** the payment and void endpoints ignore the client value. `payment_status` is set from the server's bill.
+- **Request inspection:** blocks, room status and the Activity line are written in one transaction with a row lock.
+- **Transfer preview:** made read-only (it used to write a segment to the DB for older bookings).
 
 **Tests:** `BookingEdgeRulesTest.php`.
 
 ---
 
-## User എടുത്ത തീരുമാനങ്ങൾ
+## Decisions made by the user
 
-| ചോദ്യം | തീരുമാനം |
+| Question | Decision |
 |---|---|
-| Login token expiry | 7 ദിവസം |
-| Checked-out booking reopen | Block |
-| Checkout-നു ശേഷം refund | അനുവദിക്കും, journal entry-ഓടെ |
-| Hourly vs nightly departure ദിവസം | Standard check-out time വരെ block |
-| Early checkout-ൽ `on_hold` release | ഇപ്പോഴത്തെ പോലെ: ഒഴിവാകുന്ന nights-ൽ start ചെയ്യുന്ന എല്ലാ holds-ഉം release ചെയ്യും |
+| Login token expiry | 7 days |
+| Reopening a checked-out booking | Blocked |
+| Refund after checkout | Allowed, with a journal entry |
+| Hourly vs nightly on departure day | Blocked until the standard check-out time |
+| `on_hold` release on early checkout | Unchanged: all holds starting in the freed nights are released |
 
-## ഇപ്പോഴും ഉള്ള പരിമിതികൾ
+## Known limitations
 
-- Post-checkout refund reversal മുഴുവൻ room revenue-ലേക്ക് പോകും. Folio-യിലെ F&B ഭാഗം വേറെ split ചെയ്യുന്നില്ല.
-- Guest edit-ൽ multi-room (split / transfer) stay-യുടെ repricing ഇപ്പോഴത്തെ room-ന്റെ type വെച്ചാണ്.
-- Frontend chart grid-ന് departure-morning rule അറിയില്ല. Room free ആയി കാണിക്കാം, save ചെയ്യുമ്പോൾ server refuse ചെയ്യും. Available-rooms list-ൽ ഇത് ശരിയാണ്.
-- `GET /bookings` paginate ചെയ്തിട്ടില്ല. Bookings screen ഒറ്റയടിക്ക് മുഴുവൻ load ചെയ്യുന്നതുകൊണ്ട് മനഃപൂർവം അങ്ങനെ വിട്ടു.
-- Test DB-യിൽ journal tables ഇല്ല. Accounting tests അവ ആ test-ൽ മാത്രം ഉണ്ടാക്കിയാണ് run ചെയ്യുന്നത്.
+- The post-checkout refund reversal goes entirely to room revenue. The F&B part of the folio is not split out.
+- Guest-edit repricing of a multi-room (split / transfer) stay uses the current room's type.
+- The frontend chart grid does not know the departure-morning rule. A room can show as free and the server refuses it on save. The available-rooms list handles this correctly.
+- `GET /bookings` is not paginated. This was left on purpose because the Bookings screen loads the whole list at once.
+- The test DB has no journal tables. The accounting tests create them inside those tests only.
 
-## Update ചെയ്ത മറ്റ് docs
+## Other docs updated
 
 - `docs/ROOM_CHART.md`, `docs/DOORLOOM.md`, `docs/AIOSELL.md`
 - `PASSION_LARAVEL_ARCHITECTURE.md`, `../passion/PASSION_FRONTEND_ARCHITECTURE.md`
