@@ -660,6 +660,11 @@ trait MigratesRoomChartTestSchema
      */
     private function truncateDateColumnsLikeMysql(string $table, array $columns): void
     {
+        // MySQL rejects writes from a trigger on its own table (error 1442); its DATE columns need no help.
+        if (DB::connection()->getDriverName() !== 'sqlite') {
+            return;
+        }
+
         $sets = implode(', ', array_map(fn(string $c) => "{$c} = date({$c})", $columns));
         foreach (['INSERT', 'UPDATE'] as $event) {
             $name = "trg_{$table}_date_" . strtolower($event);

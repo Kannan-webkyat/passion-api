@@ -29,6 +29,7 @@ use App\Models\RoomParTemplate;
 use App\Models\RoomStatusBlock;
 use App\Models\HousekeepingChecklistItem;
 use App\Models\RoomCleaningRelease;
+use App\Models\RoomCleaningReleaseAudit;
 use App\Models\Setting;
 use App\Models\User;
 use App\Services\BusinessDateService;
@@ -1359,10 +1360,8 @@ class HousekeepingController extends Controller
             ], 422);
         }
 
-        if (! $roomStatusBlock->assigned_to) {
-            return response()->json([
-                'message' => 'Assign a housekeeping staff member before starting cleaning.',
-            ], 422);
+        if ($error = $this->turnoverAssigneeError($roomStatusBlock)) {
+            return $error;
         }
 
         $roomStatusBlock->update(['status' => 'cleaning']);
@@ -1407,6 +1406,7 @@ class HousekeepingController extends Controller
 
         $validated = $request->validate([
             'assigned_to' => 'nullable|exists:users,id',
+            'confirm_reassign' => 'sometimes|boolean',
         ]);
 
         $assignedTo = array_key_exists('assigned_to', $validated) && $validated['assigned_to'] !== null
@@ -1425,6 +1425,18 @@ class HousekeepingController extends Controller
         $previousAssigned = $roomStatusBlock->assigned_to !== null
             ? (int) $roomStatusBlock->assigned_to
             : null;
+
+        if ($roomStatusBlock->status === 'cleaning'
+            && $previousAssigned !== null
+            && $assignedTo !== $previousAssigned
+            && ! ($validated['confirm_reassign'] ?? false)) {
+            $previousName = User::query()->whereKey($previousAssigned)->value('name') ?? 'the assigned staff member';
+
+            return response()->json([
+                'message' => "{$previousName} has already started cleaning this room. Confirm to change the staff.",
+                'requires_confirmation' => true,
+            ], 422);
+        }
 
         $roomStatusBlock->update(['assigned_to' => $assignedTo]);
 
@@ -1465,6 +1477,10 @@ class HousekeepingController extends Controller
 
         if (! in_array($roomStatusBlock->status, ['cleaning', 'dirty'], true)) {
             return response()->json(['message' => 'This room is not in a housekeeping workflow state.'], 422);
+        }
+
+        if ($error = $this->turnoverAssigneeError($roomStatusBlock)) {
+            return $error;
         }
 
         $validated = $request->validate([
@@ -1593,6 +1609,10 @@ class HousekeepingController extends Controller
             ], 422);
         }
 
+        if ($error = $this->turnoverAssigneeError($roomStatusBlock)) {
+            return $error;
+        }
+
         $validated = $request->validate([
             'remarks' => 'nullable|string|max:5000',
         ]);
@@ -1614,6 +1634,7 @@ class HousekeepingController extends Controller
                 $job->remarks = $validated['remarks'];
             }
             $job->finished_by = $userId;
+            $job->finished_at = now();
 
             $job->load('lines');
 
@@ -1735,13 +1756,10 @@ class HousekeepingController extends Controller
                 Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'maintenance']);
                 $job->issues_summary = substr($note, 0, 500);
             } else {
-                // Close HK workflow and release room — no separate "mark available" step from housekeeping.
-                $roomStatusBlock->update([
-                    'status' => 'inspected',
-                    'is_active' => false,
-                ]);
-                Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
-                $job->status = 'completed';
+                // Cleaned rooms wait for a supervisor to approve them (markInspected) before they are sellable for check-in.
+                $roomStatusBlock->update(['status' => 'inspected']);
+                Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'inspected']);
+                $job->status = 'inspected';
             }
 
             $job->save();
@@ -1750,27 +1768,17 @@ class HousekeepingController extends Controller
 
             $release = $this->cleaningAvailability->activeReleaseForRoom((int) $roomStatusBlock->room_id);
             if ($release) {
-                if ($assetProblem) {
-                    $this->cleaningAvailability->markCleaningCompleted($release);
-                } else {
-                    $this->cleaningAvailability->markCleaningCompleted($release);
-                    $this->cleaningAvailability->markRoomReady($release);
-                }
+                $this->cleaningAvailability->markCleaningCompleted($release);
             }
 
             HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
             RoomParStockUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'finish_cleaning');
             if ($assetProblem) {
                 HotelApiSync::afterRoomBlock((int) $roomStatusBlock->room_id);
-            } else {
-                PortalNotifications::recordRoomReady(
-                    (int) $room->id,
-                    $userId ? (int) $userId : null,
-                );
             }
 
             return response()->json([
-                'message' => $assetProblem ? 'Cleaning finished.' : 'Cleaning complete. Room is available.',
+                'message' => $assetProblem ? 'Cleaning finished.' : 'Cleaning complete. Waiting for supervisor approval.',
                 'block' => $roomStatusBlock->fresh()->load('room.roomType'),
                 'job' => $job->fresh()->load('lines'),
             ]);
@@ -1782,11 +1790,20 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * Supervisor step: inspected → available.
+     * Supervisor approval: inspected (cleaned, awaiting approval) → available.
      */
     public function markInspected(Request $request, RoomStatusBlock $roomStatusBlock)
     {
-        $this->allowHousekeepingOperate([self::HK_CLEAN]);
+        $job = HousekeepingJob::where('room_status_block_id', $roomStatusBlock->id)->first();
+        if ($job) {
+            $this->authorizePermissions([self::HK_SUPERVISOR_INSPECTION]);
+        } else {
+            $this->allowHousekeepingOperate([self::HK_CLEAN]);
+        }
+
+        $validated = $request->validate([
+            'remarks' => 'nullable|string|max:5000',
+        ]);
 
         if (! $roomStatusBlock->is_active) {
             return response()->json(['message' => 'This status block is no longer active.'], 422);
@@ -1805,9 +1822,14 @@ class HousekeepingController extends Controller
         $roomStatusBlock->update(['is_active' => false]);
         Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
 
-        $job = HousekeepingJob::where('room_status_block_id', $roomStatusBlock->id)->first();
         if ($job) {
             $job->status = 'completed';
+            $job->approved_by = Auth::id();
+            $job->approved_at = now();
+            $remarks = trim((string) ($validated['remarks'] ?? ''));
+            if ($remarks !== '') {
+                $job->remarks = trim(($job->remarks ? $job->remarks . "\n" : '') . 'Supervisor: ' . $remarks);
+            }
             $job->save();
         }
 
@@ -1818,9 +1840,58 @@ class HousekeepingController extends Controller
             $this->cleaningAvailability->markRoomReady($release);
         }
 
+        PortalNotifications::recordRoomReady(
+            (int) $roomStatusBlock->room_id,
+            Auth::id() ? (int) Auth::id() : null,
+        );
+
         return response()->json([
-            'message' => 'Room inspected and available.',
+            'message' => 'Cleaning approved. Room is available.',
             'block' => $roomStatusBlock->fresh()->load('room.roomType'),
+        ]);
+    }
+
+    /**
+     * Supervisor sends a cleaned turnover room back to the assigned staff (inspected → cleaning).
+     */
+    public function sendBackForRecleaning(Request $request, RoomStatusBlock $roomStatusBlock)
+    {
+        $this->authorizePermissions([self::HK_SUPERVISOR_INSPECTION]);
+
+        $validated = $request->validate([
+            'remarks' => 'nullable|string|max:5000',
+        ]);
+
+        if (! $roomStatusBlock->is_active) {
+            return response()->json(['message' => 'This status block is no longer active.'], 422);
+        }
+
+        $job = HousekeepingJob::where('room_status_block_id', $roomStatusBlock->id)->first();
+        if ($roomStatusBlock->status !== 'inspected' || ! $job || $job->status !== 'inspected') {
+            return response()->json(['message' => 'Room is not awaiting approval.'], 422);
+        }
+
+        $roomStatusBlock->update(['status' => 'cleaning']);
+        Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'cleaning']);
+
+        $job->status = 'in_progress';
+        $job->finished_at = null;
+        $remarks = trim((string) ($validated['remarks'] ?? ''));
+        if ($remarks !== '') {
+            $job->remarks = trim(($job->remarks ? $job->remarks . "\n" : '') . 'Sent back: ' . $remarks);
+        }
+        $job->save();
+
+        $release = $this->cleaningAvailability->activeReleaseForRoom((int) $roomStatusBlock->room_id);
+        if ($release && $release->status === RoomCleaningRelease::STATUS_INSPECTION_PENDING) {
+            $this->cleaningAvailability->markCleaningStarted($release);
+        }
+
+        HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'send_back_cleaning');
+
+        return response()->json([
+            'message' => 'Sent back for re-cleaning.',
+            'block' => $roomStatusBlock->fresh()->load(['room.roomType', 'assignedUser:id,name']),
         ]);
     }
 
@@ -2127,7 +2198,7 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * Backward compatible endpoint: direct cleaning → available.
+     * Backward compatible endpoint: cleaning → awaiting supervisor approval, without the checklist.
      * (Kept for any older UI that still calls mark-cleaned.)
      */
     public function markCleaned(RoomStatusBlock $roomStatusBlock)
@@ -2144,13 +2215,28 @@ class HousekeepingController extends Controller
             ], 422);
         }
 
-        $roomStatusBlock->update(['is_active' => false]);
-        Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'available']);
+        if ($error = $this->turnoverAssigneeError($roomStatusBlock)) {
+            return $error;
+        }
+
+        $userId = Auth::id();
+        $job = HousekeepingJob::firstOrCreate(
+            ['room_status_block_id' => $roomStatusBlock->id],
+            ['room_id' => $roomStatusBlock->room_id, 'status' => 'in_progress', 'started_by' => $userId],
+        );
+        $job->update(['status' => 'inspected', 'finished_by' => $userId, 'finished_at' => now()]);
+        $roomStatusBlock->update(['status' => 'inspected']);
+        Room::where('id', '=', $roomStatusBlock->room_id, 'and')->update(['status' => 'inspected']);
+
+        $release = $this->cleaningAvailability->activeReleaseForRoom((int) $roomStatusBlock->room_id);
+        if ($release) {
+            $this->cleaningAvailability->markCleaningCompleted($release);
+        }
 
         HousekeepingStateUpdated::dispatchIfEnabled([(int) $roomStatusBlock->room_id], 'mark_cleaned');
 
         return response()->json([
-            'message' => 'Room marked as cleaned.',
+            'message' => 'Room marked as cleaned. Waiting for supervisor approval.',
             'block' => $roomStatusBlock->fresh()->load('room.roomType'),
         ]);
     }
@@ -2180,8 +2266,27 @@ class HousekeepingController extends Controller
     }
 
     /**
-     * Pending checkout inspections must be assigned first; only the assignee or a user who can
-     * assign checkout inspections may perform them.
+     * Turnover cleaning (dirty / cleaning blocks) must be assigned first; only that staff member works it.
+     */
+    private function turnoverAssigneeError(RoomStatusBlock $roomStatusBlock): ?JsonResponse
+    {
+        if (! $roomStatusBlock->assigned_to) {
+            return response()->json([
+                'message' => 'Assign a housekeeping staff member before starting cleaning.',
+            ], 422);
+        }
+
+        if ((int) $roomStatusBlock->assigned_to !== (int) Auth::id()) {
+            return response()->json([
+                'message' => 'Only the assigned staff member can clean this room.',
+            ], 403);
+        }
+
+        return null;
+    }
+
+    /**
+     * Pending checkout inspections must be assigned first; only the assignee may perform them.
      */
     private function checkoutInspectionAssigneeError(RoomStatusBlock $roomStatusBlock): ?JsonResponse
     {
@@ -2191,10 +2296,9 @@ class HousekeepingController extends Controller
             ], 422);
         }
 
-        $user = Auth::user();
-        if ((int) $roomStatusBlock->assigned_to !== (int) Auth::id() && ! $user?->can(self::HK_CHECKOUT_ASSIGN)) {
+        if ((int) $roomStatusBlock->assigned_to !== (int) Auth::id()) {
             return response()->json([
-                'message' => 'This checkout inspection is assigned to another staff member.',
+                'message' => 'Only the assigned staff member can complete this checkout inspection.',
             ], 403);
         }
 
@@ -3694,22 +3798,22 @@ class HousekeepingController extends Controller
             $block = $job->block;
             $jobStatusLabel = match ($job->status) {
                 'completed' => 'Completed',
-                'inspected' => 'Awaiting supervisor release',
+                'inspected' => 'Awaiting supervisor approval',
                 'in_progress' => 'Cleaning in progress',
                 default => (string) $job->status,
             };
 
             $inspection = match ($job->status) {
-                'completed' => 'Supervisor released (room available)',
+                'completed' => $job->approved_by ? 'Supervisor approved (room available)' : 'Supervisor released (room available)',
                 'inspected' => $block && $block->is_active && $block->status === 'inspected'
-                    ? 'Pending supervisor sign-off'
+                    ? 'Pending supervisor approval'
                     : ($block ? 'Turnover inspection stage' : null),
                 default => null,
             };
 
             $issuesSummary = trim((string) ($job->issues_summary ?? ''));
             $jobStarted = $job->created_at;
-            $jobCompleted = in_array($job->status, ['completed', 'inspected'], true) ? $job->updated_at : null;
+            $jobCompleted = in_array($job->status, ['completed', 'inspected'], true) ? ($job->finished_at ?? $job->updated_at) : null;
 
             return [
                 'source' => 'turnover',
@@ -3860,6 +3964,7 @@ class HousekeepingController extends Controller
                 'block:id,status,is_active,start_date,end_date',
                 'startedByUser:id,name',
                 'finishedByUser:id,name',
+                'approvedByUser:id,name',
                 'lines.inventoryItem:id,name,sku',
                 'lines.menuItem:id,name',
             ])
@@ -3871,16 +3976,16 @@ class HousekeepingController extends Controller
 
         $jobStatusLabel = match ($job->status) {
             'completed' => 'Completed',
-            'inspected' => 'Awaiting supervisor release',
+            'inspected' => 'Awaiting supervisor approval',
             'in_progress' => 'Cleaning in progress',
             default => (string) $job->status,
         };
 
         $block = $job->block;
         $inspection = match ($job->status) {
-            'completed' => 'Supervisor released (room available)',
+            'completed' => $job->approved_by ? 'Supervisor approved (room available)' : 'Supervisor released (room available)',
             'inspected' => $block && $block->is_active && $block->status === 'inspected'
-                ? 'Pending supervisor sign-off'
+                ? 'Pending supervisor approval'
                 : ($block ? 'Turnover inspection stage' : null),
             default => null,
         };
@@ -3933,7 +4038,11 @@ class HousekeepingController extends Controller
             'status' => (string) $job->status,
             'status_label' => $jobStatusLabel,
             'started_at' => $job->created_at?->toIso8601String(),
-            'completed_at' => $job->updated_at?->toIso8601String(),
+            'completed_at' => ($job->finished_at ?? $job->updated_at)?->toIso8601String(),
+            'approved_by_user' => $job->approvedByUser
+                ? ['id' => (int) $job->approvedByUser->id, 'name' => (string) $job->approvedByUser->name]
+                : null,
+            'approved_at' => $job->approved_at?->toIso8601String(),
             'started_by_user' => $job->startedByUser
                 ? ['id' => (int) $job->startedByUser->id, 'name' => (string) $job->startedByUser->name]
                 : null,
@@ -3991,6 +4100,17 @@ class HousekeepingController extends Controller
 
         $maintenanceNote = $record ? trim((string) ($record->maintenance_note ?? '')) : '';
 
+        $approval = $release->status === RoomCleaningRelease::STATUS_READY
+            ? $release->audits()
+                ->whereIn('action', [
+                    RoomCleaningReleaseAudit::ACTION_INSPECTION_COMPLETED,
+                    RoomCleaningReleaseAudit::ACTION_ROOM_READY,
+                ])
+                ->orderByDesc('id')
+                ->with('user:id,name')
+                ->first()
+            : null;
+
         return [
             'source' => 'cleaning_release',
             'record_id' => (int) $release->id,
@@ -4026,6 +4146,10 @@ class HousekeepingController extends Controller
             'inspection_status' => $release->status === RoomCleaningRelease::STATUS_READY
                 ? 'Supervisor approved'
                 : null,
+            'approved_by_user' => $approval?->user
+                ? ['id' => (int) $approval->user->id, 'name' => (string) $approval->user->name]
+                : null,
+            'approved_at' => $approval?->created_at?->toIso8601String(),
             'window_start' => $release->window_start?->toIso8601String(),
             'window_end' => $release->window_end?->toIso8601String(),
             'checklist' => $record ? $this->checklists->dailyCleaningChecklistForRecord($record) : [],

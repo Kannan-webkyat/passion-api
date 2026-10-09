@@ -6,10 +6,12 @@ use App\Models\BookingSegment;
 use App\Models\RoomStatusBlock;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Checkout / room-move dirty blocks cover the departure day only. A room housekeeping has not finished
- * must stay dirty on later days, so its active dirty/cleaning block is stretched to cover today.
+ * must stay dirty on later days, so its active dirty/cleaning block (or a cleaned block awaiting
+ * supervisor approval) is stretched to cover today.
  * There is no scheduler, so callers run this lazily (room chart, summary, check-in, housekeeping lists).
  * A room a guest is already checked into keeps no stale turnover: that block is closed instead.
  */
@@ -19,9 +21,22 @@ final class HousekeepingTurnoverCarryForward
     {
         $today = Carbon::today()->toDateString();
 
+        $withApproval = Schema::hasTable('housekeeping_jobs');
+
         $stale = RoomStatusBlock::query()
             ->where('is_active', true)
-            ->whereIn('status', ['dirty', 'cleaning'])
+            ->where(function ($q) use ($withApproval) {
+                $q->whereIn('status', ['dirty', 'cleaning'])
+                    ->when($withApproval, fn ($q) => $q->orWhere(function ($awaiting) {
+                        $awaiting->where('status', 'inspected')
+                            ->whereExists(function ($job) {
+                                $job->select(DB::raw(1))
+                                    ->from('housekeeping_jobs')
+                                    ->whereColumn('housekeeping_jobs.room_status_block_id', 'room_status_blocks.id')
+                                    ->where('housekeeping_jobs.status', 'inspected');
+                            });
+                    }));
+            })
             ->where('end_date', '<=', $today)
             ->when($roomId, fn ($q) => $q->where('room_id', $roomId))
             ->get(['id', 'room_id']);

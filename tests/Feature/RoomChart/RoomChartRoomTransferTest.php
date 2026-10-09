@@ -122,10 +122,21 @@ class RoomChartRoomTransferTest extends RoomChartTestCase
         $booked = $this->makeRoom('103');
         $this->makeBooking($booked, $this->day(2), $this->day(5));
 
-        foreach ([$maintenance, $booked] as $room) {
+        $dirty = $this->makeRoom('104');
+        $this->makeBlock($dirty, 'dirty', $this->day(1), $this->day(2));
+
+        $expected = [
+            [$maintenance, 'Room #102 is under maintenance.'],
+            [$booked, 'Room #103 is already booked for the remaining stay dates.'],
+            [$dirty, 'Room #104 is dirty. Housekeeping must clean it before the guest can move in.'],
+        ];
+        foreach ($expected as [$room, $message]) {
+            $this->postJson("/api/bookings/{$booking->id}/preview-room-transfer", $this->payload($room->id))
+                ->assertStatus(422)
+                ->assertJsonPath('message', $message);
             $this->postJson("/api/bookings/{$booking->id}/room-transfer", $this->payload($room->id))
                 ->assertStatus(422)
-                ->assertJsonPath('message', 'Selected room is not available for the remaining stay dates.');
+                ->assertJsonPath('message', $message);
         }
     }
 

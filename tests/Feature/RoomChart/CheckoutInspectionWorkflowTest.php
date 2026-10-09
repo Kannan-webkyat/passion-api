@@ -96,6 +96,9 @@ class CheckoutInspectionWorkflowTest extends RoomChartTestCase
                 $table->string('status')->default('in_progress');
                 $table->unsignedBigInteger('started_by')->nullable();
                 $table->unsignedBigInteger('finished_by')->nullable();
+                $table->timestamp('finished_at')->nullable();
+                $table->unsignedBigInteger('approved_by')->nullable();
+                $table->timestamp('approved_at')->nullable();
                 $table->text('remarks')->nullable();
                 $table->string('issues_summary', 500)->nullable();
                 $table->timestamps();
@@ -328,12 +331,18 @@ class CheckoutInspectionWorkflowTest extends RoomChartTestCase
         $this->assertTrue((bool) $block->fresh()->is_active);
     }
 
-    public function test_supervisor_with_assign_permission_can_perform_any_inspection(): void
+    public function test_supervisor_with_assign_permission_can_view_but_not_perform_another_staff_inspection(): void
     {
         $block = $this->assignedPendingBlock();
 
         $this->as($this->supervisor);
-        $this->postJson("/api/housekeeping/blocks/{$block->id}/checkout-inspection/clear")->assertOk();
+        $this->getJson("/api/housekeeping/rooms/{$this->room->id}/checkout-inspection-context")->assertOk();
+        foreach (['clear', 'validate', 'apply'] as $action) {
+            $this->postJson("/api/housekeeping/blocks/{$block->id}/checkout-inspection/{$action}")
+                ->assertForbidden()
+                ->assertJsonPath('message', 'Only the assigned staff member can complete this checkout inspection.');
+        }
+        $this->assertSame('pending_inspection', $block->fresh()->status);
     }
 
     // ── Inspection context ──────────────────────────────────────────────────

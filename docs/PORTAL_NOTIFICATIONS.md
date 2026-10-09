@@ -15,9 +15,11 @@ The person who triggers a housekeeping or front-office alert is marked read, so 
 | Room released for cleaning | Front office: `view-rooms`, `reservation`, or `reservation-view` |
 | Room cleaned, inspection complete, room ready, re-service approved | Front office, same permissions |
 | New dirty room, checkout inspection requested, re-service requested | Users who can allocate that board, until a staff member is assigned |
-| Task assigned (dirty room, checkout inspection, daily cleaning, re-service) | Only the assigned staff member |
+| Task assigned (dirty room, checkout inspection, daily cleaning, re-service), including staff chosen when the Room Chart releases a room for cleaning | Only the assigned staff member |
 | Laundry requested | `housekeeping-laundry` |
 | Laundry ready or posted to the folio | Front office |
+
+The turnover room-ready alert is sent when a supervisor approves a cleaned room on the Dirty Rooms board, not when the housekeeper finishes. Title "Room {number} is ready", message "{approver} approved the cleaning. Room {number} is available for check-in." Its toast has an "Open" button to the Room Chart (`/reception/roomChart`).
 
 Allocation access is `housekeeping-assignable` for dirty rooms and daily cleaning, and `housekeeping-checkout-inspection-assign` for checkout inspection. Other attendants on the same board do not see a task that was not assigned to them.
 

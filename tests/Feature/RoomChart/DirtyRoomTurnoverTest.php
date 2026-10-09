@@ -43,10 +43,10 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
 
         $this->frontDesk = $this->userWith(['reservation-edit', 'reservation-view'], 'Front Desk');
         $this->supervisor = $this->userWith(
-            [...self::HK_OPERATOR, 'housekeeping-assignable', 'housekeeping-clean-rooms'],
+            [...self::HK_OPERATOR, 'housekeeping-assignable', 'housekeeping-clean-rooms', 'housekeeping-supervisor-inspection'],
             'HK Supervisor',
         );
-        $this->housekeeper = $this->userWith([], 'Meera Housekeeper');
+        $this->housekeeper = $this->userWith(self::HK_OPERATOR, 'Meera Housekeeper');
 
         $hk = Department::query()->create(['name' => 'Housekeeping', 'code' => 'HKP', 'is_active' => true, 'is_housekeeping' => true]);
         $hk->users()->attach($this->housekeeper->id);
@@ -80,6 +80,9 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
                 $table->string('status')->default('in_progress');
                 $table->unsignedBigInteger('started_by')->nullable();
                 $table->unsignedBigInteger('finished_by')->nullable();
+                $table->timestamp('finished_at')->nullable();
+                $table->unsignedBigInteger('approved_by')->nullable();
+                $table->timestamp('approved_at')->nullable();
                 $table->text('remarks')->nullable();
                 $table->string('issues_summary', 500)->nullable();
                 $table->timestamps();
@@ -285,6 +288,89 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $this->assertSame('dirty', $block->fresh()->status);
     }
 
+    public function test_only_the_assigned_staff_member_can_clean_the_room(): void
+    {
+        $room = $this->makeRoom('101');
+        $this->checkOutGuest($room);
+        $block = $this->dirtyBlock($room);
+        $block->update(['assigned_to' => $this->housekeeper->id]);
+        $message = 'Only the assigned staff member can clean this room.';
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")
+            ->assertForbidden()
+            ->assertJsonPath('message', $message);
+        $this->assertSame('dirty', $block->fresh()->status);
+
+        $this->as($this->housekeeper);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/job", ['remarks' => 'x'])->assertForbidden();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertForbidden()->assertJsonPath('message', $message);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-cleaned")->assertForbidden();
+        $this->assertSame('cleaning', $block->fresh()->status);
+        $this->assertTrue($block->fresh()->is_active);
+    }
+
+    public function test_reassigning_a_room_in_cleaning_needs_confirmation(): void
+    {
+        $room = $this->makeRoom('101');
+        $this->checkOutGuest($room);
+        $block = $this->dirtyBlock($room);
+        $block->update(['assigned_to' => $this->housekeeper->id]);
+        $other = $this->userWith(self::HK_OPERATOR, 'Room Attendant 2');
+        Department::query()->where('code', 'HKP')->sole()->users()->attach($other->id);
+
+        $this->as($this->housekeeper);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $other->id])
+            ->assertStatus(422)
+            ->assertJsonPath('requires_confirmation', true)
+            ->assertJsonPath('message', 'Meera Housekeeper has already started cleaning this room. Confirm to change the staff.');
+        $this->assertSame((int) $this->housekeeper->id, (int) $block->fresh()->assigned_to);
+
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $other->id, 'confirm_reassign' => true])
+            ->assertOk();
+        $this->assertSame((int) $other->id, (int) $block->fresh()->assigned_to);
+    }
+
+    public function test_supervisor_can_send_a_cleaned_room_back_for_recleaning(): void
+    {
+        $room = $this->makeRoom('101');
+        $this->checkOutGuest($room);
+        $block = $this->dirtyBlock($room);
+        $block->update(['assigned_to' => $this->housekeeper->id]);
+
+        $this->as($this->housekeeper);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertOk();
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/send-back")->assertForbidden();
+        $this->assertSame('inspected', $this->boardFor($room)['status']);
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/send-back", ['remarks' => 'Bathroom not done'])
+            ->assertOk()
+            ->assertJsonPath('message', 'Sent back for re-cleaning.');
+        $this->assertSame('cleaning', $block->fresh()->status);
+        $this->assertSame('cleaning', $room->fresh()->status);
+        $job = HousekeepingJob::query()->where('room_status_block_id', $block->id)->sole();
+        $this->assertSame('in_progress', $job->status);
+        $this->assertStringContainsString('Sent back: Bathroom not done', (string) $job->remarks);
+
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/send-back")
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Room is not awaiting approval.');
+
+        $this->as($this->housekeeper);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertOk();
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")->assertOk();
+        $this->assertSame('available', $room->fresh()->status);
+    }
+
     public function test_assign_rejects_non_housekeeping_staff_and_users_without_assign_permission(): void
     {
         $room = $this->makeRoom('101');
@@ -338,6 +424,7 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
 
         $this->as($this->supervisor);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $this->housekeeper->id])->assertOk();
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")
             ->assertOk()
             ->assertJsonPath('status', 'cleaning');
@@ -349,7 +436,7 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $this->as($this->frontDesk);
         $this->patchJson("/api/bookings/{$arrival->id}", ['status' => 'checked_in'])->assertStatus(422);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
             'remarks' => 'Linen changed',
             'checklist' => [['key' => 'bed', 'label' => 'Make bed', 'done' => true]],
@@ -359,11 +446,29 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
 
         $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")
             ->assertOk()
-            ->assertJsonPath('message', 'Cleaning complete. Room is available.');
+            ->assertJsonPath('message', 'Cleaning complete. Waiting for supervisor approval.');
+
+        $block->refresh();
+        $this->assertTrue($block->is_active);
+        $this->assertSame('inspected', $block->status);
+        $this->assertSame('inspected', $room->fresh()->status);
+        $this->assertSame('inspected', HousekeepingJob::query()->where('room_status_block_id', $block->id)->value('status'));
+
+        $this->as($this->frontDesk);
+        $this->patchJson("/api/bookings/{$arrival->id}", ['status' => 'checked_in'])
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Room #101 is cleaned and waiting for supervisor approval. Check-in is allowed after approval.');
+
+        $this->as($this->housekeeper);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")->assertForbidden();
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")
+            ->assertOk()
+            ->assertJsonPath('message', 'Cleaning approved. Room is available.');
 
         $block->refresh();
         $this->assertFalse($block->is_active);
-        $this->assertSame('inspected', $block->status);
         $this->assertSame('available', $room->fresh()->status);
         $this->assertSame(2.0, $this->roomQty($room, $soap));
         $this->assertSame(2.0, (float) $soap->fresh()->current_stock);
@@ -375,7 +480,9 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         ]);
         $job = HousekeepingJob::query()->where('room_status_block_id', $block->id)->sole();
         $this->assertSame('completed', $job->status);
-        $this->assertSame((int) $this->supervisor->id, (int) $job->finished_by);
+        $this->assertSame((int) $this->housekeeper->id, (int) $job->finished_by);
+        $this->assertSame((int) $this->supervisor->id, (int) $job->approved_by);
+        $this->assertNotNull($job->approved_at);
         $this->assertNull($this->boardFor($room));
 
         $this->as($this->frontDesk);
@@ -390,7 +497,7 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $soap = $this->stockRoom($room, 'Soap', 1);
         $block->update(['assigned_to' => $this->housekeeper->id]);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
             'amenities' => [['inventory_item_id' => $soap->id, 'qty' => 3]],
@@ -442,11 +549,13 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $block = $this->dirtyBlock($room);
         $block->update(['assigned_to' => $this->housekeeper->id]);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertOk();
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")->assertOk();
 
-        foreach (['start-cleaning', 'finish', 'mark-cleaned', 'mark-inspected'] as $action) {
+        foreach (['start-cleaning', 'finish', 'mark-cleaned', 'mark-inspected', 'send-back'] as $action) {
             $this->postJson("/api/housekeeping/blocks/{$block->id}/{$action}")
                 ->assertStatus(422)
                 ->assertJsonPath('message', 'This status block is no longer active.');
@@ -460,7 +569,7 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $block = $this->dirtyBlock($room);
         $block->update(['assigned_to' => $this->housekeeper->id]);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
             'assets' => [['key' => 'tv', 'label' => 'TV', 'status' => 'needs_repair', 'note' => 'No signal']],
@@ -481,13 +590,17 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $this->deleteJson("/api/room-status-blocks/{$maintenance->id}")->assertNoContent();
         $this->assertSame('cleaning', $room->fresh()->status);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
             'assets' => [['key' => 'tv', 'label' => 'TV', 'status' => 'ok']],
         ])->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")
             ->assertOk()
-            ->assertJsonPath('message', 'Cleaning complete. Room is available.');
+            ->assertJsonPath('message', 'Cleaning complete. Waiting for supervisor approval.');
+        $this->assertSame('inspected', $room->fresh()->status);
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")->assertOk();
         $this->assertSame('available', $room->fresh()->status);
         $this->assertSame(0, RoomStatusBlock::query()->where('room_id', $room->id)->where('is_active', true)->count());
     }
@@ -499,12 +612,17 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $block = $this->dirtyBlock($room);
         $block->update(['assigned_to' => $this->housekeeper->id]);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-cleaned")
             ->assertOk()
-            ->assertJsonPath('message', 'Room marked as cleaned.');
+            ->assertJsonPath('message', 'Room marked as cleaned. Waiting for supervisor approval.');
 
+        $this->assertTrue($block->fresh()->is_active);
+        $this->assertSame('inspected', $room->fresh()->status);
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")->assertOk();
         $this->assertFalse($block->fresh()->is_active);
         $this->assertSame('available', $room->fresh()->status);
         $this->assertNull($this->boardFor($room));
@@ -569,11 +687,15 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
             'is_active' => true,
         ]);
 
-        $this->as($this->supervisor);
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->assertSame(RoomCleaningRelease::STATUS_IN_PROGRESS, $release->fresh()->status);
 
         $this->postJson("/api/housekeeping/blocks/{$block->id}/finish")->assertOk();
+        $this->assertSame(RoomCleaningRelease::STATUS_INSPECTION_PENDING, $release->fresh()->status);
+
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$block->id}/mark-inspected")->assertOk();
         $this->assertSame(RoomCleaningRelease::STATUS_READY, $release->fresh()->status);
         $this->assertFalse((bool) $release->fresh()->is_active);
     }
@@ -627,8 +749,11 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $this->as($this->supervisor);
         $this->assertSame('dirty', $this->boardFor($room)['status']);
         $this->postJson("/api/housekeeping/blocks/{$stale->id}/assign-staff", ['assigned_to' => $this->housekeeper->id])->assertOk();
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$stale->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$stale->id}/finish")->assertOk();
+        $this->as($this->supervisor);
+        $this->postJson("/api/housekeeping/blocks/{$stale->id}/mark-inspected")->assertOk();
 
         $this->as($this->frontDesk);
         $this->patchJson("/api/bookings/{$arrival->id}", ['status' => 'checked_in'])->assertOk();
@@ -676,6 +801,7 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
 
         $this->as($this->supervisor);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $this->housekeeper->id])->assertOk();
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
             'minibar' => [['inventory_item_id' => $item->id, 'menu_item_id' => $menu->id, 'qty' => 2]],
@@ -725,6 +851,7 @@ class DirtyRoomTurnoverTest extends RoomChartTestCase
         $block = $this->dirtyBlock($left);
         $this->as($this->supervisor);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/assign-staff", ['assigned_to' => $this->housekeeper->id])->assertOk();
+        $this->as($this->housekeeper);
         $this->postJson("/api/housekeeping/blocks/{$block->id}/start-cleaning")->assertOk();
         $this->postJson("/api/housekeeping/blocks/{$block->id}/job", [
             'minibar' => [['inventory_item_id' => $item->id, 'menu_item_id' => $menu->id, 'qty' => 1]],

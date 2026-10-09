@@ -61,8 +61,9 @@ final class BookingRoomTransferService
                 || $segmentNow->status !== $ctx['active_segment']->status) {
                 return ['ok' => false, 'message' => 'This reservation was just changed by another action. Reload it and try again.'];
             }
-            if (! self::isRoomAvailable((int) $ctx['to_room']->id, $ctx['transfer_at'], $ctx['segment_end'], (int) $booking->id)) {
-                return ['ok' => false, 'message' => 'Selected room is not available for the remaining stay dates.'];
+            $unavailable = self::roomUnavailableMessage($ctx['to_room'], $ctx['transfer_at'], $ctx['segment_end'], (int) $booking->id);
+            if ($unavailable !== null) {
+                return ['ok' => false, 'message' => $unavailable];
             }
 
             $result = self::applyTransfer($ctx, $preview);
@@ -217,8 +218,9 @@ final class BookingRoomTransferService
             return ['ok' => false, 'message' => 'Cannot transfer: stay segment has already ended.'];
         }
 
-        if (! self::isRoomAvailable($toRoom->id, $transferAt, $segmentEnd, (int) $booking->id)) {
-            return ['ok' => false, 'message' => 'Selected room is not available for the remaining stay dates.'];
+        $unavailable = self::roomUnavailableMessage($toRoom, $transferAt, $segmentEnd, (int) $booking->id);
+        if ($unavailable !== null) {
+            return ['ok' => false, 'message' => $unavailable];
         }
 
         $fromTypeId = (int) ($fromRoom->room_type_id ?? 0);
@@ -307,16 +309,17 @@ final class BookingRoomTransferService
         return $segments->last();
     }
 
-    private static function isRoomAvailable(int $roomId, Carbon $checkInAt, Carbon $checkOutAt, int $excludeBookingId): bool
+    private static function roomUnavailableMessage(Room $room, Carbon $checkInAt, Carbon $checkOutAt, int $excludeBookingId): ?string
     {
         $checkInDate = $checkInAt->toDateString();
         $isMidnight = $checkOutAt->format('H:i:s') === '00:00:00';
         $checkOutDateExclusive = $isMidnight
             ? $checkOutAt->toDateString()
             : $checkOutAt->copy()->addDay()->toDateString();
+        $label = 'Room #' . ($room->room_number ?? (string) $room->id);
 
         $overlap = BookingSegment::query()
-            ->where('room_id', $roomId)
+            ->where('room_id', $room->id)
             ->whereNotIn('status', ['cancelled', 'checked_out', 'completed'])
             ->where('check_in_at', '<', $checkOutAt)
             ->where('check_out_at', '>', $checkInAt)
@@ -324,15 +327,32 @@ final class BookingRoomTransferService
             ->exists();
 
         if ($overlap) {
-            return false;
+            return "{$label} is already booked for the remaining stay dates.";
         }
 
-        return ! RoomStatusBlock::query()
-            ->where('room_id', $roomId)
+        $statuses = RoomStatusBlock::query()
+            ->where('room_id', $room->id)
             ->where('is_active', true)
             ->where('start_date', '<', $checkOutDateExclusive)
             ->where('end_date', '>', $checkInDate)
-            ->exists();
+            ->pluck('status')
+            ->all();
+
+        $messages = [
+            'maintenance' => "{$label} is under maintenance.",
+            'on_hold' => "{$label} is on hold for these dates.",
+            'dirty' => "{$label} is dirty. Housekeeping must clean it before the guest can move in.",
+            'cleaning' => "{$label} is being cleaned. Move the guest after housekeeping finishes.",
+            'pending_inspection' => "{$label} is waiting for inspection. Move the guest after housekeeping clears it.",
+            'inspected' => "{$label} is cleaned and waiting for supervisor approval. Move the guest after approval.",
+        ];
+        foreach ($messages as $status => $message) {
+            if (in_array($status, $statuses, true)) {
+                return $message;
+            }
+        }
+
+        return $statuses === [] ? null : "{$label} is not ready for these dates.";
     }
 
     /**

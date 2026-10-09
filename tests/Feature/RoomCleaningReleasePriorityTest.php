@@ -74,6 +74,53 @@ class RoomCleaningReleasePriorityTest extends TestCase
             ->assertJsonPath('active_release.priority', CleaningReleasePriority::DEEP_CLEAN);
     }
 
+    public function test_room_context_returns_future_dated_release_for_requested_date(): void
+    {
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
+        Sanctum::actingAs($user);
+
+        $room = $this->createRoom();
+        $tomorrow = now()->addDay()->toDateString();
+        $release = $this->createActiveRelease($room, [
+            'release_date' => $tomorrow,
+            'window_start' => $tomorrow.' 12:00:00',
+            'window_end' => $tomorrow.' 14:00:00',
+        ]);
+
+        $this->getJson("/api/housekeeping/rooms/{$room->id}/cleaning-release-context")
+            ->assertOk()
+            ->assertJsonPath('active_release', null);
+
+        $this->getJson("/api/housekeeping/rooms/{$room->id}/cleaning-release-context?date={$tomorrow}")
+            ->assertOk()
+            ->assertJsonPath('active_release.id', $release->id);
+    }
+
+    public function test_release_and_reschedule_are_only_for_today(): void
+    {
+        $user = $this->createUserWithPermission('housekeeping-cleaning-availability');
+        Sanctum::actingAs($user);
+
+        $room = $this->createRoom();
+        $tomorrow = now()->addDay();
+
+        $this->postJson('/api/housekeeping/cleaning-releases', [
+            'room_id' => $room->id,
+            ...$this->releaseWindowPayload($tomorrow),
+        ])
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'A room can be released for cleaning only for today.');
+        $this->assertDatabaseCount('room_cleaning_releases', 0);
+
+        $release = $this->createActiveRelease($room);
+        $this->postJson(
+            "/api/housekeeping/cleaning-releases/{$release->id}/reschedule",
+            $this->releaseWindowPayload($tomorrow),
+        )
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'A room can be released for cleaning only for today.');
+    }
+
     public function test_store_rejects_invalid_priority_with_validation_error(): void
     {
         $user = $this->createUserWithPermission('housekeeping-cleaning-availability');

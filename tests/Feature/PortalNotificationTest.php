@@ -171,6 +171,39 @@ class PortalNotificationTest extends TestCase
         });
     }
 
+    public function test_turnover_approval_notifies_the_front_desk_with_the_approver_and_room_chart_link(): void
+    {
+        config(['broadcasting.default' => 'log']);
+        Event::fake([PortalNotificationCreated::class]);
+        $room = $this->createRoom('207');
+        $supervisor = $this->createUserWithPermission('housekeeping-supervisor-inspection');
+        $supervisor->forceFill(['name' => 'Asha Supervisor'])->save();
+        $desk = $this->createUserWithPermission('reservation-view');
+
+        $id = PortalNotifications::recordRoomReady((int) $room->id, (int) $supervisor->id);
+        $this->app->terminate();
+
+        Event::assertDispatched(PortalNotificationCreated::class, function (PortalNotificationCreated $event) use ($id, $supervisor) {
+            $payload = $event->broadcastWith();
+
+            return $payload['id'] === $id
+                && $payload['audience'] === PortalNotification::AUDIENCE_FRONT_DESK
+                && $payload['actor_user_id'] === (int) $supervisor->id
+                && $payload['href'] === PortalNotifications::HREF_ROOM_CHART;
+        });
+
+        Sanctum::actingAs($desk);
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonPath('unread_count', 1)
+            ->assertJsonPath('notifications.0.title', 'Room 207 is ready')
+            ->assertJsonPath('notifications.0.message', 'Asha Supervisor approved the cleaning. Room 207 is available for check-in.')
+            ->assertJsonPath('notifications.0.href', PortalNotifications::HREF_ROOM_CHART);
+
+        Sanctum::actingAs($supervisor);
+        $this->getJson('/api/notifications')->assertForbidden();
+    }
+
     public function test_missing_notification_is_not_found(): void
     {
         $desk = $this->createUserWithPermission('reservation');
@@ -274,6 +307,43 @@ class PortalNotificationTest extends TestCase
             ->assertJsonPath('unread_count', 1)
             ->assertJsonPath('notifications.0.kind', 'daily_cleaning.released')
             ->assertJsonPath('notifications.0.href', null);
+    }
+
+    public function test_release_with_staff_notifies_only_the_assignee(): void
+    {
+        $releaser = $this->createUserWithPermission('housekeeping-cleaning-availability');
+        $this->ensurePermission('housekeeping-assignable');
+        $releaser->givePermissionTo('housekeeping-assignable');
+        $this->resetPermissionCache();
+        $assignee = $this->createUserWithPermission('housekeeping-daily-room-cleaning');
+        $otherAttendant = $this->createUserWithPermission('housekeeping-daily-room-cleaning');
+        $room = $this->createRoom('201');
+
+        Sanctum::actingAs($releaser);
+        $this->postJson('/api/housekeeping/cleaning-releases', [
+            'room_id' => $room->id,
+            'assigned_to' => $assignee->id,
+            ...$this->releaseWindowPayload(),
+        ])->assertCreated();
+
+        $this->assertDatabaseHas('portal_notifications', [
+            'audience' => 'daily_cleaning',
+            'title' => 'Room 201 assigned to you',
+            'message' => 'You have been assigned daily cleaning for Room 201.',
+            'recipient_user_id' => $assignee->id,
+        ]);
+
+        Sanctum::actingAs($assignee);
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonPath('unread_count', 1)
+            ->assertJsonPath('notifications.0.title', 'Room 201 assigned to you')
+            ->assertJsonPath('notifications.0.href', '/reception/housekeeping/daily-room-cleaning');
+
+        Sanctum::actingAs($otherAttendant);
+        $this->getJson('/api/notifications')
+            ->assertOk()
+            ->assertJsonPath('unread_count', 0);
     }
 
     public function test_reservice_request_is_for_daily_cleaning_and_approval_is_for_the_front_desk(): void

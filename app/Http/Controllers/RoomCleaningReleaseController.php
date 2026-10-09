@@ -56,7 +56,8 @@ class RoomCleaningReleaseController extends Controller
         }
 
         $today = Carbon::today()->toDateString();
-        $activeRelease = $this->availability->activeReleaseForRoom((int) $room->id);
+        $releaseOn = $request->query('date') ? Carbon::parse($request->query('date')) : null;
+        $activeRelease = $this->availability->activeReleaseForRoom((int) $room->id, $releaseOn);
 
         $dirtyBlock = RoomStatusBlock::query()
             ->where('room_id', $room->id)
@@ -94,6 +95,10 @@ class RoomCleaningReleaseController extends Controller
             'is_rerelease' => 'nullable|boolean',
         ]);
 
+        if ($todayOnly = $this->rejectReleaseNotForToday($validated['release_date'])) {
+            return $todayOnly;
+        }
+
         if (! empty($validated['assigned_to'])) {
             $this->assertCanAssignHousekeepingStaff();
         }
@@ -117,6 +122,16 @@ class RoomCleaningReleaseController extends Controller
             $actorId,
         );
 
+        if ($release->assigned_to) {
+            PortalNotifications::recordDailyCleaningAssigned(
+                (int) $release->room_id,
+                $linkedBookingId,
+                $serviceDate,
+                (int) $release->assigned_to,
+                $release->service_type === CleaningServiceClassification::TYPE_OTHER,
+            );
+        }
+
         if ($release->service_type === CleaningServiceClassification::TYPE_OTHER) {
             PortalNotifications::recordReserviceRequested(
                 (int) $release->room_id,
@@ -128,6 +143,17 @@ class RoomCleaningReleaseController extends Controller
         }
 
         return response()->json($release, 201);
+    }
+
+    private function rejectReleaseNotForToday(string $releaseDate): ?\Illuminate\Http\JsonResponse
+    {
+        if (Carbon::parse($releaseDate)->toDateString() === Carbon::today()->toDateString()) {
+            return null;
+        }
+
+        return response()->json([
+            'message' => 'A room can be released for cleaning only for today.',
+        ], 422);
     }
 
     public function extend(Request $request, RoomCleaningRelease $roomCleaningRelease)
@@ -167,6 +193,10 @@ class RoomCleaningReleaseController extends Controller
 
         if (! $roomCleaningRelease->is_active) {
             return response()->json(['message' => 'This release is no longer active.'], 422);
+        }
+
+        if ($todayOnly = $this->rejectReleaseNotForToday($validated['release_date'])) {
+            return $todayOnly;
         }
 
         try {

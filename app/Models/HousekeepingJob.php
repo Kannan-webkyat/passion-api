@@ -13,8 +13,16 @@ class HousekeepingJob extends Model
         'status',
         'started_by',
         'finished_by',
+        'finished_at',
+        'approved_by',
+        'approved_at',
         'remarks',
         'issues_summary',
+    ];
+
+    protected $casts = [
+        'finished_at' => 'datetime',
+        'approved_at' => 'datetime',
     ];
 
     public function block()
@@ -40,5 +48,10 @@ class HousekeepingJob extends Model
     public function finishedByUser()
     {
         return $this->belongsTo(User::class, 'finished_by');
+    }
+
+    public function approvedByUser()
+    {
+        return $this->belongsTo(User::class, 'approved_by');
     }
 }

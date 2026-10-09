@@ -30,6 +30,8 @@ One description per feature. Do not copy it into both repos. All functional docs
 | Doorloom, the online calendar, or stay sync with Doorloom | `docs/DOORLOOM.md` |
 | Daily room cleaning (stay-over cleaning, cleaning releases board) | `docs/DAILY_ROOM_CLEANING.md` |
 | Room cleaning history | `docs/ROOM_CLEANING_HISTORY.md` |
+| Dirty Rooms board (turnover dirty, cleaning, inspected blocks) | `docs/DIRTY_ROOMS.md` |
+| Checkout Inspection board (assign, inspect, clear, apply charges) | `docs/CHECKOUT_INSPECTION.md` |
 | Laundry | `docs/LAUNDRY.md` |
 | Portal notifications (header bell) | `docs/PORTAL_NOTIFICATIONS.md` |
 | Portal sidebar menu search | `docs/PORTAL_MENU_SEARCH.md` |
@@ -41,8 +43,8 @@ One description per feature. Do not copy it into both repos. All functional docs
 | A fact stated in `../passion/PASSION_FRONTEND_ARCHITECTURE.md` | That section, in addition to the module doc |
 | Any module not listed above | None yet — create `docs/<TOPIC>.md` before changing it |
 
-Modules with no doc today include POS orders / KOT / settle / refund, day closing, housekeeping
-turnover (dirty, cleaning, inspected blocks), room stock and par, inventory items and procurement
+Modules with no doc today include POS orders / KOT / settle / refund, day closing, clean rooms
+board, room stock and par, inventory items and procurement
 (purchase orders, vendors, quotes), accounting and journals, users / roles / permissions, login and
 auth, settings, dashboard and reports. The first task that touches one of them creates its doc.
 

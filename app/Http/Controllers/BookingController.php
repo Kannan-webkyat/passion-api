@@ -10,6 +10,7 @@ use App\Models\BookingGroup;
 use App\Models\BookingPayment;
 use App\Models\BookingSegment;
 use App\Models\DailyRoomCleaning;
+use App\Models\HousekeepingJob;
 use App\Models\PosOrder;
 use App\Models\RatePlan;
 use App\Models\Room;
@@ -1166,7 +1167,8 @@ class BookingController extends Controller
                             $w2->where('status', 'inspected')
                                 ->whereNotNull('inspection_snapshot');
                         });
-                });
+                })
+                ->with('assignedUser:id,name');
         }, 'cleaningReleases' => function ($q) use ($start, $end) {
             $q->whereDate('release_date', '>=', $start->toDateString())
                 ->whereDate('release_date', '<=', $end->toDateString())
@@ -2474,6 +2476,18 @@ class BookingController extends Controller
 
                 return response()->json([
                     'message' => "Room #{$room?->room_number} is currently marked Dirty. Complete housekeeping service or assign another clean room before check-in.",
+                ], 422);
+            }
+
+            $inspectedIds = $blocking->where('status', 'inspected')->pluck('id')->all();
+            if ($inspectedIds !== [] && HousekeepingJob::query()
+                ->whereIn('room_status_block_id', $inspectedIds)
+                ->where('status', 'inspected')
+                ->exists()) {
+                $room = Room::find($roomId, ['room_number']);
+
+                return response()->json([
+                    'message' => "Room #{$room?->room_number} is cleaned and waiting for supervisor approval. Check-in is allowed after approval.",
                 ], 422);
             }
         }

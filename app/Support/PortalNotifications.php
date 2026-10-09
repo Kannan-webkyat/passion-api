@@ -21,6 +21,8 @@ final class PortalNotifications
 
     public const HREF_LAUNDRY_REQUESTS = '/reception/housekeeping/laundry/requests';
 
+    public const HREF_ROOM_CHART = '/reception/roomChart';
+
     public static function enabled(): bool
     {
         return Schema::hasTable('portal_notifications')
@@ -246,14 +248,16 @@ final class PortalNotifications
     public static function recordRoomReady(int $roomId, ?int $actorUserId): ?int
     {
         $label = self::roomLabel($roomId);
+        $approver = $actorUserId ? trim((string) User::query()->whereKey($actorUserId)->value('name')) : '';
 
         return self::record(
             PortalNotification::AUDIENCE_FRONT_DESK,
             PortalNotification::KIND_ROOM_READY,
             $label.' is ready',
-            'Turnover cleaning is finished. '.$label.' is available.',
+            ($approver !== '' ? $approver.' approved the cleaning. ' : 'Cleaning approved. ')
+                .$label.' is available for check-in.',
             self::payload($roomId, self::roomNumber($roomId), null, null, null),
-            null,
+            self::HREF_ROOM_CHART,
             $actorUserId,
         );
     }

@@ -75,4 +75,32 @@ class RoomCleaningReleaseClassificationTest extends TestCase
             ->assertJsonPath('service_subtype', CleaningServiceClassification::SUBTYPE_RERELEASE)
             ->assertJsonPath('service_label', 'Requested re-service');
     }
+
+    public function test_cleaning_release_history_detail_names_the_approver(): void
+    {
+        $viewer = $this->createUserWithPermission('housekeeping-daily-room-cleaning');
+        $supervisor = $this->createUserWithPermission('housekeeping-supervisor-inspection');
+        Sanctum::actingAs($viewer);
+
+        $room = $this->createRoom();
+        $release = $this->createActiveRelease($room, [
+            'status' => RoomCleaningRelease::STATUS_READY,
+            'is_active' => false,
+            'completed_at' => now(),
+        ]);
+        RoomCleaningReleaseAudit::query()->create([
+            'room_cleaning_release_id' => $release->id,
+            'action' => RoomCleaningReleaseAudit::ACTION_INSPECTION_COMPLETED,
+            'user_id' => $supervisor->id,
+            'created_at' => now(),
+        ]);
+
+        $this->getJson(
+            "/api/housekeeping/rooms/{$room->id}/cleaning-history/detail?source=cleaning_release&id={$release->id}",
+        )
+            ->assertOk()
+            ->assertJsonPath('approved_by_user.id', $supervisor->id)
+            ->assertJsonPath('approved_by_user.name', $supervisor->name)
+            ->assertJsonPath('inspection_status', 'Supervisor approved');
+    }
 }

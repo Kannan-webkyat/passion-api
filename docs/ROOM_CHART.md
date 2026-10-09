@@ -34,7 +34,7 @@ The screen loads `GET /bookings/chart?start=&end=`, `GET /bookings/summary?date=
 - Window: Today, Week (7 days), Month (30 days), or Custom.
 - Filters: room type, floor, status.
 - Summary tiles: total rooms, available, occupied, reserved, maintenance, on hold, dirty, cleaning, for the first day shown, plus today's check-ins and check-outs.
-- Each cell combines the room's booked stays with its room blocks. Block statuses: `maintenance`, `on_hold`, `dirty`, `cleaning`, `inspected`, `pending_inspection`. A `confirmed` booking shows as "Reserved".
+- Each cell combines the room's booked stays with its room blocks. Block statuses: `maintenance`, `on_hold`, `dirty`, `cleaning`, `inspected`, `pending_inspection`. A `confirmed` booking shows as "Reserved". A free dirty room shows "Dirty · After cleaning". A free room being cleaned shows "Cleaning" with the assigned staff name ("In progress" when no one is assigned); its tooltip reads "Cleaning in progress by {name}. Reservations allowed; check-in after housekeeping marks the room ready." The chart's status blocks carry `assigned_user` (`id`, `name`) for this. A free room whose turnover cleaning is finished and waiting for supervisor approval (an active `inspected` block with no checkout inspection snapshot) shows "Cleaned · Awaiting approval"; its tooltip reads "Cleaned — waiting for supervisor approval. Reservations allowed; check-in after approval." and the room-status banner reads "Room Status: Awaiting Approval".
 - Who is in a room comes from booked stays (`booking_segments`) and room blocks, not from `rooms.status`.
 - While Doorloom is on, the chart also reads `GET /doorloom/calendar` and shows a note when Doorloom has stop-sell or fewer free rooms on some nights (see `DOORLOOM.md`).
 
@@ -97,7 +97,7 @@ Rules on `PATCH /bookings/{id}`:
 `PUT /bookings/{id}` with `status: checked_in`.
 
 1. Only on the arrival date (an hourly stay uses its start time). A booking created straight as `checked_in` (walk-in) follows the same rule, with the arrival read in hotel time.
-2. Refused while the room has an active `dirty` or `cleaning` block today. The screen shows the dirty-room dialog.
+2. Refused while the room has an active `dirty` or `cleaning` block today. Also refused while turnover cleaning is finished but not yet approved by a supervisor: "Room #X is cleaned and waiting for supervisor approval. Check-in is allowed after approval." The screen shows the dirty-room dialog.
 3. The stay and every room in it become occupied. Other screens and tabs refresh.
 
 **Early check-in** (`POST /bookings/{id}/early-checkin`) and **late checkout** (`POST /bookings/{id}/late-checkout`) record the time and add the room-type fee (per hour, per minute, flat, or `percentage` of the rate plan's nightly price, after the free buffer) to the folio. They do not change status. Early check-in uses the first room's policy and late checkout the last room's, so a split or transferred stay is charged by the room the guest is in at that time. When the booking was created with an early arrival time, that fee is already in the room total, so early check-in adds only the difference to the folio; the audit line shows the full fee and "Added to folio: ₹X".
@@ -112,7 +112,7 @@ Every action that changes money shows a preview first. The figures in the previe
 | Extend nights | `preview-extend` → `extend` | Day stays only; hourly stays use Extend hours. Added nights are priced from the rate plan with seasons, extra beds, meals and GST (no GST added when room rates include GST). A clash with another stay returns 409 with the conflicting booking. |
 | Extend hours | `preview-extend-hours` → `extend-hours` | Hourly stays that are not cancelled or checked out. Refused when the room is on hold or under maintenance during the added time. |
 | Split stay | `split-stay` | Starts a new segment in another room from the current checkout, priced with seasons and GST like extend. The new room is checked for availability under a lock. |
-| Room transfer | `preview-room-transfer` → `room-transfer`, history `room-transfers` | Same category or upgrade. Rate: `keep_existing` or `apply_new_category`. With a new rate, the old room keeps its share for the nights already used and the new room is priced for the remaining nights. A transfer of an in-house guest makes the old room dirty. |
+| Room transfer | `preview-room-transfer` → `room-transfer`, history `room-transfers` | Same category or upgrade. Rate: `keep_existing` or `apply_new_category`. With a new rate, the old room keeps its share for the nights already used and the new room is priced for the remaining nights. A transfer of an in-house guest makes the old room dirty. The new room must have no other booking and no active block (dirty, cleaning, pending inspection, maintenance, on hold) for the moved dates; the refusal names the room and the reason, e.g. "Room #207 is dirty. Housekeeping must clean it before the guest can move in." |
 | Early checkout | `preview-early-checkout` → `early-checkout` | Prices the shorter stay at the booked rate: the stored total is scaled by the shorter dates' share of the plan price, so a negotiated rate is kept. |
 | Cancel | `preview-cancellation` → `cancel` | `pending` or `confirmed` only. The fee follows the cancellation settings and is settled against the deposit net of refunds already made. A fee larger than that needs the balance waived. A refund needs a method. The room is freed and holds on those dates end. |
 
@@ -149,7 +149,9 @@ Extend (nights and hours), early checkout, change check-in date and room transfe
 
 ## Release for cleaning
 
-From the panel, reception releases an occupied or dirty room to housekeeping with a time window, priority and service type (`POST /housekeeping/cleaning-releases`, reschedule `POST /housekeeping/cleaning-releases/{id}/reschedule`). Details are in the housekeeping workflow.
+From the panel, reception releases an occupied or dirty room to housekeeping with a time window, priority and service type (`POST /housekeeping/cleaning-releases`, reschedule `POST /housekeeping/cleaning-releases/{id}/reschedule`). A release is for today only. The release date in the dialog is fixed to today, and both endpoints return 422 "A room can be released for cleaning only for today." for any other `release_date`. The Release, Update, Reschedule and Release again buttons, and the release action on the dirty-room banner and in Stay modifications, appear only when the selected chart day is today; on other days the banner says release is available only for today. The room-status banner offers Release for Cleaning only while the room is dirty, not once cleaning has started. Its "Open Housekeeping Workflow" link appears only for users with `housekeeping-dirty-rooms` or `housekeeping-cleaning-tasks`.
+
+The dialog loads `GET /housekeeping/rooms/{room}/cleaning-release-context?date=` with today's date. When the room has an active release, "Update release" opens it with its saved window, priority and remarks and saves through reschedule; assigned staff stays as it is. A release saved with staff sends that person a "Room {number} assigned to you" notification. The release banner shows the assigned staff, or "Unassigned". Details are in the housekeeping workflow.
 
 ## Hotel APIs
 

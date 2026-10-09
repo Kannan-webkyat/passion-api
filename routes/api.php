@@ -149,6 +149,7 @@ Route::middleware(['auth:sanctum', 'active'])->group(function () {
     Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/validate', [HousekeepingController::class, 'checkoutInspectionValidate']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/checkout-inspection/apply', [HousekeepingController::class, 'checkoutInspectionApply']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-inspected', [HousekeepingController::class, 'markInspected']);
+    Route::post('housekeeping/blocks/{roomStatusBlock}/send-back', [HousekeepingController::class, 'sendBackForRecleaning']);
     Route::post('housekeeping/blocks/{roomStatusBlock}/mark-cleaned', [HousekeepingController::class, 'markCleaned']);
     Route::get('housekeeping/daily-cleaning', [HousekeepingController::class, 'dailyCleaningIndex']);
     Route::post('housekeeping/daily-cleaning/status', [HousekeepingController::class, 'dailyCleaningUpdateStatus']);

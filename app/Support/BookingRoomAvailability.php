@@ -3,6 +3,7 @@
 namespace App\Support;
 
 use App\Models\BookingSegment;
+use App\Models\HousekeepingJob;
 use App\Models\Room;
 use App\Models\RoomStatusBlock;
 use App\Models\RoomType;
@@ -162,6 +163,14 @@ final class BookingRoomAvailability
             if (in_array($block->status, self::CHECKIN_ONLY_BLOCK_STATUSES, true)) {
                 return "Room #{$room->room_number} requires cleaning before check-in.";
             }
+        }
+
+        $inspectedIds = collect($blocks)->where('status', 'inspected')->pluck('id')->all();
+        if ($inspectedIds !== [] && HousekeepingJob::query()
+            ->whereIn('room_status_block_id', $inspectedIds)
+            ->where('status', 'inspected')
+            ->exists()) {
+            return "Room #{$room->room_number} is cleaned and waiting for supervisor approval. Check-in is allowed after approval.";
         }
 
         return null;
